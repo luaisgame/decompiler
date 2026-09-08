@@ -43,8 +43,7 @@ async def decompile(ctx, place_id: str, game_id: str = None):
             except Exception as e:
                 print(f"[DEBUG] Failed to update owner DM: {e}")
 
-    from .core import _on_status_update as _global_on_status_update
-    import .core as core_module
+    from . import core as core_module
     core_module._on_status_update = on_status_update
 
     await run_decompile_logic(prefix_send, ctx.author, ctx.guild, ctx.channel, place_id, game_id, is_ephemeral=False)
@@ -106,7 +105,7 @@ async def decompile_slash(interaction: discord.Interaction, place_id: str, game_
             except Exception as e:
                 print(f"[DEBUG] Failed to update owner DM: {e}")
 
-    import .core as core_module
+    from . import core as core_module
     core_module._on_status_update = on_status_update
 
     await run_decompile_logic(
