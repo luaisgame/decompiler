@@ -1052,7 +1052,10 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
 
     await asyncio.sleep(0.5)
 
-    out_path = os.path.join(decompile_dir, "game.rbxlx")
+    is_rbxl = target_name.lower().endswith(".rbxl")
+    file_format = "rbxl" if is_rbxl else "rbxlx"
+    out_ext = ".rbxl" if is_rbxl else ".rbxlx"
+    out_path = os.path.join(decompile_dir, f"game{out_ext}")
 
     if SKIP_PROCESSFILE:
         print("[DEBUG] SKIP_PROCESSFILE is enabled; skipping oracle-postprocess post-processor.")
@@ -1069,7 +1072,7 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
                 try:
                     print(f"[DEBUG] Running oracle-postprocess (Attempt {attempt}/{max_retries})...")
                     proc_task = await asyncio.create_subprocess_exec(
-                        "cmd.exe", "/c", proc_script, "-k", ORACLE_KEY, "-v", "2", "rbxlx", "game.rbxlx",
+                        "cmd.exe", "/c", proc_script, "-k", ORACLE_KEY, "-v", "2", file_format, f"game{out_ext}",
                         cwd=decompile_dir,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.STDOUT,
