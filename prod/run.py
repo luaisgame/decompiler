@@ -3,32 +3,30 @@ import sys
 import os
 import time
 import urllib.request
-import json
+import shutil
 
 REPO = "luaisgame/decompiler"
 BRANCH = "main"
-GITHUB_API = f"https://api.github.com/repos/{REPO}"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WORK_DIR = os.path.join(SCRIPT_DIR, "bot_code")
 
 FILES_TO_FETCH = [
     "bot.py",
-    "commands/__init__.py",
-    "commands/core.py",
-    "commands/setup.py",
-    "commands/blacklist.py",
-    "commands/blacklistuser.py",
-    "commands/blacklistserver.py",
-    "commands/cookie.py",
-    "commands/decompile.py",
-    "commands/help.py",
+    "core.py",
+    "setup.py",
+    "blacklist.py",
+    "blacklistuser.py",
+    "blacklistserver.py",
+    "cookie.py",
+    "decompile.py",
+    "help.py",
 ]
 
 def fetch_file(path):
     url = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/{path}"
     try:
         req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:
             return resp.read().decode("utf-8")
     except Exception as e:
         print(f"[FETCH] Failed to fetch {path}: {e}")
@@ -36,8 +34,8 @@ def fetch_file(path):
 
 def sync_from_github():
     print("[SYNC] Fetching latest code from GitHub...")
-    os.makedirs(os.path.join(WORK_DIR, "commands"), exist_ok=True)
-    
+    os.makedirs(WORK_DIR, exist_ok=True)
+
     for path in FILES_TO_FETCH:
         content = fetch_file(path)
         if content is None:
@@ -47,14 +45,13 @@ def sync_from_github():
         with open(local_path, "w", encoding="utf-8") as f:
             f.write(content)
         print(f"[SYNC] {path}")
-    
+
     env_src = os.path.join(SCRIPT_DIR, ".env")
     env_dst = os.path.join(WORK_DIR, ".env")
     if os.path.exists(env_src):
-        import shutil
         shutil.copy2(env_src, env_dst)
         print("[SYNC] .env copied")
-    
+
     print("[SYNC] All files synced.")
     return True
 
@@ -80,9 +77,9 @@ def main():
             print("[RUNNER] Sync failed. Retrying in 5 seconds...")
             time.sleep(5)
             continue
-        
+
         process = run_bot()
-        
+
         try:
             process.wait()
         except KeyboardInterrupt:
@@ -90,10 +87,10 @@ def main():
             process.terminate()
             process.wait()
             break
-        
+
         exit_code = process.returncode
         print(f"[RUNNER] Bot exited with code {exit_code}")
-        
+
         print("[RUNNER] Restarting in 3 seconds...")
         time.sleep(3)
 

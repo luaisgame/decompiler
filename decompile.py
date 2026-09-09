@@ -1,6 +1,7 @@
 import discord
 from discord import app_commands
-from .core import (bot, run_decompile_logic, load_allowed_channels, BOT_OWNER_ID,
+import core as core_module
+from core import (bot, run_decompile_logic, load_allowed_channels, BOT_OWNER_ID,
                    set_decompile_disabled, current_active_data, update_status)
 
 @bot.command()
@@ -8,13 +9,10 @@ async def decompile(ctx, place_id: str, game_id: str = None):
     if ctx.guild:
         allowed_channels = load_allowed_channels()
         allowed_channel_id = allowed_channels.get(ctx.guild.id)
-        
         if allowed_channel_id is not None:
             active_id = ctx.channel.id
-            
             if isinstance(ctx.channel, discord.Thread) and ctx.channel.parent_id:
                 active_id = ctx.channel.parent_id
-
             if active_id != allowed_channel_id:
                 await ctx.send(f"This command can only be used in <#{allowed_channel_id}>.")
                 return
@@ -43,11 +41,8 @@ async def decompile(ctx, place_id: str, game_id: str = None):
             except Exception as e:
                 print(f"[DEBUG] Failed to update owner DM: {e}")
 
-    from . import core as core_module
     core_module._on_status_update = on_status_update
-
     await run_decompile_logic(prefix_send, ctx.author, ctx.guild, ctx.channel, place_id, game_id, is_ephemeral=False)
-
     core_module._on_status_update = None
 
 @bot.command()
@@ -65,13 +60,10 @@ async def decompile_slash(interaction: discord.Interaction, place_id: str, game_
     if interaction.guild:
         allowed_channels = load_allowed_channels()
         allowed_channel_id = allowed_channels.get(interaction.guild.id)
-        
         if allowed_channel_id is not None:
             active_id = interaction.channel_id
-            
             if isinstance(interaction.channel, discord.Thread) and interaction.channel.parent_id:
                 active_id = interaction.channel.parent_id
-
             if active_id != allowed_channel_id:
                 await interaction.response.send_message(
                     f"This command can only be used in <#{allowed_channel_id}>.",
@@ -105,26 +97,23 @@ async def decompile_slash(interaction: discord.Interaction, place_id: str, game_
             except Exception as e:
                 print(f"[DEBUG] Failed to update owner DM: {e}")
 
-    from . import core as core_module
     core_module._on_status_update = on_status_update
-
     await run_decompile_logic(
-        slash_send, 
-        interaction.user, 
-        interaction.guild, 
-        interaction.channel, 
-        place_id, 
-        game_id, 
+        slash_send,
+        interaction.user,
+        interaction.guild,
+        interaction.channel,
+        place_id,
+        game_id,
         is_ephemeral=False
     )
-
     core_module._on_status_update = None
 
 @bot.tree.command(name="decompile-off", description="Bot-owner: disable decompiling everywhere")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def decompile_off_slash(interaction: discord.Interaction):
-    from .core import user_has_role, BLACKLIST_ROLE_IDS
+    from core import user_has_role, BLACKLIST_ROLE_IDS
     if not await user_has_role(interaction.user, BLACKLIST_ROLE_IDS):
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
@@ -141,7 +130,7 @@ async def decompile_off_slash(interaction: discord.Interaction):
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def decompile_on_slash(interaction: discord.Interaction):
-    from .core import user_has_role, BLACKLIST_ROLE_IDS
+    from core import user_has_role, BLACKLIST_ROLE_IDS
     if not await user_has_role(interaction.user, BLACKLIST_ROLE_IDS):
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return

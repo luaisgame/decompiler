@@ -28,7 +28,6 @@ else:
     _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(_BASE_DIR, ".env"))
 
-# --- Cloudflare R2 Configuration (loaded from .env) ---
 R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "")
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "")
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY", "")
@@ -36,17 +35,14 @@ R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "")
 R2_PUBLIC_DOMAIN = os.getenv("R2_PUBLIC_DOMAIN", "")
 ROBLOX_COOKIE = os.getenv("ROBLOX_COOKIE", "")
 
-# --- Blacklist (game moderation) Role Configuration ---
 BLACKLIST_ROLE_IDS = {}
 for _g, _v in json.loads(os.getenv("BLACKLIST_ROLE_IDS", "{}")).items():
     BLACKLIST_ROLE_IDS[int(_g)] = [int(_v)] if isinstance(_v, int) else [int(x) for x in _v]
 
-# --- Queue Priority Role Configuration ---
 QUEUE_ROLE_IDS = {}
 for _g, _v in json.loads(os.getenv("QUEUE_ROLE_IDS", "{}")).items():
     QUEUE_ROLE_IDS[int(_g)] = [int(_v)] if isinstance(_v, int) else [int(x) for x in _v]
 
-# File database setup
 BASE_DIR = _BASE_DIR
 blacklistedtxt = os.path.join(BASE_DIR, "blacklistedgames.txt")
 user_blacklisted_file = os.path.join(BASE_DIR, "blacklistedusers.txt")
@@ -54,7 +50,6 @@ server_blacklisted_file = os.path.join(BASE_DIR, "blacklistedservers.txt")
 channels_file = os.path.join(BASE_DIR, "allowed_channels.txt")
 cookies_file = os.path.join(BASE_DIR, "cookies.txt")
 
-# --- Cookie Management System ---
 active_cookie_index = 0
 default_cookie_index = 0
 
@@ -180,7 +175,6 @@ active_events = None
 current_active_data = None
 _on_status_update = None
 
-# Global decompile kill-switch (toggled via /decompile-off and /decompile-on, persisted to disk)
 DISABLED_FLAG_FILE = os.path.join(BASE_DIR, "decompile_disabled.txt")
 decompile_disabled = os.path.exists(DISABLED_FLAG_FILE)
 
@@ -213,36 +207,23 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID", "0"))
 ORACLE_KEY = os.getenv("ORACLE_KEY", "")
 
-# ==========================================
-#         ROLE PERMISSION HELPERS
-# ==========================================
-
 async def user_has_role(user: discord.User | discord.Member, role_ids: dict) -> bool:
     user_id = user.id
-
     for guild_id, target_role_id in role_ids.items():
         guild = bot.get_guild(guild_id)
         if not guild:
             continue
-
         targets = target_role_id if isinstance(target_role_id, list) else [target_role_id]
-
         member = guild.get_member(user_id)
         if member and any(role.id in targets for role in member.roles):
             return True
-
         try:
             member = await guild.fetch_member(user_id)
         except (discord.HTTPException, discord.NotFound):
             continue
         if member and any(role.id in targets for role in member.roles):
             return True
-
     return False
-
-# ==========================================
-#               QUEUE SYSTEM
-# ==========================================
 
 queue_list = []
 queue_counter = 0
@@ -278,10 +259,8 @@ async def _renumber_queue(notify_bumps: bool = False):
 async def enqueue_decompile_task(send_func, user: discord.User | discord.Member, guild, channel, place_id: str, game_id: str, is_ephemeral: bool, on_status_update=None):
     global queue_counter, current_active_data
     queue_counter += 1
-
     author_id = user.id
     is_priority = await user_has_role(user, QUEUE_ROLE_IDS)
-
     item = QueueItem(
         is_priority=is_priority,
         counter=queue_counter,
@@ -298,14 +277,12 @@ async def enqueue_decompile_task(send_func, user: discord.User | discord.Member,
             "last_pos": None
         }
     )
-
     if is_decompiling or len(queue_list) > 0:
         if is_priority and is_decompiling and len(queue_list) == 0 and current_active_data and not current_active_data.get("is_priority") and not current_active_data.get("aborted"):
             print("[DEBUG] Priority preemption: pausing active non-priority job.")
             current_active_data["aborted"] = True
             _terminate_live_roblox()
             await update_status(current_active_data["info_msg"], current_active_data["embed"], "paused")
-
             queue_counter += 1
             paused_item = QueueItem(
                 is_priority=current_active_data.get("is_priority", False),
@@ -336,19 +313,16 @@ async def enqueue_decompile_task(send_func, user: discord.User | discord.Member,
                     insert_at = i
                     break
             queue_list.insert(insert_at, item)
-
             await _renumber_queue(notify_bumps=True)
             pos = item.task_data["last_pos"]
             await send_msg(send_func, f"<@{author_id}> Added to Priority Queue at position **{pos}**.", ephemeral=is_ephemeral)
         else:
             queue_list.append(item)
-
             await _renumber_queue(notify_bumps=True)
             pos = item.task_data["last_pos"]
             await send_msg(send_func, f"<@{author_id}> Added to Queue at position **{pos}**.", ephemeral=is_ephemeral)
     else:
         queue_list.append(item)
-
     _get_queue_event().set()
     await item.task_data["future"]
 
@@ -358,7 +332,6 @@ async def decompile_queue_worker():
             await _get_queue_event().wait()
             _get_queue_event().clear()
             continue
-
         item = queue_list.pop(0)
         await _renumber_queue(notify_bumps=False)
         data = item.task_data
@@ -382,14 +355,9 @@ async def decompile_queue_worker():
             if not data["future"].done():
                 data["future"].set_result(True)
 
-# ==========================================
-#      PERSISTENT USER BLACKLIST SYSTEM
-# ==========================================
-
 def load_blacklisted_users() -> dict:
     blacklisted = {}
     now = time.time()
-    
     if os.path.exists(user_blacklisted_file):
         with open(user_blacklisted_file, "r") as f:
             for line in f:
@@ -399,14 +367,11 @@ def load_blacklisted_users() -> dict:
                         uid, expire_time = line.split(",", 1)
                         uid = int(uid.strip())
                         expire_time = float(expire_time.strip())
-                        
                         if expire_time > now:
                             blacklisted[uid] = expire_time
                     except ValueError:
                         continue
-                        
         save_blacklisted_users(blacklisted)
-        
     return blacklisted
 
 def save_blacklisted_users(blacklisted: dict):
@@ -430,10 +395,6 @@ def parse_user_id(raw: str) -> int | None:
         return int(raw)
     return None
 
-# ==========================================
-#           DURATION PARSER
-# ==========================================
-
 def parse_duration(raw: str) -> int | None:
     raw = raw.strip().lower()
     multipliers = {
@@ -453,10 +414,6 @@ def parse_duration(raw: str) -> int | None:
             if num_part.isdigit():
                 return int(num_part) * mult
     return None
-
-# ==========================================
-#     PERSISTENT SERVER BLACKLIST SYSTEM
-# ==========================================
 
 def load_blacklisted_servers() -> set:
     blacklisted = set()
@@ -486,10 +443,6 @@ def remove_server_from_blacklist(server_id: int) -> bool:
         return True
     return False
 
-# ==========================================
-#     PERSISTENT GAME BLACKLIST SYSTEM
-# ==========================================
-
 def load_blacklisted_games() -> dict:
     blacklisted = {}
     if os.path.exists(blacklistedtxt):
@@ -512,10 +465,6 @@ def save_blacklisted_games(blacklisted: dict):
         lines = [f"{pid}:{reason}" for pid, reason in blacklisted.items()]
         f.write("\n".join(lines))
 
-# ==========================================
-#        CHANNEL DATABASE MANAGEMENT
-# ==========================================
-
 def load_allowed_channels() -> dict:
     channels = {}
     if os.path.exists(channels_file):
@@ -530,14 +479,9 @@ def load_allowed_channels() -> dict:
 def save_allowed_channel(guild_id: int, channel_id: int):
     channels = load_allowed_channels()
     channels[guild_id] = channel_id
-    
     with open(channels_file, "w") as f:
         for g_id, c_id in channels.items():
             f.write(f"{g_id}:{c_id}\n")
-
-# ==========================================
-#         SETUP DROPDOWN UI COMPONENTS
-# ==========================================
 
 class ChannelSelect(discord.ui.Select):
     def __init__(self, channels: list[discord.abc.GuildChannel]):
@@ -558,7 +502,6 @@ class ChannelSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         selected_id = int(self.values[0])
         save_allowed_channel(interaction.guild.id, selected_id)
-        
         embed = discord.Embed(
             title="Channel Configured",
             description=f"Successfully set <#{selected_id}> as the official decompile channel.",
@@ -581,10 +524,9 @@ class ChannelSelectView(discord.ui.View):
 async def build_setup_dropdown(guild: discord.Guild, author_id: int):
     allowed_types = (discord.TextChannel, discord.ForumChannel)
     valid_channels = [
-        ch for ch in guild.channels 
+        ch for ch in guild.channels
         if isinstance(ch, allowed_types) and ch.permissions_for(guild.me).send_messages
     ]
-    
     if not valid_channels:
         embed = discord.Embed(
             title="Setup Error",
@@ -592,7 +534,6 @@ async def build_setup_dropdown(guild: discord.Guild, author_id: int):
             color=0xE74C3C
         )
         return embed, None
-
     embed = discord.Embed(
         title="Select Decompile Channel",
         description="Please select the text channel or forum from the dropdown below where you want decompile commands to be locked to.",
@@ -619,18 +560,12 @@ async def reset_bot_presence():
     )
     await bot.change_presence(status=discord.Status.online, activity=activity)
 
-# ==========================================
-#             ROBLOX API HELPERS
-# ==========================================
-
 async def get_place_info(place_id: str) -> dict:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
-    
     if get_active_cookie():
         headers["Cookie"] = f".ROBLOSECURITY={get_active_cookie()}"
-
     async with aiohttp.ClientSession(headers=headers) as session:
         try:
             universe_url = f"https://apis.roblox.com/universes/v1/places/{place_id}/universe"
@@ -639,16 +574,12 @@ async def get_place_info(place_id: str) -> dict:
                     return {"error": True, "reason": "Place is banned, content-deleted, or moderated by Roblox."}
                 if resp.status != 200:
                     return {"error": True, "reason": f"Roblox API returned status code {resp.status}."}
-                
                 data = await resp.json()
                 if not isinstance(data, dict):
                     return {"error": True, "reason": "Invalid response from universe resolution API."}
-                    
                 universe_id = data.get("universeId")
-
             if not universe_id:
                 return {"error": True, "reason": "Universe ID not found for this place."}
-
             if get_active_cookie():
                 play_url = f"https://games.roblox.com/v1/games/multiget-playability-status?universeIds={universe_id}"
                 async with session.get(play_url) as play_resp:
@@ -656,10 +587,8 @@ async def get_place_info(place_id: str) -> dict:
                         play_data = await play_resp.json()
                         if isinstance(play_data, list) and len(play_data) > 0:
                             status_info = play_data[0] or {}
-                            
                             is_playable = status_info.get("isPlayable", True)
                             unplayable_text = status_info.get("unplayableDisplayText", "")
-                            
                             if not is_playable:
                                 body_text = None
                                 ux_treatment = status_info.get("playableUxTreatment")
@@ -667,13 +596,11 @@ async def get_place_info(place_id: str) -> dict:
                                     ux_data = ux_treatment.get("data")
                                     if isinstance(ux_data, dict):
                                         body_text = ux_data.get("bodyText")
-                                
                                 ban_reason = body_text or unplayable_text or "UNKNOWN"
                                 return {
                                     "error": True,
                                     "reason": f"Game is unplayable: {ban_reason}"
                                 }
-
             game_name = f"Place {place_id}"
             details_url = f"https://games.roblox.com/v1/games?universeIds={universe_id}"
             async with session.get(details_url) as resp:
@@ -686,7 +613,6 @@ async def get_place_info(place_id: str) -> dict:
                             if game.get("isArchived", False):
                                 return {"error": True, "reason": "Game has been archived or deleted."}
                             game_name = game.get("name", game_name)
-
             icon_url = None
             thumb_url = f"https://thumbnails.roblox.com/v1/places/gameicons?placeIds={place_id}&size=512x512&format=Png&isCircular=false"
             async with session.get(thumb_url) as thumb_resp:
@@ -696,13 +622,11 @@ async def get_place_info(place_id: str) -> dict:
                         data_list = thumb_data.get("data", [])
                         if data_list and isinstance(data_list, list):
                             icon_url = data_list[0].get("imageUrl")
-
             return {
                 "error": False,
                 "name": game_name,
                 "icon_url": icon_url
             }
-
         except Exception as e:
             print(f"[DEBUG] Error fetching Roblox place info: {e}")
             return {"error": True, "reason": f"Exception occurred: {str(e)}"}
@@ -746,8 +670,6 @@ async def is_user_banned_from_game(user_id: int, place_id: str) -> bool:
     except Exception:
         pass
     return False
-
-# ==========================================
 
 async def _safe_json(resp):
     try:
@@ -813,25 +735,20 @@ async def resolve_game_by_name(name: str):
 
 async def handle_post(request):
     global post_data
-
     if active_events is None:
         print("[DEBUG] Received POST request but no game is currently joining/decompiling. Returning 404.")
         return web.Response(text="No active decompile session found", status=404)
-
     try:
         if request.content_type == "application/json":
             post_data = await request.json()
         else:
             post_data = {"raw": await request.text()}
-
         print(f"[DEBUG] Received POST request: {post_data}")
-
         rec_ev, fin_ev = active_events
         if post_data.get("status") == "finished":
             fin_ev.set()
         else:
             rec_ev.set()
-
         return web.Response(text="Success", status=200)
     except Exception as e:
         print(f"[DEBUG] POST handle error: {e}")
@@ -840,10 +757,8 @@ async def handle_post(request):
 async def start_local_server(host="127.0.0.1", port=5000):
     app = web.Application()
     app.router.add_post("/decompile", handle_post)
-
     runner = web.AppRunner(app)
     await runner.setup()
-    
     for p in range(port, port + 10):
         try:
             site = web.TCPSite(runner, host, p)
@@ -852,28 +767,22 @@ async def start_local_server(host="127.0.0.1", port=5000):
             return
         except OSError:
             continue
-    
     print(f"[DEBUG] Failed to bind to any port in range {port}-{port+9}")
 
 def find_roblox():
     if not LOCAL_APP_DATA:
         return None
-
     r_dir = os.path.join(LOCAL_APP_DATA, "Roblox", "Versions")
     if not os.path.exists(r_dir):
         return None
-
     installs = []
     for root, _, files in os.walk(r_dir):
         if "RobloxPlayerBeta.exe" in files:
             installs.append(os.path.join(root, "RobloxPlayerBeta.exe"))
-
     if not installs:
         return None
-
     installs.sort(key=os.path.getmtime, reverse=True)
     return installs[0]
-
 
 def _terminate_live_roblox():
     targets = {"robloxplayerbeta.exe", "robloxplayerlauncher.exe", "roblox.exe"}
@@ -892,7 +801,6 @@ def _terminate_live_roblox():
 
 def _upload_file_sync(file_path: str, place_id: str) -> str | None:
     r2_endpoint = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-
     s3 = boto3.client(
         "s3",
         endpoint_url=r2_endpoint,
@@ -900,9 +808,7 @@ def _upload_file_sync(file_path: str, place_id: str) -> str | None:
         aws_secret_access_key=R2_SECRET_ACCESS_KEY,
         config=Config(signature_version="s3v4"),
     )
-
     filename = f"{place_id}_{os.path.basename(file_path)}"
-
     try:
         s3.upload_file(
             Filename=file_path,
@@ -927,7 +833,6 @@ async def send_msg(send_func, content=None, embed=None, ephemeral=False):
         return await send_func(content=content, embed=embed, ephemeral=ephemeral)
     return await send_func(content, ephemeral=ephemeral)
 
-# --- Status stages (color + label) embedded into the game-info embed ---
 STATUS_STAGES = {
     "launching":           (0xE74C3C, "Launching Roblox"),
     "joining":             (0xE67E22, "Joining the Game"),
@@ -942,24 +847,20 @@ STATUS_STAGES = {
 async def update_status(info_msg, embed, stage):
     color, label = STATUS_STAGES.get(stage, (0x3498DB, stage))
     embed.color = color
-
     field_index = None
     for i, f in enumerate(embed.fields):
         if f.name == "Status":
             field_index = i
             break
-
     if field_index is not None:
         embed.set_field_at(field_index, name="Status", value=label, inline=False)
     else:
         embed.add_field(name="Status", value=label, inline=False)
-
     try:
         if info_msg is not None:
             await info_msg.edit(embed=embed)
     except Exception as e:
         print(f"[DEBUG] Failed to edit status embed: {e}")
-
     if _on_status_update:
         try:
             await _on_status_update(embed)
@@ -977,7 +878,6 @@ async def _wait_with_pause(event, total, job_data):
         await asyncio.sleep(step)
         waited += step
     return event.is_set()
-
 
 async def process_file(send_func, process, game_name, timeout=60, ephemeral=False, info_msg=None, embed=None, rec_ev=None, fin_ev=None, job_data=None):
     cwd = os.path.dirname(os.path.abspath(__file__))
@@ -1031,15 +931,15 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
         return None, None
 
     await update_bot_presence(game_name, text="Decompiling Scripts...")
-    
+
     target_file = None
     target_name = None
 
     if os.path.exists(WORKSPACE_DIR):
         for f in os.listdir(WORKSPACE_DIR):
-            if f.lower().startswith("game"):
+            if f.lower().startswith("game") or f.lower().startswith("place"):
                 src = os.path.join(WORKSPACE_DIR, f)
-                if os.path.isfile(src):
+                if os.path.isfile(src) and not f.endswith(".lock"):
                     dest = os.path.join(decompile_dir, f)
                     shutil.move(src, dest)
                     target_file, target_name = dest, f
@@ -1120,7 +1020,7 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
             await update_bot_presence(game_name, text="Sending To User...")
 
     game_raw_path = os.path.join(decompile_dir, target_name)
-    
+
     for _ in range(timeout):
         if os.path.exists(out_path):
             print(f"[DEBUG] Found processed output file: {out_path}")
@@ -1129,10 +1029,6 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
 
     print("[DEBUG] Processed file check timed out.")
     return None, None
-
-# ==========================================
-#          CORE DECOMPILE ENGINE
-# ==========================================
 
 async def run_decompile_logic(send_func, user: discord.User | discord.Member, guild, channel, place_id: str, game_id: str = None, is_ephemeral: bool = False, on_status_update=None):
     author_id = user.id
@@ -1183,7 +1079,7 @@ async def run_decompile_logic(send_func, user: discord.User | discord.Member, gu
         reason = blacklisted_games[str(place_id).strip()]
         game_info = await get_place_info(place_id)
         game_name = game_info.get("name") if not game_info.get("error") else f"Place {place_id}"
-        
+
         await send_msg(send_func, f"**Unable to decompile game:** {game_name}\n**Reason:** {reason}", ephemeral=is_ephemeral)
         return
 
@@ -1204,15 +1100,12 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
 
     if game_id:
         print(f"[DEBUG] Processing game_id argument...")
-
         if game_id.startswith("http"):
             parsed_input = urlparse(game_id)
             query_params = parse_qs(parsed_input.query)
-
             ps_code = query_params.get("privateServerLinkCode", [None])[0]
             share_code = query_params.get("code", [None])[0]
             link_type = query_params.get("type", ["Server"])[0]
-
             if ps_code:
                 launch_json = json.dumps({"psCode": ps_code})
                 encoded_launch = quote(launch_json, safe='')
@@ -1230,7 +1123,6 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
         game_name = embed.title
     else:
         game_info = await get_place_info(place_id)
-
         if game_info.get("error"):
             error_reason = game_info.get("reason", "")
             if "Game is unplayable" in error_reason:
@@ -1303,7 +1195,6 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
     await update_status(info_msg, embed, "launching")
     try:
         roblox = find_roblox()
-
         if not roblox:
             print("[DEBUG] Roblox executable not found on host!")
             if not data["aborted"]:
@@ -1323,71 +1214,40 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
             global SKIP_PROCESSFILE
             SKIP_PROCESSFILE = False
 
-            if not file_path or not os.path.exists(file_path):
-                print("[DEBUG] Failed or timed out waiting for file.")
-                cookies = load_cookies()
-                if len(cookies) > 1:
-                    current_uid = await get_current_user_id()
-                    is_banned = current_uid and await is_user_banned_from_game(current_uid, place_id)
-                    if is_banned:
-                        old_index = active_cookie_index
-                        active_cookie_index = (active_cookie_index + 1) % len(cookies)
-                        if active_cookie_index == old_index:
-                            active_cookie_index = 0
-                        new_cookie = cookies[active_cookie_index]
-                        _replace_roblox_security_cookie(new_cookie)
-                        preview = new_cookie[:30] + "..." if len(new_cookie) > 30 else new_cookie
-                        print(f"[DEBUG] User banned. Auto-switched to cookie {active_cookie_index}: {preview}")
-                        await send_msg(send_func, f"Account banned from this game. Switched to cookie `{active_cookie_index}`. Retrying...", ephemeral=is_ephemeral)
-                        await asyncio.sleep(2)
-                        is_retry = True
-                        await execute_decompile_job(send_func, author_id, guild, channel, place_id, game_id, is_ephemeral, is_priority=is_priority, on_status_update=on_status_update, cookie_retries=cookie_retries + 1, original_cookie_index=original_cookie_index)
-                        return
-                    elif cookie_retries < len(cookies):
-                        pass
-                    else:
-                        await send_msg(send_func, f"<@{str(author_id)}> All cookies are banned or invalid for this game.", ephemeral=is_ephemeral)
-                        return
+            if file_path:
+                await update_status(info_msg, embed, "uploading")
+                await update_bot_presence(game_name, text="Uploading File...")
+                upload_result = await upload_file(file_path, place_id)
+
+                if upload_result:
+                    download_url = upload_result["url"]
+                    embed.add_field(name="Download", value=f"[Click here]({download_url})", inline=False)
+                    embed.color = 0x2ECC71
+
+                    final_msg = f"Decompilation complete! File uploaded successfully."
+                    await send_msg(send_func, content=final_msg, embed=embed, ephemeral=is_ephemeral)
+                else:
+                    await send_msg(send_func, content="Decompilation complete but upload failed.", embed=embed, ephemeral=is_ephemeral)
+            else:
                 if not data["aborted"]:
                     await update_status(info_msg, embed, "error")
-                    await send_msg(send_func, "timed out.", ephemeral=is_ephemeral)
-                return
+                    await send_msg(send_func, content="Decompilation failed or timed out.", embed=embed, ephemeral=is_ephemeral)
 
-            await update_status(info_msg, embed, "uploading")
-            res = await upload_file(file_path, place_id)
-
-            if res and res.get("url"):
-                print(f"[DEBUG] File successfully uploaded to: {res['url']}")
-                await send_msg(send_func, f"<@{str(author_id)}> Your Game ({game_name}) Has Been Decompiled: ```{res['url']}```\n", ephemeral=is_ephemeral)
-            else:
-                print("[DEBUG] Upload returned empty result or failed.")
-                await send_msg(send_func, "Upload failed or declined by server.", ephemeral=is_ephemeral)
-
+        except Exception as e:
+            print(f"[DEBUG] Error during decompile process: {e}")
+            if not data["aborted"]:
+                await update_status(info_msg, embed, "error")
+                await send_msg(send_func, content=f"An error occurred: {e}", embed=embed, ephemeral=is_ephemeral)
         finally:
-            if file_path and os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                except Exception as e:
-                    print(f"[DEBUG] Cleanup error: {e}")
-            if game_file and os.path.exists(game_file):
-                try:
-                    os.remove(game_file)
-                except Exception as e:
-                    print(f"[DEBUG] Cleanup error: {e}")
-    finally:
-        if is_retry:
             running_jobs -= 1
             is_decompiling = running_jobs > 0
-            if active_cookie_index != original_cookie_index and running_jobs == 0:
-                cookies = load_cookies()
-                if original_cookie_index < len(cookies):
-                    active_cookie_index = original_cookie_index
-                    _replace_roblox_security_cookie(cookies[active_cookie_index])
-                    print(f"[DEBUG] Reverted to original cookie {active_cookie_index}")
-        else:
-            running_jobs -= 1
-            is_decompiling = running_jobs > 0
-        if not data.get("aborted") and active_events == (rec_ev, fin_ev):
-            active_events = None
-        if running_jobs == 0:
+            if not data["aborted"]:
+                current_active_data = None
             await reset_bot_presence()
+
+    except Exception as e:
+        print(f"[DEBUG] Critical error in execute_decompile_job: {e}")
+        running_jobs -= 1
+        is_decompiling = running_jobs > 0
+        current_active_data = None
+        await reset_bot_presence()

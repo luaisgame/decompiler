@@ -1,17 +1,15 @@
 import discord
 from discord import app_commands
-from .core import bot, save_allowed_channel, build_setup_dropdown
+from core import bot, save_allowed_channel, build_setup_dropdown
 
 @bot.command(name="setup")
 async def setup_prefix(ctx, channel: discord.abc.GuildChannel = None):
     if not ctx.author.guild_permissions.administrator:
         await ctx.send("You do not have permission to use this command.")
         return
-
     if not ctx.guild:
         await ctx.send("This command can only be used in a server.")
         return
-
     if channel:
         if not isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
             await ctx.send("Please specify a valid text channel or forum.")
@@ -31,11 +29,9 @@ async def setup_slash(interaction: discord.Interaction, channel: discord.abc.Gui
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
-
     if not interaction.guild:
         await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
         return
-
     if channel:
         if not isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
             await interaction.response.send_message("Please select a valid text channel or forum.", ephemeral=True)

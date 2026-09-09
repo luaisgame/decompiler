@@ -1,9 +1,8 @@
 import discord
 from discord import app_commands
-from .core import (bot, user_has_role, BLACKLIST_ROLE_IDS, load_cookies, save_cookies,
+from core import (bot, user_has_role, BLACKLIST_ROLE_IDS, load_cookies, save_cookies,
                    _replace_roblox_security_cookie)
 
-# Will be set by bot.py after core loads
 active_cookie_index = 0
 default_cookie_index = 0
 
@@ -111,11 +110,9 @@ async def switchcookie_prefix(ctx, index: int):
     if index < 0 or index >= len(cookies):
         await ctx.send(f"Invalid index. Use `!listcookies` to see available cookies.")
         return
-
     global active_cookie_index, default_cookie_index
     active_cookie_index = index
     default_cookie_index = index
-
     _replace_roblox_security_cookie(cookies[index])
     preview = cookies[index][:30] + "..." if len(cookies[index]) > 30 else cookies[index]
     await ctx.send(f"Switched to cookie `{index}`: `{preview}`")
@@ -135,11 +132,9 @@ async def switchcookie_slash(interaction: discord.Interaction, index: int):
     if index < 0 or index >= len(cookies):
         await interaction.response.send_message(f"Invalid index. Use `/listcookies` to see available cookies.", ephemeral=True)
         return
-
     global active_cookie_index, default_cookie_index
     active_cookie_index = index
     default_cookie_index = index
-
     _replace_roblox_security_cookie(cookies[index])
     preview = cookies[index][:30] + "..." if len(cookies[index]) > 30 else cookies[index]
     await interaction.response.send_message(f"Switched to cookie `{index}`: `{preview}`", ephemeral=True)
