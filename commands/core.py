@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 if getattr(sys, "frozen", False):
     _BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
 else:
-    _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(_BASE_DIR, ".env"))
 
 R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "")
@@ -880,7 +880,7 @@ async def _wait_with_pause(event, total, job_data):
     return event.is_set()
 
 async def process_file(send_func, process, game_name, timeout=60, ephemeral=False, info_msg=None, embed=None, rec_ev=None, fin_ev=None, job_data=None):
-    cwd = os.path.dirname(os.path.abspath(__file__))
+    cwd = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     decompile_dir = os.path.join(cwd, "decompile")
     os.makedirs(decompile_dir, exist_ok=True)
 

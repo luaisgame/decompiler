@@ -1,6 +1,6 @@
 import discord
 from discord import app_commands
-from core import bot, user_has_role, BLACKLIST_ROLE_IDS, load_blacklisted_games, save_blacklisted_games
+from .core import bot, user_has_role, BLACKLIST_ROLE_IDS, load_blacklisted_games, save_blacklisted_games
 
 @bot.command(name="blacklist")
 async def blacklist_prefix(ctx, place_id: str, *, reason: str = "No Information Provided"):

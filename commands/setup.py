@@ -1,6 +1,6 @@
 import discord
 from discord import app_commands
-from core import bot, save_allowed_channel, build_setup_dropdown
+from .core import bot, save_allowed_channel, build_setup_dropdown
 
 @bot.command(name="setup")
 async def setup_prefix(ctx, channel: discord.abc.GuildChannel = None):

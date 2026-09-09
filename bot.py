@@ -4,7 +4,6 @@ import sys
 import discord
 import importlib
 import urllib.request
-import time
 
 from dotenv import load_dotenv
 if getattr(sys, "frozen", False):
@@ -17,14 +16,15 @@ REPO = "luaisgame/decompiler"
 BRANCH = "main"
 
 COMMAND_FILES = [
-    "core.py",
-    "setup.py",
-    "blacklist.py",
-    "blacklistuser.py",
-    "blacklistserver.py",
-    "cookie.py",
-    "decompile.py",
-    "help.py",
+    "commands/__init__.py",
+    "commands/core.py",
+    "commands/setup.py",
+    "commands/blacklist.py",
+    "commands/blacklistuser.py",
+    "commands/blacklistserver.py",
+    "commands/cookie.py",
+    "commands/decompile.py",
+    "commands/help.py",
 ]
 
 MODULES = {}
@@ -48,6 +48,7 @@ def sync_code():
             print(f"[SYNC] ERROR: Could not fetch {path}")
             return False
         local_path = os.path.join(_BASE_DIR, path)
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
         with open(local_path, "w", encoding="utf-8") as f:
             f.write(content)
         print(f"[SYNC] {path}")
@@ -59,56 +60,34 @@ def load_modules():
     MODULES.clear()
     COMMAND_MODULES.clear()
 
-    import core as core_module
-    MODULES["core"] = core_module
+    import commands.core as core_module
+    MODULES["commands.core"] = core_module
 
     for name in ["setup", "blacklist", "blacklistuser", "blacklistserver", "cookie", "decompile", "help"]:
         try:
-            mod = importlib.import_module(name)
-            MODULES[name] = mod
+            mod = importlib.import_module(f"commands.{name}")
+            MODULES[f"commands.{name}"] = mod
             COMMAND_MODULES.append(mod)
         except Exception as e:
-            print(f"[LOAD] Failed to load {name}: {e}")
+            print(f"[LOAD] Failed to load commands.{name}: {e}")
 
     print(f"[LOAD] Loaded {len(COMMAND_MODULES)} command modules.")
 
 def reload_modules():
     global MODULES, COMMAND_MODULES
-    for name, mod in MODULES.items():
+    for name, mod in list(MODULES.items()):
         try:
             importlib.reload(mod)
         except Exception as e:
             print(f"[AUTO-UPDATE] Failed to reload {name}: {e}")
-    COMMAND_MODULES = [MODULES[n] for n in MODULES if n != "core"]
+    COMMAND_MODULES = [MODULES[n] for n in MODULES if n != "commands.core"]
 
 if not sync_code():
     print("[BOT] Initial sync failed. Using local files.")
 
 load_modules()
 
-from core import bot, BOT_TOKEN, start_local_server, decompile_queue_worker, reset_bot_presence
-
-async def pull_latest():
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "git", "pull", "origin", "BRANCH",
-            cwd=_BASE_DIR,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
-        output = stdout.decode().strip()
-        if proc.returncode == 0:
-            if "Already up to date" not in output:
-                print(f"[AUTO-UPDATE] Pulled: {output}")
-                return True
-        return False
-    except Exception:
-        return False
-
-async def sync_and_reload():
-    if sync_code():
-        reload_modules()
+from commands.core import bot, BOT_TOKEN, start_local_server, decompile_queue_worker, reset_bot_presence
 
 @bot.event
 async def on_ready():
@@ -131,7 +110,8 @@ async def on_ready():
 
 @bot.event
 async def on_command(ctx):
-    await sync_and_reload()
+    if sync_code():
+        reload_modules()
 
     author = ctx.author
     guild = ctx.guild.name if ctx.guild else "DM"
@@ -145,7 +125,8 @@ async def on_command(ctx):
 @bot.event
 async def on_interaction(interaction):
     if interaction.type == discord.InteractionType.application_command:
-        await sync_and_reload()
+        if sync_code():
+            reload_modules()
 
 async def _delete_command_message(message, delay: int):
     await asyncio.sleep(delay)

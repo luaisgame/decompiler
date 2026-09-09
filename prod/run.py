@@ -12,14 +12,15 @@ WORK_DIR = os.path.join(SCRIPT_DIR, "bot_code")
 
 FILES_TO_FETCH = [
     "bot.py",
-    "core.py",
-    "setup.py",
-    "blacklist.py",
-    "blacklistuser.py",
-    "blacklistserver.py",
-    "cookie.py",
-    "decompile.py",
-    "help.py",
+    "commands/__init__.py",
+    "commands/core.py",
+    "commands/setup.py",
+    "commands/blacklist.py",
+    "commands/blacklistuser.py",
+    "commands/blacklistserver.py",
+    "commands/cookie.py",
+    "commands/decompile.py",
+    "commands/help.py",
 ]
 
 def fetch_file(path):
@@ -34,14 +35,13 @@ def fetch_file(path):
 
 def sync_from_github():
     print("[SYNC] Fetching latest code from GitHub...")
-    os.makedirs(WORK_DIR, exist_ok=True)
-
     for path in FILES_TO_FETCH:
         content = fetch_file(path)
         if content is None:
             print(f"[SYNC] ERROR: Could not fetch {path}")
             return False
         local_path = os.path.join(WORK_DIR, path)
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
         with open(local_path, "w", encoding="utf-8") as f:
             f.write(content)
         print(f"[SYNC] {path}")

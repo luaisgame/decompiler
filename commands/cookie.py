@@ -1,6 +1,6 @@
 import discord
 from discord import app_commands
-from core import (bot, user_has_role, BLACKLIST_ROLE_IDS, load_cookies, save_cookies,
+from .core import (bot, user_has_role, BLACKLIST_ROLE_IDS, load_cookies, save_cookies,
                    _replace_roblox_security_cookie)
 
 active_cookie_index = 0

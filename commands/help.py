@@ -1,6 +1,6 @@
 import discord
 from discord import app_commands
-from core import bot
+from .core import bot
 
 bot.remove_command("help")
 

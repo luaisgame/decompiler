@@ -1,6 +1,6 @@
 import discord
 from discord import app_commands
-from core import (bot, user_has_role, BLACKLIST_ROLE_IDS, load_blacklisted_servers,
+from .core import (bot, user_has_role, BLACKLIST_ROLE_IDS, load_blacklisted_servers,
                    add_server_to_blacklist, remove_server_from_blacklist)
 
 @bot.command(name="blacklistserver")

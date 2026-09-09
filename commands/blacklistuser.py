@@ -1,6 +1,6 @@
 import discord
 from discord import app_commands
-from core import (bot, user_has_role, BLACKLIST_ROLE_IDS, parse_user_id,
+from .core import (bot, user_has_role, BLACKLIST_ROLE_IDS, parse_user_id,
                    parse_duration, add_user_to_blacklist, load_blacklisted_users,
                    save_blacklisted_users)
 
