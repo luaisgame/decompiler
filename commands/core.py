@@ -164,6 +164,20 @@ def set_active_cookie(index: int) -> bool:
         return True
     return False
 
+def switch_to_default_cookie():
+    global active_cookie_index
+    cookies = load_cookies()
+    if cookies:
+        active_cookie_index = 0
+        _replace_roblox_security_cookie(cookies[0])
+        print(f"[COOKIE] Switched to default cookie (index 0)")
+
+def save_and_switch_to_default():
+    global active_cookie_index
+    saved = active_cookie_index
+    switch_to_default_cookie()
+    return saved
+
 decompile_event = asyncio.Event()
 decompile_recieved = asyncio.Event()
 post_data = {}
@@ -1193,6 +1207,10 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
 
     await update_bot_presence(game_name)
     await update_status(info_msg, embed, "launching")
+    
+    saved_cookie_index = save_and_switch_to_default()
+    print(f"[COOKIE] Saved cookie {saved_cookie_index}, switched to default (0)")
+    
     try:
         roblox = find_roblox()
         if not roblox:
@@ -1243,6 +1261,12 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
             is_decompiling = running_jobs > 0
             if not data["aborted"]:
                 current_active_data = None
+            if saved_cookie_index is not None:
+                cookies = load_cookies()
+                if saved_cookie_index < len(cookies):
+                    active_cookie_index = saved_cookie_index
+                    _replace_roblox_security_cookie(cookies[saved_cookie_index])
+                    print(f"[COOKIE] Restored cookie to index {saved_cookie_index}")
             await reset_bot_presence()
 
     except Exception as e:

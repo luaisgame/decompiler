@@ -87,11 +87,13 @@ if not sync_code():
 
 load_modules()
 
-from commands.core import bot, BOT_TOKEN, start_local_server, decompile_queue_worker, reset_bot_presence
+from commands.core import bot, BOT_TOKEN, start_local_server, decompile_queue_worker, reset_bot_presence, switch_to_default_cookie
 
 @bot.event
 async def on_ready():
     print(f"[DEBUG] Online as: {bot.user}")
+
+    switch_to_default_cookie()
 
     await start_local_server(port=5000)
 
