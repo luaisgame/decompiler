@@ -24,8 +24,12 @@ from aiohttp import web
 from dotenv import load_dotenv
 if getattr(sys, "frozen", False):
     _BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
-else:
+elif "BOT_BASE_DIR" in os.environ:
+    _BASE_DIR = os.environ["BOT_BASE_DIR"]
+elif os.path.isfile(__file__) and not __file__.startswith("<"):
     _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+else:
+    _BASE_DIR = os.getcwd()
 load_dotenv(os.path.join(_BASE_DIR, ".env"))
 
 R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "")

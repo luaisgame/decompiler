@@ -10,6 +10,7 @@ if getattr(sys, "frozen", False):
     _BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
 else:
     _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+os.environ["BOT_BASE_DIR"] = _BASE_DIR
 load_dotenv(os.path.join(_BASE_DIR, ".env"))
 
 REPO = "luaisgame/decompiler"
