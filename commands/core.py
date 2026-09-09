@@ -1007,6 +1007,13 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
     out_ext = ".rbxl" if is_rbxl else ".rbxlx"
     out_path = os.path.join(decompile_dir, f"game{out_ext}")
 
+    game_std = os.path.join(decompile_dir, f"game{out_ext}")
+    if os.path.abspath(target_file) != os.path.abspath(game_std):
+        shutil.move(target_file, game_std)
+        target_file = game_std
+        target_name = f"game{out_ext}"
+        print(f"[DEBUG] Renamed to: {target_name}")
+
     if SKIP_PROCESSFILE:
         print("[DEBUG] SKIP_PROCESSFILE is enabled; skipping oracle-postprocess post-processor.")
     else:
@@ -1019,13 +1026,10 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
             max_retries = 5
 
             for attempt in range(1, max_retries + 1):
-                if os.path.exists(out_path):
-                    os.remove(out_path)
-
                 try:
                     print(f"[DEBUG] Running oracle-postprocess (Attempt {attempt}/{max_retries})...")
                     proc_task = await asyncio.create_subprocess_exec(
-                        "cmd.exe", "/c", proc_script, "-k", ORACLE_KEY, "-v", "2", file_format, f"game{out_ext}",
+                        "cmd.exe", "/c", proc_script, "-k", ORACLE_KEY, "-v", "2", file_format, target_name,
                         cwd=decompile_dir,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.STDOUT,
