@@ -200,7 +200,8 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 LOCAL_APP_DATA = os.environ.get("LOCALAPPDATA", "")
-WORKSPACE_DIR = os.path.join(LOCAL_APP_DATA, "Synapse Z", "workspace")
+WORKSPACE_NAME = os.getenv("WORKSPACE_NAME", "Volt")
+WORKSPACE_DIR = os.path.join(LOCAL_APP_DATA, WORKSPACE_NAME, "workspace")
 SKIP_PROCESSFILE = os.getenv("SKIP_PROCESSFILE", "0").lower() in ("1", "true", "yes")
 
 ONE_MB = 1024 * 1024
@@ -1051,12 +1052,13 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
 
     await asyncio.sleep(0.5)
 
+    out_path = os.path.join(decompile_dir, "game.rbxlx")
+
     if SKIP_PROCESSFILE:
         print("[DEBUG] SKIP_PROCESSFILE is enabled; skipping oracle-postprocess post-processor.")
     else:
         proc_script = os.path.join(decompile_dir, "oracle-postprocess.exe")
         if os.path.exists(proc_script):
-            out_path = os.path.join(decompile_dir, "game.rbxlx")
             success = False
             max_retries = 5
 
