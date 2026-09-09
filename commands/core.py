@@ -894,8 +894,7 @@ async def _wait_with_pause(event, total, job_data):
     return event.is_set()
 
 async def process_file(send_func, process, game_name, timeout=60, ephemeral=False, info_msg=None, embed=None, rec_ev=None, fin_ev=None, job_data=None):
-    cwd = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    decompile_dir = os.path.join(cwd, "decompile")
+    decompile_dir = os.path.join(BASE_DIR, "decompile")
     os.makedirs(decompile_dir, exist_ok=True)
 
     if rec_ev is None:
