@@ -1061,7 +1061,10 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
         print("[DEBUG] SKIP_PROCESSFILE is enabled; skipping oracle-postprocess post-processor.")
     else:
         proc_script = os.path.join(decompile_dir, "oracle-postprocess.exe")
-        if os.path.exists(proc_script):
+        if not os.path.exists(proc_script):
+            print(f"[DEBUG] oracle-postprocess.exe not found at {proc_script}")
+            print("[DEBUG] Place oracle-postprocess.exe in the decompile/ folder.")
+        else:
             success = False
             max_retries = 5
 
@@ -1079,6 +1082,7 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
                         creationflags=subprocess.CREATE_NO_WINDOW
                     )
 
+                    websocket_busy = False
                     while True:
                         line = await proc_task.stdout.readline()
                         if not line:
@@ -1086,6 +1090,8 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
                         decoded_line = line.decode('utf-8', errors='ignore').rstrip()
                         if "oracle-postprocess" in decoded_line.lower() or "-k " in decoded_line:
                             continue
+                        if "websocket connection" in decoded_line.lower():
+                            websocket_busy = True
                         print(decoded_line)
 
                     returncode = await proc_task.wait()
@@ -1094,6 +1100,9 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
                         print(f"[DEBUG] oracle-postprocess succeeded on attempt {attempt}.")
                         success = True
                         break
+                    elif websocket_busy:
+                        print(f"[DEBUG] Websocket busy, waiting longer before retry...")
+                        await asyncio.sleep(10)
                     else:
                         print(f"[DEBUG] oracle-postprocess attempt {attempt} failed with exit code {returncode}")
                 except Exception as e:
