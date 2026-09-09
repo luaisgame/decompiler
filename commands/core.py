@@ -1005,7 +1005,7 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
     is_rbxl = target_name.lower().endswith(".rbxl")
     file_format = "rbxl" if is_rbxl else "rbxlx"
     out_ext = ".rbxl" if is_rbxl else ".rbxlx"
-    out_path = os.path.join(decompile_dir, f"game{out_ext}")
+    out_path = os.path.join(decompile_dir, f"processed{out_ext}")
 
     game_std = os.path.join(decompile_dir, f"game{out_ext}")
     if os.path.abspath(target_file) != os.path.abspath(game_std):
