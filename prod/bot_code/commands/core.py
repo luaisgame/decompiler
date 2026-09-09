@@ -1242,7 +1242,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                     embed.add_field(name="Download", value=f"[Click here]({download_url})", inline=False)
                     embed.color = 0x2ECC71
 
-                    await send_msg(send_func, content=f"<@{author_id}>", embed=embed, ephemeral=is_ephemeral)
+                    await send_msg(send_func, embed=embed, ephemeral=is_ephemeral)
                 else:
                     await send_msg(send_func, content="Decompilation complete but upload failed.", embed=embed, ephemeral=is_ephemeral)
             else:
