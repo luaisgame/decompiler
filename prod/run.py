@@ -35,6 +35,7 @@ def fetch_file(path):
 
 def sync_from_github():
     print("[SYNC] Fetching latest code from GitHub...")
+    os.makedirs(os.path.join(WORK_DIR, "commands"), exist_ok=True)
     for path in FILES_TO_FETCH:
         content = fetch_file(path)
         if content is None:
