@@ -23,7 +23,6 @@ import commands.decompile
 import commands.help
 
 MODULES = [
-    commands.core,
     commands.setup,
     commands.blacklist,
     commands.blacklistuser,
