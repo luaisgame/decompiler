@@ -2,41 +2,84 @@ import subprocess
 import sys
 import os
 import time
+import urllib.request
+import json
 
-REPO_URL = "https://github.com/luaisgame/decompiler.git"
+REPO = "luaisgame/decompiler"
+BRANCH = "main"
+GITHUB_API = f"https://api.github.com/repos/{REPO}"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PARENT_DIR = os.path.dirname(SCRIPT_DIR)
+WORK_DIR = os.path.join(SCRIPT_DIR, "bot_code")
 
-def run_command(cmd, cwd=None):
-    result = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True)
-    return result.returncode, result.stdout.strip(), result.stderr.strip()
+FILES_TO_FETCH = [
+    "bot.py",
+    "commands/__init__.py",
+    "commands/core.py",
+    "commands/setup.py",
+    "commands/blacklist.py",
+    "commands/blacklistuser.py",
+    "commands/blacklistserver.py",
+    "commands/cookie.py",
+    "commands/decompile.py",
+    "commands/help.py",
+]
 
-def git_pull():
-    print("[UPDATER] Pulling latest from GitHub...")
-    code, out, err = run_command("git pull origin main", cwd=PARENT_DIR)
-    if code == 0:
-        print(f"[UPDATER] {out}")
-        return True
-    else:
-        print(f"[UPDATER] Git pull failed: {err}")
-        return False
+def fetch_file(path):
+    url = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/{path}"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.read().decode("utf-8")
+    except Exception as e:
+        print(f"[FETCH] Failed to fetch {path}: {e}")
+        return None
+
+def sync_from_github():
+    print("[SYNC] Fetching latest code from GitHub...")
+    os.makedirs(os.path.join(WORK_DIR, "commands"), exist_ok=True)
+    
+    for path in FILES_TO_FETCH:
+        content = fetch_file(path)
+        if content is None:
+            print(f"[SYNC] ERROR: Could not fetch {path}")
+            return False
+        local_path = os.path.join(WORK_DIR, path)
+        with open(local_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"[SYNC] {path}")
+    
+    env_src = os.path.join(SCRIPT_DIR, ".env")
+    env_dst = os.path.join(WORK_DIR, ".env")
+    if os.path.exists(env_src):
+        import shutil
+        shutil.copy2(env_src, env_dst)
+        print("[SYNC] .env copied")
+    
+    print("[SYNC] All files synced.")
+    return True
 
 def run_bot():
     print("[RUNNER] Starting bot.py...")
-    bot_path = os.path.join(PARENT_DIR, "bot.py")
+    bot_path = os.path.join(WORK_DIR, "bot.py")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = WORK_DIR
     process = subprocess.Popen(
         [sys.executable, bot_path],
-        cwd=PARENT_DIR
+        cwd=WORK_DIR,
+        env=env
     )
     return process
 
 def main():
     print("=" * 50)
-    print("  Decompiler Bot - Auto-Updating Runner")
+    print("  Decompiler Bot - GitHub Runner")
     print("=" * 50)
 
     while True:
-        git_pull()
+        if not sync_from_github():
+            print("[RUNNER] Sync failed. Retrying in 5 seconds...")
+            time.sleep(5)
+            continue
         
         process = run_bot()
         
