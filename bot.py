@@ -97,6 +97,7 @@ async def on_ready():
     print(f"[DEBUG] Online as: {bot.user}")
 
     core_module.switch_to_default_cookie()
+    core_module.load_queue()
 
     await core_module.start_local_server(port=5000)
 
