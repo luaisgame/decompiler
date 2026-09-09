@@ -3,7 +3,6 @@ import os
 import sys
 import discord
 import importlib
-import subprocess
 
 from dotenv import load_dotenv
 if getattr(sys, "frozen", False):
@@ -34,18 +33,19 @@ MODULES = [
     commands.help,
 ]
 
-def pull_latest():
+async def pull_latest():
     try:
-        result = subprocess.run(
-            ["git", "pull", "origin", "main"],
+        proc = await asyncio.create_subprocess_exec(
+            "git", "pull", "origin", "main",
             cwd=_BASE_DIR,
-            capture_output=True,
-            text=True,
-            timeout=10
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
         )
-        if result.returncode == 0:
-            if "Already up to date" not in result.stdout:
-                print(f"[AUTO-UPDATE] Pulled: {result.stdout.strip()}")
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        output = stdout.decode().strip()
+        if proc.returncode == 0:
+            if "Already up to date" not in output:
+                print(f"[AUTO-UPDATE] Pulled: {output}")
                 return True
         return False
     except Exception as e:
@@ -80,7 +80,7 @@ async def on_ready():
 
 @bot.event
 async def on_command(ctx):
-    pull_latest()
+    await pull_latest()
     reload_modules()
 
     author = ctx.author
@@ -95,7 +95,7 @@ async def on_command(ctx):
 @bot.event
 async def on_interaction(interaction):
     if interaction.type == discord.InteractionType.application_command:
-        pull_latest()
+        await pull_latest()
         reload_modules()
 
 async def _delete_command_message(message, delay: int):
