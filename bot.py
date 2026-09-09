@@ -2,6 +2,8 @@ import asyncio
 import os
 import sys
 import discord
+import importlib
+import subprocess
 
 from dotenv import load_dotenv
 if getattr(sys, "frozen", False):
@@ -12,7 +14,7 @@ load_dotenv(os.path.join(_BASE_DIR, ".env"))
 
 from commands.core import bot, BOT_TOKEN, start_local_server, decompile_queue_worker, reset_bot_presence
 
-# Import all command modules to register them
+import commands.core
 import commands.setup
 import commands.blacklist
 import commands.blacklistuser
@@ -20,6 +22,42 @@ import commands.blacklistserver
 import commands.cookie
 import commands.decompile
 import commands.help
+
+MODULES = [
+    commands.core,
+    commands.setup,
+    commands.blacklist,
+    commands.blacklistuser,
+    commands.blacklistserver,
+    commands.cookie,
+    commands.decompile,
+    commands.help,
+]
+
+def pull_latest():
+    try:
+        result = subprocess.run(
+            ["git", "pull", "origin", "main"],
+            cwd=_BASE_DIR,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if result.returncode == 0:
+            if "Already up to date" not in result.stdout:
+                print(f"[AUTO-UPDATE] Pulled: {result.stdout.strip()}")
+                return True
+        return False
+    except Exception as e:
+        print(f"[AUTO-UPDATE] Pull failed: {e}")
+        return False
+
+def reload_modules():
+    for mod in MODULES:
+        try:
+            importlib.reload(mod)
+        except Exception as e:
+            print(f"[AUTO-UPDATE] Failed to reload {mod.__name__}: {e}")
 
 @bot.event
 async def on_ready():
@@ -42,6 +80,9 @@ async def on_ready():
 
 @bot.event
 async def on_command(ctx):
+    pull_latest()
+    reload_modules()
+
     author = ctx.author
     guild = ctx.guild.name if ctx.guild else "DM"
     channel = ctx.channel.name if ctx.guild else "DM"
@@ -50,6 +91,12 @@ async def on_command(ctx):
         f"in {guild} #{channel} (message {ctx.message.id})"
     )
     bot.loop.create_task(_delete_command_message(ctx.message, 1))
+
+@bot.event
+async def on_interaction(interaction):
+    if interaction.type == discord.InteractionType.application_command:
+        pull_latest()
+        reload_modules()
 
 async def _delete_command_message(message, delay: int):
     await asyncio.sleep(delay)

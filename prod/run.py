@@ -2,7 +2,6 @@ import subprocess
 import sys
 import os
 import time
-import signal
 
 REPO_URL = "https://github.com/luaisgame/decompiler.git"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -13,13 +12,10 @@ def run_command(cmd, cwd=None):
     return result.returncode, result.stdout.strip(), result.stderr.strip()
 
 def git_pull():
-    print("[UPDATER] Pulling latest changes from GitHub...")
+    print("[UPDATER] Pulling latest from GitHub...")
     code, out, err = run_command("git pull origin main", cwd=PARENT_DIR)
     if code == 0:
-        if "Already up to date" in out:
-            print("[UPDATER] Already up to date.")
-            return False
-        print(f"[UPDATER] Updated: {out}")
+        print(f"[UPDATER] {out}")
         return True
     else:
         print(f"[UPDATER] Git pull failed: {err}")
@@ -40,7 +36,7 @@ def main():
     print("=" * 50)
 
     while True:
-        updated = git_pull()
+        git_pull()
         
         process = run_bot()
         
@@ -55,12 +51,8 @@ def main():
         exit_code = process.returncode
         print(f"[RUNNER] Bot exited with code {exit_code}")
         
-        if exit_code == 0:
-            print("[RUNNER] Clean exit. Shutting down.")
-            break
-        
-        print("[RUNNER] Restarting in 5 seconds...")
-        time.sleep(5)
+        print("[RUNNER] Restarting in 3 seconds...")
+        time.sleep(3)
 
 if __name__ == "__main__":
     main()
