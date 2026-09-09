@@ -842,9 +842,17 @@ async def start_local_server(host="127.0.0.1", port=5000):
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, host, port)
-    await site.start()
-    print(f"[DEBUG] Local HTTP server listening on http://{host}:{port}/decompile")
+    
+    for p in range(port, port + 10):
+        try:
+            site = web.TCPSite(runner, host, p)
+            await site.start()
+            print(f"[DEBUG] Local HTTP server listening on http://{host}:{p}/decompile")
+            return
+        except OSError:
+            continue
+    
+    print(f"[DEBUG] Failed to bind to any port in range {port}-{port+9}")
 
 def find_roblox():
     if not LOCAL_APP_DATA:
