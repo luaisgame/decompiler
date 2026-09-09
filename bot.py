@@ -47,6 +47,8 @@ def reload_command_modules():
     global COMMAND_MODULES
     print("[SYNC] Fetching latest code from GitHub...")
 
+    sys.modules["commands.core"] = core_module
+
     for name in COMMAND_NAMES:
         code = fetch_file(f"commands/{name}.py")
         if code is None:
@@ -125,10 +127,6 @@ async def on_command_completion(ctx):
 async def on_interaction(interaction):
     if interaction.type == discord.InteractionType.application_command:
         reload_command_modules()
-        try:
-            synced = await bot.tree.sync()
-        except Exception:
-            pass
 
 if __name__ == "__main__":
     bot.run(BOT_TOKEN)
