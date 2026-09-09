@@ -210,6 +210,7 @@ API_BASE = os.getenv("API_BASE", "https://luaisgame.com/api/owner")
 OWNER_KEY = os.getenv("OWNER_KEY", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID", "0"))
+ORACLE_KEY = os.getenv("ORACLE_KEY", "")
 
 # ==========================================
 #         ROLE PERMISSION HELPERS
@@ -1043,17 +1044,11 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
     await asyncio.sleep(0.5)
 
     if SKIP_PROCESSFILE:
-        print("[DEBUG] SKIP_PROCESSFILE is enabled; skipping ProcessFile post-processor.")
+        print("[DEBUG] SKIP_PROCESSFILE is enabled; skipping oracle-postprocess post-processor.")
     else:
-        proc_script = None
-        for ext in ["exe", "bat", "cmd"]:
-            candidate = os.path.join(decompile_dir, f"ProcessFile.{ext}")
-            if os.path.exists(candidate):
-                proc_script = candidate
-                break
-
-        if proc_script:
-            out_path = os.path.join(decompile_dir, "processed.rbxlx")
+        proc_script = os.path.join(decompile_dir, "oracle-postprocess.exe")
+        if os.path.exists(proc_script):
+            out_path = os.path.join(decompile_dir, "game.rbxlx")
             success = False
             max_retries = 5
 
@@ -1062,9 +1057,9 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
                     os.remove(out_path)
 
                 try:
-                    print(f"[DEBUG] Running CMD processor (Attempt {attempt}/{max_retries})...")
+                    print(f"[DEBUG] Running oracle-postprocess (Attempt {attempt}/{max_retries})...")
                     proc_task = await asyncio.create_subprocess_exec(
-                        "cmd.exe", "/c", proc_script,
+                        "cmd.exe", "/c", proc_script, "-k", ORACLE_KEY, "-v", "2", "rbxlx", "game.rbxlx",
                         cwd=decompile_dir,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.STDOUT,
@@ -1083,19 +1078,19 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
                     returncode = await proc_task.wait()
 
                     if returncode == 0 or os.path.exists(out_path):
-                        print(f"[DEBUG] CMD Processor succeeded on attempt {attempt}.")
+                        print(f"[DEBUG] oracle-postprocess succeeded on attempt {attempt}.")
                         success = True
                         break
                     else:
-                        print(f"[DEBUG] CMD Processor attempt {attempt} failed with exit code {returncode}")
+                        print(f"[DEBUG] oracle-postprocess attempt {attempt} failed with exit code {returncode}")
                 except Exception as e:
-                    print(f"[DEBUG] CMD Processor error on attempt {attempt}: {e}")
+                    print(f"[DEBUG] oracle-postprocess error on attempt {attempt}: {e}")
 
                 if attempt < max_retries:
                     await asyncio.sleep(3)
 
             if not success:
-                print("[DEBUG] All CMD Processor attempts failed.")
+                print("[DEBUG] All oracle-postprocess attempts failed.")
                 return None, None
 
             if info_msg is not None and embed is not None:

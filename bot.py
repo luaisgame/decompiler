@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+import discord
 
 from dotenv import load_dotenv
 if getattr(sys, "frozen", False):
@@ -24,12 +25,6 @@ import commands.help
 async def on_ready():
     print(f"[DEBUG] Online as: {bot.user}")
 
-    try:
-        synced = await bot.tree.sync()
-        print(f"[DEBUG] Synced {len(synced)} Slash Command(s).")
-    except Exception as e:
-        print(f"[DEBUG] Failed to sync slash commands: {e}")
-
     await start_local_server(port=5000)
     
     bot.loop.create_task(decompile_queue_worker())
@@ -38,6 +33,12 @@ async def on_ready():
         status=discord.Status.idle, 
         activity=discord.Game(name="Waiting for requests...")
     )
+
+    try:
+        synced = await bot.tree.sync()
+        print(f"[DEBUG] Synced {len(synced)} Slash Command(s).")
+    except Exception as e:
+        print(f"[DEBUG] Failed to sync slash commands: {e}")
 
 @bot.event
 async def on_command(ctx):
