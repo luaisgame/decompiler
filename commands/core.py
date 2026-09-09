@@ -245,7 +245,7 @@ queue_counter = 0
 _queue_event = None
 
 def save_queue():
-    lines = []
+    lines = [f"COUNTER:{queue_counter}"]
     for it in queue_list:
         d = it.task_data
         lines.append(f"{it.counter}|{it.is_priority}|{d.get('author_id', 0)}|{d.get('place_id', '')}|{d.get('game_id', '') or ''}|{d.get('is_ephemeral', False)}")
@@ -262,29 +262,12 @@ def load_queue():
                 line = line.strip()
                 if not line:
                     continue
-                parts = line.split("|")
-                if len(parts) < 6:
-                    continue
-                counter = int(parts[0])
-                is_priority = parts[1] == "True"
-                author_id = int(parts[2])
-                place_id = parts[3]
-                game_id = parts[4] or None
-                is_ephemeral = parts[5] == "True"
-                if counter > queue_counter:
-                    queue_counter = counter
-                queue_list.append(QueueItem(
-                    is_priority=is_priority,
-                    counter=counter,
-                    task_data={
-                        "author_id": author_id,
-                        "place_id": place_id,
-                        "game_id": game_id,
-                        "is_ephemeral": is_ephemeral,
-                        "last_pos": None,
-                    }
-                ))
-        print(f"[QUEUE] Loaded {len(queue_list)} items from queue.txt")
+                if line.startswith("COUNTER:"):
+                    c = int(line.split(":", 1)[1])
+                    if c > queue_counter:
+                        queue_counter = c
+        os.remove(queue_file)
+        print(f"[QUEUE] Cleared stale queue entries on startup")
     except Exception as e:
         print(f"[QUEUE] Failed to load queue: {e}")
 
