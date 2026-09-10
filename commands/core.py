@@ -1086,6 +1086,10 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
     return None, None
 
 async def run_decompile_logic(send_func, user: discord.User | discord.Member, guild, channel, place_id: str, game_id: str = None, is_ephemeral: bool = False, on_status_update=None):
+    try:
+        open(os.path.join(BASE_DIR, ".check_update"), "w").close()
+    except Exception:
+        pass
     author_id = user.id
     now = time.time()
 

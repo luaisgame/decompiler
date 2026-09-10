@@ -4,11 +4,14 @@ import os
 import time
 import urllib.request
 import shutil
+import json
 
 REPO = "luaisgame/decompiler"
 BRANCH = "main"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WORK_DIR = os.path.join(SCRIPT_DIR, "bot_code")
+COMMIT_FILE = os.path.join(WORK_DIR, ".last_commit")
+CHECK_FILE = os.path.join(WORK_DIR, ".check_update")
 
 FILES_TO_FETCH = [
     "bot.py",
@@ -32,6 +35,28 @@ def fetch_file(path):
     except Exception as e:
         print(f"[FETCH] Failed to fetch {path}: {e}")
         return None
+
+def get_latest_commit():
+    url = f"https://api.github.com/repos/{REPO}/commits/{BRANCH}"
+    try:
+        req = urllib.request.Request(url)
+        req.add_header("Accept", "application/vnd.github.v3+json")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("sha")
+    except Exception as e:
+        print(f"[SYNC] Failed to get latest commit: {e}")
+        return None
+
+def get_saved_commit():
+    if os.path.exists(COMMIT_FILE):
+        with open(COMMIT_FILE, "r") as f:
+            return f.read().strip()
+    return None
+
+def save_commit(sha):
+    with open(COMMIT_FILE, "w") as f:
+        f.write(sha)
 
 def sync_from_github():
     print("[SYNC] Fetching latest code from GitHub...")
@@ -68,6 +93,28 @@ def run_bot():
     )
     return process
 
+def check_and_update():
+    if not os.path.exists(CHECK_FILE):
+        return False
+
+    os.remove(CHECK_FILE)
+    print("[RUNNER] Command used, checking for updates...")
+
+    latest_sha = get_latest_commit()
+    if not latest_sha:
+        return False
+
+    saved_sha = get_saved_commit()
+    if latest_sha == saved_sha:
+        print("[RUNNER] Already up to date.")
+        return False
+
+    print(f"[RUNNER] New commit: {(saved_sha or '?')[:8]} -> {latest_sha[:8]}")
+    if sync_from_github():
+        save_commit(latest_sha)
+        return True
+    return False
+
 def main():
     print("=" * 50)
     print("  Decompiler Bot - GitHub Runner")
@@ -81,13 +128,13 @@ def main():
 
         process = run_bot()
 
-        try:
-            process.wait()
-        except KeyboardInterrupt:
-            print("\n[RUNNER] Shutting down...")
-            process.terminate()
-            process.wait()
-            break
+        while process.poll() is None:
+            time.sleep(10)
+            if check_and_update():
+                print("[RUNNER] Restarting bot for update...")
+                process.terminate()
+                process.wait()
+                break
 
         exit_code = process.returncode
         print(f"[RUNNER] Bot exited with code {exit_code}")
