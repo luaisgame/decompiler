@@ -5,7 +5,6 @@ import time
 import urllib.request
 import json
 import threading
-import sysconfig
 
 REPO = "luaisgame/decompiler"
 BRANCH = "main"
@@ -35,17 +34,6 @@ def fetch_file(path):
             return resp.read().decode("utf-8")
     except Exception as e:
         print(f"[FETCH] Failed to fetch {path}: {e}")
-        return None
-
-def get_latest_commit():
-    url = f"https://api.github.com/repos/{REPO}/commits/{BRANCH}"
-    try:
-        req = urllib.request.Request(url)
-        req.add_header("Accept", "application/vnd.github.v3+json")
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data.get("sha")
-    except Exception:
         return None
 
 def get_file_last_commit(path):
@@ -104,8 +92,16 @@ def fetch_files(file_list=None):
     print(f"[SYNC] {len(files)} file(s) loaded.")
     return files
 
+def update_saved_commits(changed_files):
+    saved = get_saved_commits()
+    for path in changed_files:
+        sha = get_file_last_commit(path)
+        if sha:
+            saved[path] = sha
+    save_commits(saved)
+
 LAUNCHER = r'''
-import sys, os, json, types
+import sys, os, json, types, threading
 
 os.environ["BOT_BASE_DIR"] = r"''' + SCRIPT_DIR.replace("\\", "\\\\") + '''"
 
@@ -132,6 +128,33 @@ for path, code in _payload.items():
     sys.modules[mod_name] = mod
     exec(compile(code, f"<github:{mod_name}>", "exec"), mod.__dict__)
 
+def _stdin_reader():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            update = json.loads(line)
+        except Exception:
+            continue
+        for path, code in update.items():
+            if path == "bot.py":
+                continue
+            mod_name = path.replace("/", ".").replace(".py", "")
+            if mod_name.endswith(".__init__"):
+                mod_name = mod_name[:-9]
+            package = "commands" if mod_name.startswith("commands.") else None
+            mod = types.ModuleType(mod_name, code)
+            mod.__file__ = f"<github:{mod_name}>"
+            mod.__loader__ = None
+            if package:
+                mod.__package__ = package
+            sys.modules[mod_name] = mod
+            exec(compile(code, f"<github:{mod_name}>", "exec"), mod.__dict__)
+            print(f"[RELOAD] {path}")
+
+threading.Thread(target=_stdin_reader, daemon=True).start()
+
 bot_code = _payload["bot.py"]
 exec(compile(bot_code, "<github:bot>", "exec"), {"__name__": "__main__", "__file__": "<github:bot>"})
 '''
@@ -146,8 +169,22 @@ def get_python():
         return "python"
     return sys.executable
 
-def run_bot(files):
-    payload = json.dumps(files)
+def main():
+    print("=" * 50)
+    print("  Decompiler Bot - GitHub Runner (No Restart)")
+    print("=" * 50)
+
+    files = fetch_files()
+    if files is None:
+        print("[RUNNER] Initial fetch failed. Retrying in 5 seconds...")
+        time.sleep(5)
+        files = fetch_files()
+        if files is None:
+            print("[RUNNER] Cannot start without code.")
+            return
+
+    update_saved_commits(FILES_TO_FETCH)
+
     python = get_python()
     print(f"[RUNNER] Using Python: {python}")
     process = subprocess.Popen(
@@ -156,81 +193,35 @@ def run_bot(files):
         stdout=sys.stdout,
         stderr=sys.stderr,
     )
-    process.stdin.write(payload.encode())
-    process.stdin.close()
-    return process
+    process.stdin.write(json.dumps(files).encode())
+    process.stdin.flush()
 
-def main():
-    print("=" * 50)
-    print("  Decompiler Bot - GitHub Runner (Memory)")
-    print("=" * 50)
+    while process.poll() is None:
+        time.sleep(10)
+        if not os.path.exists(CHECK_FILE):
+            continue
 
-    changed = get_changed_files()
-    if not changed:
-        print("[RUNNER] All files up to date.")
-        files = fetch_files()
-    else:
-        files = fetch_files(changed)
+        os.remove(CHECK_FILE)
+        print("[RUNNER] Command used, checking for updates...")
 
-    if files is None:
-        print("[RUNNER] Initial fetch failed. Retrying in 5 seconds...")
-        time.sleep(5)
-
-    saved = get_saved_commits()
-    for path in FILES_TO_FETCH:
-        sha = get_file_last_commit(path)
-        if sha:
-            saved[path] = sha
-    save_commits(saved)
-
-    while True:
-        if files is None:
-            changed = get_changed_files()
-            if not changed:
-                print("[RUNNER] All files up to date.")
-                files = fetch_files()
-            else:
-                files = fetch_files(changed)
-            if files is None:
-                time.sleep(5)
-                continue
-
-        process = run_bot(files)
-
-        while process.poll() is None:
-            time.sleep(10)
-            if not os.path.exists(CHECK_FILE):
-                continue
-
-            os.remove(CHECK_FILE)
-            print("[RUNNER] Command used, checking for updates...")
-
-            changed = get_changed_files()
-            if changed:
-                print(f"[RUNNER] Changed: {', '.join(changed)}")
-                new_files = fetch_files(changed)
-                if new_files:
-                    files.update(new_files)
-                    saved = get_saved_commits()
-                    for path in changed:
-                        sha = get_file_last_commit(path)
-                        if sha:
-                            saved[path] = sha
-                    save_commits(saved)
-                    print(f"[RUNNER] Updated {len(changed)} file(s). Restarting...")
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except Exception:
-                        process.kill()
+        changed = get_changed_files()
+        if changed:
+            print(f"[RUNNER] Changed: {', '.join(changed)}")
+            new_files = fetch_files(changed)
+            if new_files:
+                try:
+                    process.stdin.write(json.dumps(new_files).encode())
+                    process.stdin.write(b"\n")
+                    process.stdin.flush()
+                except Exception:
+                    print("[RUNNER] Process stdin closed, cannot send update.")
                     break
-            else:
-                print("[RUNNER] Already up to date.")
+                update_saved_commits(changed)
+                print(f"[RUNNER] Sent {len(changed)} file(s) for hot-reload.")
+        else:
+            print("[RUNNER] Already up to date.")
 
-        exit_code = process.returncode
-        print(f"[RUNNER] Bot exited with code {exit_code}")
-        print("[RUNNER] Restarting in 3 seconds...")
-        time.sleep(3)
+    print(f"[RUNNER] Bot exited with code {process.returncode}")
 
 if __name__ == "__main__":
     main()
