@@ -5,6 +5,7 @@ import time
 import urllib.request
 import json
 import threading
+import sysconfig
 
 REPO = "luaisgame/decompiler"
 BRANCH = "main"
@@ -108,10 +109,22 @@ bot_code = _payload["bot.py"]
 exec(compile(bot_code, "<github:bot>", "exec"), {"__name__": "__main__", "__file__": "<github:bot>"})
 '''
 
+def get_python():
+    if getattr(sys, "frozen", False):
+        for name in ["python.exe", "python3.exe", "python3.14.exe"]:
+            for path_dir in os.environ.get("PATH", "").split(os.pathsep):
+                candidate = os.path.join(path_dir, name)
+                if os.path.exists(candidate):
+                    return candidate
+        return "python"
+    return sys.executable
+
 def run_bot(files):
     payload = json.dumps(files)
+    python = get_python()
+    print(f"[RUNNER] Using Python: {python}")
     process = subprocess.Popen(
-        [sys.executable, "-c", LAUNCHER],
+        [python, "-c", LAUNCHER],
         stdin=subprocess.PIPE,
         stdout=sys.stdout,
         stderr=sys.stderr,
