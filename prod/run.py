@@ -11,6 +11,7 @@ BRANCH = "main"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 COMMIT_FILE = os.path.join(SCRIPT_DIR, ".last_commit")
+CHECK_FILE = os.path.join(SCRIPT_DIR, ".check_update")
 
 FILES_TO_FETCH = [
     "bot.py",
@@ -135,6 +136,12 @@ def main():
 
         while process.poll() is None:
             time.sleep(10)
+            if not os.path.exists(CHECK_FILE):
+                continue
+
+            os.remove(CHECK_FILE)
+            print("[RUNNER] Command used, checking for updates...")
+
             latest_sha = get_latest_commit()
             if latest_sha:
                 saved_sha = get_saved_commit()
