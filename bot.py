@@ -39,6 +39,10 @@ async def on_ready():
 
 @bot.event
 async def on_command(ctx):
+    try:
+        open(os.path.join(os.environ.get("BOT_BASE_DIR", os.path.dirname(os.path.abspath(__file__))), ".check_update"), "w").close()
+    except Exception:
+        pass
     author = ctx.author
     guild = ctx.guild.name if ctx.guild else "DM"
     channel = ctx.channel.name if ctx.guild else "DM"
