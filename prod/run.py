@@ -48,38 +48,47 @@ def get_latest_commit():
     except Exception:
         return None
 
-def get_changed_files(old_sha, new_sha):
-    url = f"https://api.github.com/repos/{REPO}/compare/{old_sha}...{new_sha}"
+def get_file_last_commit(path):
+    url = f"https://api.github.com/repos/{REPO}/commits?path={path}&sha={BRANCH}&per_page=1"
     try:
         req = urllib.request.Request(url)
         req.add_header("Accept", "application/vnd.github.v3+json")
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            files = []
-            for f in data.get("files", []):
-                name = f.get("filename", "")
-                if name in FILES_TO_FETCH:
-                    files.append(name)
-            return files
-    except Exception as e:
-        print(f"[SYNC] Failed to get changed files: {e}")
-        return None
-
-def get_saved_commit():
-    try:
-        if os.path.exists(COMMIT_FILE):
-            with open(COMMIT_FILE, "r") as f:
-                return f.read().strip()
+            if isinstance(data, list) and len(data) > 0:
+                return data[0].get("sha")
     except Exception:
         pass
     return None
 
-def save_commit(sha):
+def get_saved_commits():
     try:
-        with open(COMMIT_FILE, "w") as f:
-            f.write(sha)
+        if os.path.exists(COMMIT_FILE):
+            with open(COMMIT_FILE, "r") as f:
+                return json.loads(f.read())
     except Exception:
         pass
+    return {}
+
+def save_commits(data):
+    try:
+        with open(COMMIT_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+def get_changed_files():
+    saved = get_saved_commits()
+    changed = []
+    for path in FILES_TO_FETCH:
+        remote_sha = get_file_last_commit(path)
+        if remote_sha is None:
+            changed.append(path)
+            continue
+        local_sha = saved.get(path)
+        if local_sha != remote_sha:
+            changed.append(path)
+    return changed
 
 def fetch_files(file_list=None):
     to_fetch = file_list if file_list else FILES_TO_FETCH
@@ -156,14 +165,32 @@ def main():
     print("  Decompiler Bot - GitHub Runner (Memory)")
     print("=" * 50)
 
-    files = fetch_files()
+    changed = get_changed_files()
+    if not changed:
+        print("[RUNNER] All files up to date.")
+        files = fetch_files()
+    else:
+        files = fetch_files(changed)
+
     if files is None:
         print("[RUNNER] Initial fetch failed. Retrying in 5 seconds...")
         time.sleep(5)
 
+    saved = get_saved_commits()
+    for path in FILES_TO_FETCH:
+        sha = get_file_last_commit(path)
+        if sha:
+            saved[path] = sha
+    save_commits(saved)
+
     while True:
         if files is None:
-            files = fetch_files()
+            changed = get_changed_files()
+            if not changed:
+                print("[RUNNER] All files up to date.")
+                files = fetch_files()
+            else:
+                files = fetch_files(changed)
             if files is None:
                 time.sleep(5)
                 continue
@@ -178,26 +205,27 @@ def main():
             os.remove(CHECK_FILE)
             print("[RUNNER] Command used, checking for updates...")
 
-            latest_sha = get_latest_commit()
-            if latest_sha:
-                saved_sha = get_saved_commit()
-                if latest_sha != saved_sha:
-                    print(f"[RUNNER] Update: {(saved_sha or '?')[:8]} -> {latest_sha[:8]}")
-                    changed = get_changed_files(saved_sha, latest_sha)
-                    if changed is None:
-                        changed = FILES_TO_FETCH
-                    if changed:
-                        new_files = fetch_files(changed)
-                        if new_files:
-                            files.update(new_files)
-                            save_commit(latest_sha)
-                            print(f"[RUNNER] Updated {len(changed)} file(s). Restarting...")
-                            process.terminate()
-                            try:
-                                process.wait(timeout=5)
-                            except Exception:
-                                process.kill()
-                            break
+            changed = get_changed_files()
+            if changed:
+                print(f"[RUNNER] Changed: {', '.join(changed)}")
+                new_files = fetch_files(changed)
+                if new_files:
+                    files.update(new_files)
+                    saved = get_saved_commits()
+                    for path in changed:
+                        sha = get_file_last_commit(path)
+                        if sha:
+                            saved[path] = sha
+                    save_commits(saved)
+                    print(f"[RUNNER] Updated {len(changed)} file(s). Restarting...")
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except Exception:
+                        process.kill()
+                    break
+            else:
+                print("[RUNNER] Already up to date.")
 
         exit_code = process.returncode
         print(f"[RUNNER] Bot exited with code {exit_code}")
