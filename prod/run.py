@@ -48,6 +48,23 @@ def get_latest_commit():
     except Exception:
         return None
 
+def get_changed_files(old_sha, new_sha):
+    url = f"https://api.github.com/repos/{REPO}/compare/{old_sha}...{new_sha}"
+    try:
+        req = urllib.request.Request(url)
+        req.add_header("Accept", "application/vnd.github.v3+json")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            files = []
+            for f in data.get("files", []):
+                name = f.get("filename", "")
+                if name in FILES_TO_FETCH:
+                    files.append(name)
+            return files
+    except Exception as e:
+        print(f"[SYNC] Failed to get changed files: {e}")
+        return None
+
 def get_saved_commit():
     try:
         if os.path.exists(COMMIT_FILE):
@@ -64,17 +81,18 @@ def save_commit(sha):
     except Exception:
         pass
 
-def fetch_all():
-    print("[SYNC] Fetching code from GitHub...")
+def fetch_files(file_list=None):
+    to_fetch = file_list if file_list else FILES_TO_FETCH
+    print(f"[SYNC] Fetching {len(to_fetch)} file(s) from GitHub...")
     files = {}
-    for path in FILES_TO_FETCH:
+    for path in to_fetch:
         content = fetch_file(path)
         if content is None:
             print(f"[SYNC] FATAL: Could not fetch {path}")
             return None
         files[path] = content
         print(f"[SYNC] {path}")
-    print(f"[SYNC] {len(files)} files loaded.")
+    print(f"[SYNC] {len(files)} file(s) loaded.")
     return files
 
 LAUNCHER = r'''
@@ -138,12 +156,17 @@ def main():
     print("  Decompiler Bot - GitHub Runner (Memory)")
     print("=" * 50)
 
+    files = fetch_files()
+    if files is None:
+        print("[RUNNER] Initial fetch failed. Retrying in 5 seconds...")
+        time.sleep(5)
+
     while True:
-        files = fetch_all()
         if files is None:
-            print("[RUNNER] Fetch failed. Retrying in 5 seconds...")
-            time.sleep(5)
-            continue
+            files = fetch_files()
+            if files is None:
+                time.sleep(5)
+                continue
 
         process = run_bot(files)
 
@@ -160,17 +183,21 @@ def main():
                 saved_sha = get_saved_commit()
                 if latest_sha != saved_sha:
                     print(f"[RUNNER] Update: {(saved_sha or '?')[:8]} -> {latest_sha[:8]}")
-                    new_files = fetch_all()
-                    if new_files:
-                        save_commit(latest_sha)
-                        print("[RUNNER] Restarting for update...")
-                        process.terminate()
-                        try:
-                            process.wait(timeout=5)
-                        except Exception:
-                            process.kill()
-                        files = new_files
-                        break
+                    changed = get_changed_files(saved_sha, latest_sha)
+                    if changed is None:
+                        changed = FILES_TO_FETCH
+                    if changed:
+                        new_files = fetch_files(changed)
+                        if new_files:
+                            files.update(new_files)
+                            save_commit(latest_sha)
+                            print(f"[RUNNER] Updated {len(changed)} file(s). Restarting...")
+                            process.terminate()
+                            try:
+                                process.wait(timeout=5)
+                            except Exception:
+                                process.kill()
+                            break
 
         exit_code = process.returncode
         print(f"[RUNNER] Bot exited with code {exit_code}")
