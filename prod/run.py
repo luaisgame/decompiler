@@ -3,15 +3,14 @@ import sys
 import os
 import time
 import urllib.request
-import shutil
 import json
+import threading
 
 REPO = "luaisgame/decompiler"
 BRANCH = "main"
+RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-WORK_DIR = os.path.join(SCRIPT_DIR, "bot_code")
-COMMIT_FILE = os.path.join(WORK_DIR, ".last_commit")
-CHECK_FILE = os.path.join(WORK_DIR, ".check_update")
+COMMIT_FILE = os.path.join(SCRIPT_DIR, ".last_commit")
 
 FILES_TO_FETCH = [
     "bot.py",
@@ -27,7 +26,7 @@ FILES_TO_FETCH = [
 ]
 
 def fetch_file(path):
-    url = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/{path}"
+    url = f"{RAW_BASE}/{path}"
     try:
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -44,101 +43,117 @@ def get_latest_commit():
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             return data.get("sha")
-    except Exception as e:
-        print(f"[SYNC] Failed to get latest commit: {e}")
+    except Exception:
         return None
 
 def get_saved_commit():
-    if os.path.exists(COMMIT_FILE):
-        with open(COMMIT_FILE, "r") as f:
-            return f.read().strip()
+    try:
+        if os.path.exists(COMMIT_FILE):
+            with open(COMMIT_FILE, "r") as f:
+                return f.read().strip()
+    except Exception:
+        pass
     return None
 
 def save_commit(sha):
-    with open(COMMIT_FILE, "w") as f:
-        f.write(sha)
+    try:
+        with open(COMMIT_FILE, "w") as f:
+            f.write(sha)
+    except Exception:
+        pass
 
-def sync_from_github():
-    print("[SYNC] Fetching latest code from GitHub...")
-    os.makedirs(os.path.join(WORK_DIR, "commands"), exist_ok=True)
+def fetch_all():
+    print("[SYNC] Fetching code from GitHub...")
+    files = {}
     for path in FILES_TO_FETCH:
         content = fetch_file(path)
         if content is None:
-            print(f"[SYNC] ERROR: Could not fetch {path}")
-            return False
-        local_path = os.path.join(WORK_DIR, path)
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        with open(local_path, "w", encoding="utf-8") as f:
-            f.write(content)
+            print(f"[SYNC] FATAL: Could not fetch {path}")
+            return None
+        files[path] = content
         print(f"[SYNC] {path}")
+    print(f"[SYNC] {len(files)} files loaded.")
+    return files
 
-    env_src = os.path.join(SCRIPT_DIR, ".env")
-    env_dst = os.path.join(WORK_DIR, ".env")
-    if os.path.exists(env_src):
-        shutil.copy2(env_src, env_dst)
-        print("[SYNC] .env copied")
+LAUNCHER = r'''
+import sys, os, json, types
 
-    print("[SYNC] All files synced.")
-    return True
+os.environ["BOT_BASE_DIR"] = r"''' + SCRIPT_DIR.replace("\\", "\\\\") + '''"
 
-def run_bot():
-    print("[RUNNER] Starting bot.py...")
-    bot_path = os.path.join(WORK_DIR, "bot.py")
-    env = os.environ.copy()
-    env["PYTHONPATH"] = WORK_DIR
+_payload = json.loads(sys.stdin.readline())
+sys.argv = [sys.argv[0]]
+
+if "commands" not in sys.modules:
+    pkg = types.ModuleType("commands")
+    pkg.__path__ = []
+    sys.modules["commands"] = pkg
+
+for path, code in _payload.items():
+    if path == "bot.py":
+        continue
+    mod_name = path.replace("/", ".").replace(".py", "")
+    if mod_name.endswith(".__init__"):
+        mod_name = mod_name[:-9]
+    package = "commands" if mod_name.startswith("commands.") else None
+    mod = types.ModuleType(mod_name, code)
+    mod.__file__ = f"<github:{mod_name}>"
+    mod.__loader__ = None
+    if package:
+        mod.__package__ = package
+    sys.modules[mod_name] = mod
+    exec(compile(code, f"<github:{mod_name}>", "exec"), mod.__dict__)
+
+bot_code = _payload["bot.py"]
+exec(compile(bot_code, "<github:bot>", "exec"), {"__name__": "__main__", "__file__": "<github:bot>"})
+'''
+
+def run_bot(files):
+    payload = json.dumps(files)
     process = subprocess.Popen(
-        [sys.executable, bot_path],
-        cwd=WORK_DIR,
-        env=env
+        [sys.executable, "-c", LAUNCHER],
+        stdin=subprocess.PIPE,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
     )
+    process.stdin.write(payload.encode())
+    process.stdin.close()
     return process
-
-def check_and_update():
-    if not os.path.exists(CHECK_FILE):
-        return False
-
-    os.remove(CHECK_FILE)
-    print("[RUNNER] Command used, checking for updates...")
-
-    latest_sha = get_latest_commit()
-    if not latest_sha:
-        return False
-
-    saved_sha = get_saved_commit()
-    if latest_sha == saved_sha:
-        print("[RUNNER] Already up to date.")
-        return False
-
-    print(f"[RUNNER] New commit: {(saved_sha or '?')[:8]} -> {latest_sha[:8]}")
-    if sync_from_github():
-        save_commit(latest_sha)
-        return True
-    return False
 
 def main():
     print("=" * 50)
-    print("  Decompiler Bot - GitHub Runner")
+    print("  Decompiler Bot - GitHub Runner (Memory)")
     print("=" * 50)
 
     while True:
-        if not sync_from_github():
-            print("[RUNNER] Sync failed. Retrying in 5 seconds...")
+        files = fetch_all()
+        if files is None:
+            print("[RUNNER] Fetch failed. Retrying in 5 seconds...")
             time.sleep(5)
             continue
 
-        process = run_bot()
+        process = run_bot(files)
 
         while process.poll() is None:
             time.sleep(10)
-            if check_and_update():
-                print("[RUNNER] Restarting bot for update...")
-                process.terminate()
-                process.wait()
-                break
+            latest_sha = get_latest_commit()
+            if latest_sha:
+                saved_sha = get_saved_commit()
+                if latest_sha != saved_sha:
+                    print(f"[RUNNER] Update: {(saved_sha or '?')[:8]} -> {latest_sha[:8]}")
+                    new_files = fetch_all()
+                    if new_files:
+                        save_commit(latest_sha)
+                        print("[RUNNER] Restarting for update...")
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except Exception:
+                            process.kill()
+                        files = new_files
+                        break
 
         exit_code = process.returncode
         print(f"[RUNNER] Bot exited with code {exit_code}")
-
         print("[RUNNER] Restarting in 3 seconds...")
         time.sleep(3)
 
