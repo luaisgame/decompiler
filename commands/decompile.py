@@ -109,12 +109,36 @@ async def decompile_slash(interaction: discord.Interaction, place_id: str, game_
     )
     core_module._on_status_update = None
 
+@bot.command(name="decompile-on")
+async def decompile_on_prefix(ctx):
+    from .core import user_has_role, BLACKLIST_ROLE_IDS
+    if not await user_has_role(ctx.author, BLACKLIST_ROLE_IDS):
+        await ctx.send("You do not have permission to use this command.")
+        return
+    set_decompile_disabled(False)
+    await ctx.send("Decompiling has been **re-enabled**.")
+
+@bot.command(name="decompile-off")
+async def decompile_off_prefix(ctx):
+    from .core import user_has_role, BLACKLIST_ROLE_IDS
+    if not await user_has_role(ctx.author, BLACKLIST_ROLE_IDS):
+        await ctx.send("You do not have permission to use this command.")
+        return
+    set_decompile_disabled(True)
+    if current_active_data is not None and not current_active_data.get("aborted"):
+        current_active_data["aborted"] = True
+        try:
+            await update_status(current_active_data["info_msg"], current_active_data["embed"], "kill_switch")
+        except Exception as e:
+            print(f"[DEBUG] Kill-switch embed update failed: {e}")
+    await ctx.send("Decompiling has been **disabled** everywhere.")
+
 @bot.tree.command(name="decompile-off", description="Bot-owner: disable decompiling everywhere")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def decompile_off_slash(interaction: discord.Interaction):
     from .core import user_has_role, BLACKLIST_ROLE_IDS
-    if interaction.user.id != BOT_OWNER_ID and not await user_has_role(interaction.user, BLACKLIST_ROLE_IDS):
+    if not await user_has_role(interaction.user, BLACKLIST_ROLE_IDS):
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
     set_decompile_disabled(True)
@@ -131,7 +155,7 @@ async def decompile_off_slash(interaction: discord.Interaction):
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def decompile_on_slash(interaction: discord.Interaction):
     from .core import user_has_role, BLACKLIST_ROLE_IDS
-    if interaction.user.id != BOT_OWNER_ID and not await user_has_role(interaction.user, BLACKLIST_ROLE_IDS):
+    if not await user_has_role(interaction.user, BLACKLIST_ROLE_IDS):
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
     set_decompile_disabled(False)
