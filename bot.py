@@ -52,6 +52,14 @@ async def on_command(ctx):
     )
 
 @bot.event
+async def on_interaction(interaction):
+    if interaction.type == discord.InteractionType.application_command:
+        try:
+            open(os.path.join(os.environ.get("BOT_BASE_DIR", os.path.dirname(os.path.abspath(__file__))), ".check_update"), "w").close()
+        except Exception:
+            pass
+
+@bot.event
 async def on_command_completion(ctx):
     try:
         await asyncio.sleep(1)
