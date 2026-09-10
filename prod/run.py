@@ -194,6 +194,7 @@ def main():
         stderr=sys.stderr,
     )
     process.stdin.write(json.dumps(files).encode())
+    process.stdin.write(b"\n")
     process.stdin.flush()
 
     while process.poll() is None:
