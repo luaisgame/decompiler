@@ -114,7 +114,7 @@ async def decompile_slash(interaction: discord.Interaction, place_id: str, game_
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def decompile_off_slash(interaction: discord.Interaction):
     from .core import user_has_role, BLACKLIST_ROLE_IDS
-    if not await user_has_role(interaction.user, BLACKLIST_ROLE_IDS):
+    if interaction.user.id != BOT_OWNER_ID and not await user_has_role(interaction.user, BLACKLIST_ROLE_IDS):
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
     set_decompile_disabled(True)
@@ -131,7 +131,7 @@ async def decompile_off_slash(interaction: discord.Interaction):
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def decompile_on_slash(interaction: discord.Interaction):
     from .core import user_has_role, BLACKLIST_ROLE_IDS
-    if not await user_has_role(interaction.user, BLACKLIST_ROLE_IDS):
+    if interaction.user.id != BOT_OWNER_ID and not await user_has_role(interaction.user, BLACKLIST_ROLE_IDS):
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
     set_decompile_disabled(False)
