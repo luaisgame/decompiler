@@ -759,9 +759,10 @@ async def resolve_game_by_name(name: str):
         return None, None
 
     async with aiohttp.ClientSession(headers=headers) as session:
+        session_id = str(uuid.uuid4())
         url = (
             f"https://apis.roblox.com/search-api/omni-search"
-            f"?searchQuery={quote(name)}&pageToken=eyJzdGFydCI6MCwiY291bnQiOjQwLCJlbmRPZlBhZ2UiOmZhbHNlfQ==&sessionId={uuid.uuid4()}&pageType=all"
+            f"?searchQuery={quote(name)}&pageToken=eyJzdGFydCI6MCwiY291bnQiOjQwLCJlbmRPZlBhZ2UiOmZhbHNlfQ==&sessionId={session_id}&pageType=all"
         )
         try:
             async with session.get(url) as resp:
