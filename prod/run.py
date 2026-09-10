@@ -9,7 +9,6 @@ REPO = "luaisgame/decompiler"
 BRANCH = "main"
 RAW = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CHECK = os.path.join(SCRIPT_DIR, ".check_update")
 
 FILES = [
     "bot.py",
@@ -86,10 +85,6 @@ while True:
 
     while p.poll() is None:
         time.sleep(10)
-        if os.path.exists(CHECK):
-            os.remove(CHECK)
-            print("[RUNNER] Command used, fetching latest...")
-            break
 
     print(f"[RUNNER] Restarting...")
     try:

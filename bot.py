@@ -39,10 +39,6 @@ async def on_ready():
 
 @bot.event
 async def on_command(ctx):
-    try:
-        open(os.path.join(os.environ.get("BOT_BASE_DIR", os.path.dirname(os.path.abspath(__file__))), ".check_update"), "w").close()
-    except Exception:
-        pass
     author = ctx.author
     guild = ctx.guild.name if ctx.guild else "DM"
     channel = ctx.channel.name if ctx.guild else "DM"
@@ -50,14 +46,6 @@ async def on_command(ctx):
         f"[LOG] {author} (ID: {author.id}) used '!{ctx.command.name}' "
         f"in {guild} #{channel} (message {ctx.message.id})"
     )
-
-@bot.event
-async def on_interaction(interaction):
-    if interaction.type == discord.InteractionType.application_command:
-        try:
-            open(os.path.join(os.environ.get("BOT_BASE_DIR", os.path.dirname(os.path.abspath(__file__))), ".check_update"), "w").close()
-        except Exception:
-            pass
 
 @bot.event
 async def on_command_completion(ctx):
