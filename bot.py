@@ -5,6 +5,32 @@ import types
 import discord
 import urllib.request
 
+REPO = "luaisgame/decompiler"
+BRANCH = "main"
+RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
+
+def _self_update():
+    url = f"{RAW_BASE}/bot.py"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            remote = resp.read().decode("utf-8")
+        my_path = os.path.abspath(__file__)
+        with open(my_path, "r", encoding="utf-8") as f:
+            local = f.read()
+        if remote.strip() != local.strip():
+            print("[UPDATE] New bot.py found on GitHub, updating...")
+            with open(my_path, "w", encoding="utf-8") as f:
+                f.write(remote)
+            print("[UPDATE] Restarting...")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        else:
+            print("[UPDATE] bot.py is up to date.")
+    except Exception as e:
+        print(f"[UPDATE] Self-update check failed: {e}")
+
+_self_update()
+
 from dotenv import load_dotenv
 if getattr(sys, "frozen", False):
     _BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
