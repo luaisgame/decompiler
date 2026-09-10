@@ -1121,6 +1121,8 @@ async def run_decompile_logic(send_func, user: discord.User | discord.Member, gu
     history.append(now)
     user_decompile_history[author_id] = history
 
+    place_id = place_id.strip().strip("[]")
+
     if not place_id.isdigit():
         resolved = await resolve_game_by_name(place_id)
         if resolved is None:
