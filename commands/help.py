@@ -57,7 +57,10 @@ async def help_prefix(ctx):
     )
     embed.add_field(
         name="Info",
-        value="**`!help`** \u2014 show this message.",
+        value=(
+            "**`!help`** \u2014 show this message.\n"
+            "The bot **auto-updates** from GitHub on every command use \u2014 no restart needed."
+        ),
         inline=False
     )
     embed.set_footer(text="Fastest Roblox Decompiler")
@@ -108,6 +111,11 @@ async def help_slash(interaction: discord.Interaction):
             "**`/removecookie <index>`** \u2014 remove a cookie.\n"
             "Auto-rotates on ban detection."
         ),
+        inline=False
+    )
+    embed.add_field(
+        name="Info",
+        value="The bot **auto-updates** from GitHub on every command use \u2014 no restart needed.",
         inline=False
     )
     embed.set_footer(text="Fastest Roblox Decompiler")
