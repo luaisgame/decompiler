@@ -129,6 +129,7 @@ for path, code in _payload.items():
     exec(compile(code, f"<github:{mod_name}>", "exec"), mod.__dict__)
 
 def _stdin_reader():
+    import importlib
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -143,6 +144,19 @@ def _stdin_reader():
             mod_name = path.replace("/", ".").replace(".py", "")
             if mod_name.endswith(".__init__"):
                 mod_name = mod_name[:-9]
+
+            old_mod = sys.modules.get(mod_name)
+            if old_mod:
+                bot_mod = sys.modules.get("commands.core")
+                if bot_mod and hasattr(bot_mod, "bot"):
+                    _bot = bot_mod.bot
+                    to_remove = [c for c in _bot.commands if getattr(c.callback, "__module__", None) == mod_name]
+                    for c in to_remove:
+                        _bot.remove_command(c.name)
+                    tree_cmds = [c for c in _bot.tree.get_commands() if getattr(c.callback, "__module__", None) == mod_name]
+                    for c in tree_cmds:
+                        _bot.tree.remove_command(c.name)
+
             package = "commands" if mod_name.startswith("commands.") else None
             mod = types.ModuleType(mod_name, code)
             mod.__file__ = f"<github:{mod_name}>"
