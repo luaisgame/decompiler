@@ -1007,6 +1007,14 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
                     )
 
                     websocket_busy = False
+                    try:
+                        await asyncio.wait_for(proc_task.wait(), timeout=120)
+                    except asyncio.TimeoutError:
+                        print(f"[DEBUG] oracle-postprocess timed out after 120s, killing...")
+                        proc_task.kill()
+                        await proc_task.wait()
+                        continue
+
                     while True:
                         line = await proc_task.stdout.readline()
                         if not line:
@@ -1018,7 +1026,7 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
                             websocket_busy = True
                         print(decoded_line)
 
-                    returncode = await proc_task.wait()
+                    returncode = proc_task.returncode
 
                     if returncode == 0 or os.path.exists(out_path):
                         print(f"[DEBUG] oracle-postprocess succeeded on attempt {attempt}.")
