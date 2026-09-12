@@ -1163,7 +1163,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                     preview = new_cookie[:30] + "..." if len(new_cookie) > 30 else new_cookie
                     print(f"[DEBUG] Banned. Auto-switched to cookie {active_cookie_index}: {preview}")
                     await send_msg(send_func, f"Account banned. Switched to cookie `{active_cookie_index}`. Retrying...", ephemeral=is_ephemeral)
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(0.5)
                     is_retry = True
                     await execute_decompile_job(send_func, author_id, guild, channel, place_id, game_id, is_ephemeral, is_priority=is_priority, on_status_update=on_status_update, cookie_retries=cookie_retries + 1, original_cookie_index=original_cookie_index)
                     if original_cookie_index is not None and original_cookie_index < len(cookies):
