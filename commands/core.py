@@ -650,8 +650,6 @@ async def get_place_info(place_id: str) -> dict:
         except Exception as e:
             print(f"[DEBUG] Error fetching Roblox place info: {e}")
             return {"error": True, "reason": f"Exception occurred: {str(e)}"}
-        finally:
-            switch_to_default_cookie()
 
 async def get_current_user_id() -> int | None:
     try:
