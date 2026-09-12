@@ -1,19 +1,67 @@
 import asyncio
 import os
 import sys
+import types
+import urllib.request
+import json
 import discord
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
-
-from dotenv import load_dotenv
 if getattr(sys, "frozen", False):
     _BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
 else:
     _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+if _BASE_DIR not in sys.path:
+    sys.path.insert(0, _BASE_DIR)
+
 os.environ["BOT_BASE_DIR"] = _BASE_DIR
+
+from dotenv import load_dotenv
 load_dotenv(os.path.join(_BASE_DIR, ".env"))
+
+REPO = "luaisgame/decompiler"
+BRANCH = "main"
+RAW_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
+
+GITHUB_FILES = [
+    "commands/__init__.py",
+    "commands/core.py",
+    "commands/setup.py",
+    "commands/blacklist.py",
+    "commands/blacklistuser.py",
+    "commands/blacklistserver.py",
+    "commands/cookie.py",
+    "commands/decompile.py",
+    "commands/help.py",
+]
+
+HAS_LOCAL = os.path.isdir(os.path.join(_BASE_DIR, "commands"))
+
+if not HAS_LOCAL:
+    print("[STARTUP] No local commands folder found, fetching from GitHub...")
+    pkg = types.ModuleType("commands")
+    pkg.__path__ = []
+    sys.modules["commands"] = pkg
+    for path in GITHUB_FILES:
+        try:
+            url = f"{RAW_URL}/{path}"
+            with urllib.request.urlopen(url, timeout=15) as resp:
+                code = resp.read().decode()
+        except Exception as e:
+            print(f"[STARTUP] Failed to fetch {path}: {e}")
+            sys.exit(1)
+        mn = path.replace("/", ".").replace(".py", "")
+        if mn.endswith(".__init__"):
+            mn = mn[:-9]
+        m = types.ModuleType(mn)
+        m.__file__ = f"<github:{mn}>"
+        m.__loader__ = None
+        m.__package__ = "commands" if mn.startswith("commands.") else None
+        sys.modules[mn] = m
+        exec(compile(code, f"<github:{mn}>", "exec"), m.__dict__)
+    print("[STARTUP] All files loaded from GitHub.")
+else:
+    print("[STARTUP] Local commands folder found.")
 
 from commands.core import bot, BOT_TOKEN
 
