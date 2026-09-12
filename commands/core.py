@@ -1165,7 +1165,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                     old_index = active_cookie_index
                     active_cookie_index = (active_cookie_index + 1) % len(cookies)
                     if active_cookie_index == old_index:
-                        active_cookie_index = (old_index + 2) % len(cookies)
+                        active_cookie_index = 0
                     new_cookie = cookies[active_cookie_index]
                     _replace_roblox_security_cookie(new_cookie)
                     preview = new_cookie[:30] + "..." if len(new_cookie) > 30 else new_cookie
@@ -1234,8 +1234,8 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
     await update_bot_presence(game_name)
     await update_status(info_msg, embed, "launching")
     
-    saved_cookie_index = save_and_switch_to_default()
-    print(f"[COOKIE] Saved cookie {saved_cookie_index}, switched to default (0)")
+    saved_cookie_index = active_cookie_index
+    print(f"[COOKIE] Using cookie {active_cookie_index} for launch")
     
     try:
         roblox = find_roblox()
