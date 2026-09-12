@@ -3,18 +3,14 @@ repeat
     task.wait()
 until game:IsLoaded()
 
+local lplr = game.Players.LocalPlayer
 task.spawn(function()
-    local Players = game:GetService("Players")
-    local LocalPlayer = Players.LocalPlayer
+    for _, obj in game:GetDescendants() do
+        if obj.Name:find(lplr.Name) then
+            obj.Name = obj.Name:gsub(obj.Name, "LOCAL_PLAYER")
+        end
 
-    local targets = {
-        game:GetService("ReplicatedFirst"),
-        game:GetService("Workspace"),
-        LocalPlayer,
-    }
-
-    local function disconnectDescendants(parent)
-        for _, obj in parent:GetDescendants() do
+        if obj == game.RunService or game.ReplicatedFirst:IsAncestorOf(obj) then
             task.spawn(function()
                 for _, prop in getproperties(obj) do
                     if typeof(obj[prop]) == "RBXScriptSignal" then
@@ -26,20 +22,8 @@ task.spawn(function()
             end)
         end
     end
-
-    for _, parent in targets do
-        disconnectDescendants(parent)
-    end
-
-    if LocalPlayer.Character then
-        disconnectDescendants(LocalPlayer.Character)
-    end
-
-    LocalPlayer.CharacterAdded:Connect(function(char)
-        task.wait(0.5)
-        disconnectDescendants(char)
-    end)
 end)
+task.wait()
 task.wait()
 
 task.spawn(function()
