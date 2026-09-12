@@ -1166,6 +1166,9 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                     await asyncio.sleep(2)
                     is_retry = True
                     await execute_decompile_job(send_func, author_id, guild, channel, place_id, game_id, is_ephemeral, is_priority=is_priority, on_status_update=on_status_update, cookie_retries=cookie_retries + 1, original_cookie_index=original_cookie_index)
+                    if original_cookie_index is not None and original_cookie_index < len(cookies):
+                        active_cookie_index = original_cookie_index
+                        _replace_roblox_security_cookie(cookies[original_cookie_index])
                     return
                 elif cookie_retries >= len(cookies):
                     if original_cookie_index is not None and original_cookie_index < len(cookies):
