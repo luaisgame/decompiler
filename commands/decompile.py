@@ -5,7 +5,7 @@ from .core import (bot, run_decompile_logic, load_allowed_channels, BOT_OWNER_ID
                    set_decompile_disabled, current_active_data, update_status)
 
 @bot.command()
-async def decompile(ctx, place_id: str, game_id: str = None):
+async def decompile(ctx, place_id: str, game_id: str = None, cookie: str = None):
     if ctx.guild:
         allowed_channels = load_allowed_channels()
         allowed_channel_id = allowed_channels.get(ctx.guild.id)
@@ -42,21 +42,22 @@ async def decompile(ctx, place_id: str, game_id: str = None):
                 print(f"[DEBUG] Failed to update owner DM: {e}")
 
     core_module._on_status_update = on_status_update
-    await run_decompile_logic(prefix_send, ctx.author, ctx.guild, ctx.channel, place_id, game_id, is_ephemeral=False)
+    await run_decompile_logic(prefix_send, ctx.author, ctx.guild, ctx.channel, place_id, game_id, is_ephemeral=False, user_cookie=cookie)
     core_module._on_status_update = None
 
 @bot.command()
-async def decomp(ctx, a: str, b: str = None):
-    return await decompile(ctx, a, b)
+async def decomp(ctx, a: str, b: str = None, cookie: str = None):
+    return await decompile(ctx, a, b, cookie=cookie)
 
 @bot.tree.command(name="decompile", description="Decompile a Roblox Experience by Place ID")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 @app_commands.describe(
     place_id="The numeric Roblox Place ID to decompile",
-    game_id="Optional Job ID or Private Server Link Code"
+    game_id="Optional Job ID or Private Server Link Code",
+    cookie="Optional Roblox .ROBLOSECURITY cookie to use"
 )
-async def decompile_slash(interaction: discord.Interaction, place_id: str, game_id: str = None):
+async def decompile_slash(interaction: discord.Interaction, place_id: str, game_id: str = None, cookie: str = None):
     if interaction.guild:
         allowed_channels = load_allowed_channels()
         allowed_channel_id = allowed_channels.get(interaction.guild.id)
@@ -105,7 +106,8 @@ async def decompile_slash(interaction: discord.Interaction, place_id: str, game_
         interaction.channel,
         place_id,
         game_id,
-        is_ephemeral=False
+        is_ephemeral=False,
+        user_cookie=cookie
     )
     core_module._on_status_update = None
 

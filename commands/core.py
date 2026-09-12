@@ -276,7 +276,8 @@ async def _renumber_queue(notify_bumps: bool = False):
             except Exception as e:
                 print(f"[DEBUG] Failed to notify user of queue shift: {e}")
 
-async def enqueue_decompile_task(send_func, user: discord.User | discord.Member, guild, channel, place_id: str, game_id: str, is_ephemeral: bool, on_status_update=None):
+async def enqueue_decompile_task(send_func, user: discord.User | discord.Member, 
+guild, channel, place_id: str, game_id: str, is_ephemeral: bool, on_status_update=None, user_cookie: str = None):
     global queue_counter, current_active_data
     queue_counter += 1
     author_id = user.id
@@ -293,6 +294,7 @@ async def enqueue_decompile_task(send_func, user: discord.User | discord.Member,
             "game_id": game_id,
             "is_ephemeral": is_ephemeral,
             "on_status_update": on_status_update,
+            "user_cookie": user_cookie,
             "future": asyncio.get_running_loop().create_future(),
             "last_pos": None
         }
@@ -367,7 +369,8 @@ async def decompile_queue_worker():
                 is_priority=item.is_priority,
                 resume_info_msg=data.get("resume_info_msg"),
                 resume_embed=data.get("resume_embed"),
-                on_status_update=data.get("on_status_update")
+                on_status_update=data.get("on_status_update"),
+                user_cookie=data.get("user_cookie")
             )
         except Exception as e:
             print(f"[DEBUG] Queue worker error processing task: {e}")
@@ -668,6 +671,27 @@ async def get_current_user_id() -> int | None:
     except Exception:
         pass
     return None
+
+async def validate_cookie(cookie: str) -> dict:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Cookie": f".ROBLOSECURITY={cookie}",
+    }
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get("https://users.roblox.com/v1/users/authenticated") as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return {"valid": True, "username": data.get("name"), "user_id": data.get("id")}
+                elif resp.status == 401:
+                    return {"valid": False, "reason": "Cookie is expired or invalid."}
+                elif resp.status == 403:
+                    return {"valid": False, "reason": "Account is banned or requires verification."}
+                else:
+                    return {"valid": False, "reason": f"Unexpected status code {resp.status}."}
+    except Exception as e:
+        return {"valid": False, "reason": f"Connection error: {str(e)}"}
 
 async def is_user_banned_from_game(user_id: int, place_id: str) -> bool:
     try:
@@ -1062,7 +1086,7 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
     print("[DEBUG] Processed file check timed out.")
     return None, None
 
-async def run_decompile_logic(send_func, user: discord.User | discord.Member, guild, channel, place_id: str, game_id: str = None, is_ephemeral: bool = False, on_status_update=None):
+async def run_decompile_logic(send_func, user: discord.User | discord.Member, guild, channel, place_id: str, game_id: str = None, is_ephemeral: bool = False, on_status_update=None, user_cookie: str = None):
     author_id = user.id
     now = time.time()
 
@@ -1117,17 +1141,37 @@ async def run_decompile_logic(send_func, user: discord.User | discord.Member, gu
         await send_msg(send_func, f"**Unable to decompile game:** {game_name}\n**Reason:** {reason}", ephemeral=is_ephemeral)
         return
 
-    await enqueue_decompile_task(send_func, user, guild, channel, place_id, game_id, is_ephemeral)
+    await enqueue_decompile_task(send_func, user, guild, channel, place_id, game_id, is_ephemeral, on_status_update=on_status_update, user_cookie=user_cookie)
 
-async def execute_decompile_job(send_func, author_id: int, guild, channel, place_id: str, game_id: str = None, is_ephemeral: bool = False, is_priority: bool = False, resume_info_msg=None, resume_embed=None, on_status_update=None, cookie_retries=0, original_cookie_index=None):
+async def execute_decompile_job(send_func, author_id: int, guild, channel, place_id: str, game_id: str = None, is_ephemeral: bool = False, is_priority: bool = False, resume_info_msg=None, resume_embed=None, on_status_update=None, cookie_retries=0, original_cookie_index=None, user_cookie: str = None):
     global is_decompiling, running_jobs, active_events, current_active_data, active_cookie_index, default_cookie_index
     is_retry = False
+    saved_user_cookie = None
     if original_cookie_index is None:
         original_cookie_index = active_cookie_index
     print(f"\n[DEBUG] --- Executing Decompile Job ---")
     print(f"[DEBUG] Input place_id: {place_id}")
     print(f"[DEBUG] Input game_id: {game_id}")
     print(f"[DEBUG] priority={is_priority}")
+    print(f"[DEBUG] user_cookie provided: {bool(user_cookie)}")
+
+    if user_cookie and cookie_retries == 0:
+        print(f"[COOKIE] Validating user-provided cookie...")
+        result = await validate_cookie(user_cookie)
+        if not result.get("valid"):
+            await send_msg(send_func, f"Your cookie is invalid: {result.get('reason', 'Unknown error')}. Please provide a valid `.ROBLOSECURITY` cookie.", ephemeral=is_ephemeral)
+            return
+        print(f"[COOKIE] User cookie valid. Account: {result.get('username')} ({result.get('user_id')})")
+        saved_user_cookie = get_active_cookie()
+        saved_user_cookie_index = active_cookie_index
+        _replace_roblox_security_cookie(user_cookie)
+        await send_msg(send_func, f"Using your cookie ({result.get('username')}).", ephemeral=is_ephemeral)
+    elif not user_cookie and cookie_retries == 0:
+        cookies = load_cookies()
+        if cookies:
+            _replace_roblox_security_cookie(cookies[0])
+            active_cookie_index = 0
+            print(f"[COOKIE] No cookie provided. Defaulting to index 0.")
 
     link = game_id if game_id and game_id.startswith("http") else f"https://www.roblox.com/games/{place_id}/about"
     join_url = f"roblox://experiences/start?placeId={place_id}"
@@ -1161,19 +1205,29 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
             error_reason = game_info.get("reason", "")
             if "Game is unplayable" in error_reason:
                 cookies = load_cookies()
-                if len(cookies) > 1 and cookie_retries < len(cookies):
-                    old_index = active_cookie_index
-                    active_cookie_index = (active_cookie_index + 1) % len(cookies)
-                    if active_cookie_index == old_index:
-                        active_cookie_index = 0
-                    new_cookie = cookies[active_cookie_index]
-                    _replace_roblox_security_cookie(new_cookie)
-                    preview = new_cookie[:30] + "..." if len(new_cookie) > 30 else new_cookie
-                    print(f"[DEBUG] Banned. Auto-switched to cookie {active_cookie_index}: {preview}")
-                    await send_msg(send_func, f"Account banned. Switched to cookie `{active_cookie_index}`. Retrying...", ephemeral=is_ephemeral)
+                if cookie_retries < len(cookies):
+                    if user_cookie and cookie_retries == 0:
+                        print(f"[COOKIE] User cookie banned. Falling back to pool...")
+                        await send_msg(send_func, f"Your cookie is banned for this game. Falling back to cookie pool...", ephemeral=is_ephemeral)
+                        if cookies:
+                            active_cookie_index = 0
+                            _replace_roblox_security_cookie(cookies[0])
+                        else:
+                            await send_msg(send_func, f"<@{author_id}> Your cookie is banned and no pool cookies available.", ephemeral=is_ephemeral)
+                            return
+                    else:
+                        old_index = active_cookie_index
+                        active_cookie_index = (active_cookie_index + 1) % len(cookies)
+                        if active_cookie_index == old_index:
+                            active_cookie_index = 0
+                        new_cookie = cookies[active_cookie_index]
+                        _replace_roblox_security_cookie(new_cookie)
+                        preview = new_cookie[:30] + "..." if len(new_cookie) > 30 else new_cookie
+                        print(f"[DEBUG] Banned. Auto-switched to cookie {active_cookie_index}: {preview}")
+                        await send_msg(send_func, f"Account banned. Switched to cookie `{active_cookie_index}`. Retrying...", ephemeral=is_ephemeral)
                     await asyncio.sleep(0.1)
                     is_retry = True
-                    await execute_decompile_job(send_func, author_id, guild, channel, place_id, game_id, is_ephemeral, is_priority=is_priority, on_status_update=on_status_update, cookie_retries=cookie_retries + 1, original_cookie_index=original_cookie_index)
+                    await execute_decompile_job(send_func, author_id, guild, channel, place_id, game_id, is_ephemeral, is_priority=is_priority, on_status_update=on_status_update, cookie_retries=cookie_retries + 1, original_cookie_index=original_cookie_index, user_cookie=user_cookie)
                     if original_cookie_index is not None and original_cookie_index < len(cookies):
                         active_cookie_index = original_cookie_index
                         _replace_roblox_security_cookie(cookies[original_cookie_index])
@@ -1182,7 +1236,10 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                     if original_cookie_index is not None and original_cookie_index < len(cookies):
                         active_cookie_index = original_cookie_index
                         _replace_roblox_security_cookie(cookies[original_cookie_index])
-                    await send_msg(send_func, f"<@{str(author_id)}> All cookies are banned or invalid for this game.", ephemeral=is_ephemeral)
+                    if user_cookie:
+                        await send_msg(send_func, f"<@{author_id}> All pool cookies are banned. Please provide a valid `.ROBLOSECURITY` cookie with the `cookie` parameter.", ephemeral=is_ephemeral)
+                    else:
+                        await send_msg(send_func, f"<@{author_id}> All cookies are banned or invalid for this game. You can try providing your own cookie with the `cookie` parameter.", ephemeral=is_ephemeral)
                     return
             await send_msg(send_func, f"<@{str(author_id)}> {error_reason}", ephemeral=is_ephemeral)
             return
@@ -1286,7 +1343,10 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
             is_decompiling = running_jobs > 0
             if not data["aborted"]:
                 current_active_data = None
-            if saved_cookie_index is not None:
+            if saved_user_cookie is not None:
+                _replace_roblox_security_cookie(saved_user_cookie)
+                print(f"[COOKIE] Restored original cookie after user-provided cookie job")
+            elif saved_cookie_index is not None:
                 cookies = load_cookies()
                 if saved_cookie_index < len(cookies):
                     active_cookie_index = saved_cookie_index
