@@ -24,7 +24,6 @@ BRANCH = "main"
 RAW_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
 
 GITHUB_FILES = [
-    "commands/__init__.py",
     "commands/core.py",
     "commands/setup.py",
     "commands/blacklist.py",
@@ -33,6 +32,7 @@ GITHUB_FILES = [
     "commands/cookie.py",
     "commands/decompile.py",
     "commands/help.py",
+    "commands/__init__.py",
 ]
 
 HAS_LOCAL = os.path.isdir(os.path.join(_BASE_DIR, "commands"))
