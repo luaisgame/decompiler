@@ -31,11 +31,14 @@ async def on_ready():
         activity=discord.Game(name="Waiting for requests...")
     )
 
-    try:
-        synced = await bot.tree.sync()
-        print(f"[DEBUG] Synced {len(synced)} Slash Command(s).")
-    except Exception as e:
-        print(f"[DEBUG] Failed to sync slash commands: {e}")
+    async def sync_commands():
+        try:
+            synced = await bot.tree.sync()
+            print(f"[DEBUG] Synced {len(synced)} Slash Command(s).")
+        except Exception as e:
+            print(f"[DEBUG] Failed to sync slash commands: {e}")
+
+    bot.loop.create_task(sync_commands())
 
 @bot.event
 async def on_command(ctx):

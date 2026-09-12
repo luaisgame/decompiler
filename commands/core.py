@@ -53,7 +53,6 @@ user_blacklisted_file = os.path.join(BASE_DIR, "blacklistedusers.txt")
 server_blacklisted_file = os.path.join(BASE_DIR, "blacklistedservers.txt")
 channels_file = os.path.join(BASE_DIR, "allowed_channels.txt")
 cookies_file = os.path.join(BASE_DIR, "cookies.txt")
-queue_file = os.path.join(BASE_DIR, "queue.txt")
 
 active_cookie_index = 0
 default_cookie_index = 0
@@ -194,17 +193,11 @@ active_events = None
 current_active_data = None
 _on_status_update = None
 
-DISABLED_FLAG_FILE = os.path.join(BASE_DIR, "decompile_disabled.txt")
-decompile_disabled = os.path.exists(DISABLED_FLAG_FILE)
+decompile_disabled = False
 
 def set_decompile_disabled(state: bool):
     global decompile_disabled
     decompile_disabled = state
-    if state:
-        with open(DISABLED_FLAG_FILE, "w") as _f:
-            _f.write("disabled")
-    elif os.path.exists(DISABLED_FLAG_FILE):
-        os.remove(DISABLED_FLAG_FILE)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -248,32 +241,13 @@ queue_list = []
 queue_counter = 0
 _queue_event = None
 
-def save_queue():
-    lines = [f"COUNTER:{queue_counter}"]
-    for it in queue_list:
-        d = it.task_data
-        lines.append(f"{it.counter}|{it.is_priority}|{d.get('author_id', 0)}|{d.get('place_id', '')}|{d.get('game_id', '') or ''}|{d.get('is_ephemeral', False)}")
-    with open(queue_file, "w") as f:
-        f.write("\n".join(lines))
-
 def load_queue():
-    global queue_counter
-    if not os.path.exists(queue_file):
-        return
-    try:
-        with open(queue_file, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                if line.startswith("COUNTER:"):
-                    c = int(line.split(":", 1)[1])
-                    if c > queue_counter:
-                        queue_counter = c
-        os.remove(queue_file)
-        print(f"[QUEUE] Cleared stale queue entries on startup")
-    except Exception as e:
-        print(f"[QUEUE] Failed to load queue: {e}")
+    old_file = os.path.join(BASE_DIR, "queue.txt")
+    if os.path.exists(old_file):
+        try:
+            os.remove(old_file)
+        except Exception:
+            pass
 
 def _get_queue_event():
     global _queue_event
@@ -350,7 +324,6 @@ async def enqueue_decompile_task(send_func, user: discord.User | discord.Member,
                     insert_at = i
                     break
             queue_list.insert(insert_at, paused_item)
-            save_queue()
             await _renumber_queue(notify_bumps=True)
             await send_msg(send_func, f"<@{author_id}> Priority granted! Your decompile is starting now (a lower-priority job was paused).", ephemeral=is_ephemeral)
         elif is_priority:
@@ -360,19 +333,16 @@ async def enqueue_decompile_task(send_func, user: discord.User | discord.Member,
                     insert_at = i
                     break
             queue_list.insert(insert_at, item)
-            save_queue()
             await _renumber_queue(notify_bumps=True)
             pos = item.task_data["last_pos"]
             await send_msg(send_func, f"<@{author_id}> Added to Priority Queue at position **{pos}**.", ephemeral=is_ephemeral)
         else:
             queue_list.append(item)
-            save_queue()
             await _renumber_queue(notify_bumps=True)
             pos = item.task_data["last_pos"]
             await send_msg(send_func, f"<@{author_id}> Added to Queue at position **{pos}**.", ephemeral=is_ephemeral)
     else:
         queue_list.append(item)
-        save_queue()
     _get_queue_event().set()
     await item.task_data["future"]
 
@@ -383,7 +353,6 @@ async def decompile_queue_worker():
             _get_queue_event().clear()
             continue
         item = queue_list.pop(0)
-        save_queue()
         await _renumber_queue(notify_bumps=False)
         data = item.task_data
         try:
