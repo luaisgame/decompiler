@@ -41,6 +41,7 @@ if not HAS_LOCAL:
     print("[STARTUP] No local commands folder found, fetching from GitHub...")
     pkg = types.ModuleType("commands")
     pkg.__path__ = []
+    pkg.__package__ = "commands"
     sys.modules["commands"] = pkg
     for path in GITHUB_FILES:
         try:
@@ -53,11 +54,17 @@ if not HAS_LOCAL:
         mn = path.replace("/", ".").replace(".py", "")
         if mn.endswith(".__init__"):
             mn = mn[:-9]
-        m = types.ModuleType(mn)
+        if mn in sys.modules:
+            m = sys.modules[mn]
+        else:
+            m = types.ModuleType(mn)
+            sys.modules[mn] = m
         m.__file__ = f"<github:{mn}>"
         m.__loader__ = None
-        m.__package__ = "commands" if mn.startswith("commands.") else None
-        sys.modules[mn] = m
+        if mn == "commands" or mn.startswith("commands."):
+            m.__package__ = "commands"
+        else:
+            m.__package__ = None
         exec(compile(code, f"<github:{mn}>", "exec"), m.__dict__)
     print("[STARTUP] All files loaded from GitHub.")
 else:
