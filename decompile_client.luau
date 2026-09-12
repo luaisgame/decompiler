@@ -10,7 +10,7 @@ task.spawn(function()
             obj.Name = obj.Name:gsub(obj.Name, "LOCAL_PLAYER")
         end
 
-        if obj == game.RunService or game.ReplicatedFirst:IsAncestorOf(obj) then
+        if game.ReplicatedFirst:IsAncestorOf(obj) then
             task.spawn(function()
                 for _, prop in getproperties(obj) do
                     if typeof(obj[prop]) == "RBXScriptSignal" then
