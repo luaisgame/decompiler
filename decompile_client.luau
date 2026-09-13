@@ -1,60 +1,45 @@
 game:GetService("TeleportService"):Block()
 repeat
     task.wait()
-until game:IsLoaded()
+until game:IsLoaded() and game.Players.LocalPlayer
 
 local lplr = game.Players.LocalPlayer
-task.spawn(function()
-    for _, obj in game:GetDescendants() do
-        if obj.Name:find(lplr.Name) then
-            obj.Name = obj.Name:gsub(obj.Name, "LOCAL_PLAYER")
-        end
+local plrName = lplr.Name
 
-        if game.ReplicatedFirst:IsAncestorOf(obj) then
+--// protection from skidders (brings back a scrapped USSI feature)
+task.spawn(function()
+    local protectedName = "LOCAL_PLAYER-protected-by-iispeaklua/Decompile bot#9868"
+    local services = { game:GetService("Players"), game:GetService("Workspace"), game:GetService("ReplicatedStorage") }
+
+    local function checkobj(obj: Instance)
+        local propsNames = { "DisplayName", "Name" }
+        for _, propName in propsNames do
+            pcall(function()
+                obj[propName] = tostring(obj[propName]):gsub(plrName, protectedName)
+            end)
+        end
+            
+        for attribute, Value in obj:GetAttributes() do
             task.spawn(function()
-                for _, prop in getproperties(obj) do
-                    if typeof(obj[prop]) == "RBXScriptSignal" then
-                        for _, conn in getconnections(obj[prop]) do
-                            conn:Disconnect()
-                        end
-                    end
+                if Value:find(plrName) then
+                    obj[attribute] = tostring(Value):gsub(plrName, protectedName)
                 end
             end)
         end
     end
-end)
-task.wait()
-task.wait()
 
-task.spawn(function()
-    local self = coroutine.running()
-    local done = {}
-
-    local function filterKill(f)
-        if not f then return end
-        for _, v in table.clone(f()) do
-            if not done[v] then
-                done[v] = true
-                if type(v) == "thread" and v ~= self then
-                    pcall(coroutine.close, v)
-                elseif type(v) == "function" then
-                    pcall(hookfunction, v, coroutine.yield)
-                end
-            end
+    for _, service in services do
+        for _, descendant in service:GetDescendants() do
+            task.spawn(checkobj, descendant)
         end
+        service.DescendantAdded:Connect(checkobj)
     end
-
-    filterKill(debug.getregistry)
-    filterKill(getallthreads)
-    filterKill(getgc)
 end)
-task.wait()
 
-print("hi")
+task.wait()
 
 -- bypasses for anti decompile
 
---[[
 local timeout = false
 task.delay(1, function()
     timeout = true
@@ -94,8 +79,7 @@ task.spawn(function()
     until foundpdanticheat or timeout
 end)
 
-task.wait(1)
-]]
+task.wait(0.1)
 
 local response = request({
     Url = "http://127.0.0.1:5000/decompile",
@@ -118,7 +102,7 @@ local Options = {
     FileName = "game",
     AvoidFileOverwrite = false,
     ShutdownWhenDone = false,
-    KillAllScripts = false,
+    KillAllScripts = true,
 
     mode = "full",
     DecompileUnions = true,

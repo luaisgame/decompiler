@@ -1260,12 +1260,17 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
         saved_user_cookie = get_active_cookie()
         saved_user_cookie_index = active_cookie_index
         _replace_roblox_security_cookie(user_cookie)
-        await send_msg(send_func, f"Using your cookie ({result.get('username')}).", ephemeral=is_ephemeral)
+        cookie_embed = discord.Embed(color=0x3498DB)
+        cookie_embed.add_field(name="Cookie", value=f"Custom ({result.get('username')})", inline=False)
+        await send_msg(send_func, embed=cookie_embed, ephemeral=is_ephemeral)
     elif not user_cookie and cookie_retries == 0:
         cookies = load_cookies()
         if cookies:
             _replace_roblox_security_cookie(cookies[0])
             active_cookie_index = 0
+            cookie_embed = discord.Embed(color=0x3498DB)
+            cookie_embed.add_field(name="Cookie", value=f"Index 0", inline=False)
+            await send_msg(send_func, embed=cookie_embed, ephemeral=is_ephemeral)
             print(f"[COOKIE] No cookie provided. Defaulting to index 0.")
 
     link = game_id if game_id and game_id.startswith("http") else f"https://www.roblox.com/games/{place_id}/about"
@@ -1314,13 +1319,15 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                             new_cookie = cookies[active_cookie_index]
                             _replace_roblox_security_cookie(new_cookie)
                             print(f"[DEBUG] Banned. Auto-switched to cookie {active_cookie_index}")
+                            cookie_embed = discord.Embed(color=0xE74C3C)
+                            cookie_embed.add_field(name="Cookie", value=f"Index {active_cookie_index}", inline=False)
                             if cookie_ban_msg is not None:
                                 try:
-                                    await cookie_ban_msg.edit(content=f"Account banned. Switched to cookie `{active_cookie_index}`. Retrying...")
+                                    await cookie_ban_msg.edit(embed=cookie_embed, content=None)
                                 except Exception:
                                     pass
                             else:
-                                cookie_ban_msg = await send_msg(send_func, f"Account banned. Switched to cookie `{active_cookie_index}`. Retrying...", ephemeral=is_ephemeral)
+                                cookie_ban_msg = await send_msg(send_func, embed=cookie_embed, ephemeral=is_ephemeral)
                             await asyncio.sleep(0.1)
                             is_retry = True
                             await execute_decompile_job(send_func, author_id, guild, channel, place_id, game_id, is_ephemeral, is_priority=is_priority, on_status_update=on_status_update, cookie_retries=cookie_retries + 1, original_cookie_index=original_cookie_index, user_cookie=user_cookie, cookie_ban_msg=cookie_ban_msg)
