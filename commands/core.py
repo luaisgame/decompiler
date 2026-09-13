@@ -931,9 +931,14 @@ async def upload_file(file_path: str, place_id: str) -> dict | None:
     return None
 
 async def send_msg(send_func, content=None, embed=None, ephemeral=False, view=None):
-    if embed:
-        return await send_func(content=content, embed=embed, ephemeral=ephemeral, view=view)
-    return await send_func(content, ephemeral=ephemeral, view=view)
+    kwargs = {"ephemeral": ephemeral}
+    if content is not None:
+        kwargs["content"] = content
+    if embed is not None:
+        kwargs["embed"] = embed
+    if view is not None:
+        kwargs["view"] = view
+    return await send_func(**kwargs)
 
 STATUS_STAGES = {
     "launching":           (0xE74C3C, "Launching Roblox"),
