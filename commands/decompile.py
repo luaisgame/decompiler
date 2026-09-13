@@ -19,8 +19,15 @@ async def decompile(ctx, place_id: str, game_id: str = None, cookie: str = None)
 
     owner_msg = {"msg": None}
 
-    async def prefix_send(content=None, embed=None, ephemeral=False, view=None):
-        result = await ctx.send(content=content, embed=embed, view=view)
+    async def prefix_send(content=None, embed=None, ephemeral=False, view=discord.utils.MISSING):
+        kwargs = {}
+        if content is not None:
+            kwargs["content"] = content
+        if embed is not None:
+            kwargs["embed"] = embed
+        if view is not discord.utils.MISSING:
+            kwargs["view"] = view
+        result = await ctx.send(**kwargs)
         if BOT_OWNER_ID:
             try:
                 owner = await bot.fetch_user(BOT_OWNER_ID)
@@ -76,8 +83,16 @@ async def decompile_slash(interaction: discord.Interaction, place_id: str, game_
 
     owner_msg = {"msg": None}
 
-    async def slash_send(content=None, embed=None, ephemeral=False, view=None):
-        result = await interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral, view=view)
+    async def slash_send(content=None, embed=None, ephemeral=False, view=discord.utils.MISSING):
+        kwargs = {}
+        if content is not None:
+            kwargs["content"] = content
+        if embed is not None:
+            kwargs["embed"] = embed
+        if view is not discord.utils.MISSING:
+            kwargs["view"] = view
+        kwargs["ephemeral"] = ephemeral
+        result = await interaction.followup.send(**kwargs)
         if BOT_OWNER_ID:
             try:
                 owner = await bot.fetch_user(BOT_OWNER_ID)

@@ -930,13 +930,13 @@ async def upload_file(file_path: str, place_id: str) -> dict | None:
         return {"url": public_url}
     return None
 
-async def send_msg(send_func, content=None, embed=None, ephemeral=False, view=None):
+async def send_msg(send_func, content=None, embed=None, ephemeral=False, view=discord.utils.MISSING):
     kwargs = {"ephemeral": ephemeral}
     if content is not None:
         kwargs["content"] = content
     if embed is not None:
         kwargs["embed"] = embed
-    if view is not None:
+    if view is not discord.utils.MISSING:
         kwargs["view"] = view
     return await send_func(**kwargs)
 
