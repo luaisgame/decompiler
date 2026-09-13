@@ -656,7 +656,7 @@ class JoinGameView(discord.ui.View):
 class DownloadView(discord.ui.View):
     def __init__(self, download_url: str, filename: str):
         super().__init__(timeout=None)
-        button = discord.ui.Button(label="Download", url=download_url, emoji="⬇️")
+        button = discord.ui.Button(label=filename, url=download_url, emoji="⬇️")
         self.add_item(button)
 
 def generate_random_filename() -> str:
@@ -1491,7 +1491,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                     download_url = upload_result["url"]
                     random_name = generate_random_filename()
                     embed.color = 0x2ECC71
-                    embed.set_footer(text=random_name)
+                    embed.add_field(name="File", value=f"`{random_name}`", inline=False)
 
                     download_view = DownloadView(download_url, random_name)
                     await send_msg(send_func, content=f"<@{author_id}>", embed=embed, ephemeral=is_ephemeral, view=download_view)
