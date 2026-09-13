@@ -587,6 +587,12 @@ class CookieBannedView(discord.ui.View):
         self.is_priority = is_priority
         self.on_status_update = on_status_update
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("This button is not for you.", ephemeral=True)
+            return False
+        return True
+
     @discord.ui.button(label="Continue", style=discord.ButtonStyle.success, emoji="🍪")
     async def continue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(CookieInputModal(self))
@@ -1205,7 +1211,7 @@ async def run_decompile_logic(send_func, user: discord.User | discord.Member, gu
 
     await enqueue_decompile_task(send_func, user, guild, channel, place_id, game_id, is_ephemeral, on_status_update=on_status_update, user_cookie=user_cookie)
 
-async def execute_decompile_job(send_func, author_id: int, guild, channel, place_id: str, game_id: str = None, is_ephemeral: bool = False, is_priority: bool = False, resume_info_msg=None, resume_embed=None, on_status_update=None, cookie_retries=0, original_cookie_index=None, user_cookie: str = None):
+async def execute_decompile_job(send_func, author_id: int, guild, channel, place_id: str, game_id: str = None, is_ephemeral: bool = False, is_priority: bool = False, resume_info_msg=None, resume_embed=None, on_status_update=None, cookie_retries=0, original_cookie_index=None, user_cookie: str = None, cookie_ban_msg=None):
     global is_decompiling, running_jobs, active_events, current_active_data, active_cookie_index, default_cookie_index
     is_retry = False
     saved_user_cookie = None
@@ -1286,10 +1292,16 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                         _replace_roblox_security_cookie(new_cookie)
                         preview = new_cookie[:30] + "..." if len(new_cookie) > 30 else new_cookie
                         print(f"[DEBUG] Banned. Auto-switched to cookie {active_cookie_index}: {preview}")
-                        await send_msg(send_func, f"Account banned. Switched to cookie `{active_cookie_index}`. Retrying...", ephemeral=is_ephemeral)
+                        if cookie_ban_msg is not None:
+                            try:
+                                await cookie_ban_msg.edit(content=f"Account banned. Switched to cookie `{active_cookie_index}`. Retrying...")
+                            except Exception:
+                                pass
+                        else:
+                            cookie_ban_msg = await send_msg(send_func, f"Account banned. Switched to cookie `{active_cookie_index}`. Retrying...", ephemeral=is_ephemeral)
                     await asyncio.sleep(0.1)
                     is_retry = True
-                    await execute_decompile_job(send_func, author_id, guild, channel, place_id, game_id, is_ephemeral, is_priority=is_priority, on_status_update=on_status_update, cookie_retries=cookie_retries + 1, original_cookie_index=original_cookie_index, user_cookie=user_cookie)
+                    await execute_decompile_job(send_func, author_id, guild, channel, place_id, game_id, is_ephemeral, is_priority=is_priority, on_status_update=on_status_update, cookie_retries=cookie_retries + 1, original_cookie_index=original_cookie_index, user_cookie=user_cookie, cookie_ban_msg=cookie_ban_msg)
                     if original_cookie_index is not None and original_cookie_index < len(cookies):
                         active_cookie_index = original_cookie_index
                         _replace_roblox_security_cookie(cookies[original_cookie_index])
