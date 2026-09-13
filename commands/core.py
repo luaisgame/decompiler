@@ -590,17 +590,28 @@ class CookieInputModal(discord.ui.Modal, title="Enter Your Cookie"):
         await interaction.response.defer(ephemeral=True)
         user_cookie = self.cookie.value.strip()
         v = self.banned_view
-        await send_msg(v.send_func, f"Validating your cookie...", ephemeral=v.is_ephemeral)
         result = await validate_cookie(user_cookie)
         if not result.get("valid"):
-            await send_msg(v.send_func, f"Your cookie is invalid: {result.get('reason', 'Unknown error')}", ephemeral=v.is_ephemeral)
+            await interaction.followup.send(f"Invalid cookie: {result.get('reason', 'Unknown error')}", ephemeral=True)
             return
-        await send_msg(v.send_func, f"Cookie valid ({result.get('username')}). Retrying...", ephemeral=v.is_ephemeral)
-        await asyncio.sleep(0.1)
-        await execute_decompile_job(
-            v.send_func, v.author_id, v.guild, v.channel, v.place_id, v.game_id,
-            v.is_ephemeral, is_priority=v.is_priority, on_status_update=v.on_status_update,
-            user_cookie=user_cookie
+        for child in v.children:
+            child.disabled = True
+        try:
+            await interaction.message.edit(view=v)
+        except Exception:
+            pass
+        try:
+            await interaction.followup.send("Cookie accepted. Queuing decompile...", ephemeral=True)
+        except Exception:
+            pass
+        try:
+            user = await v.guild.fetch_member(v.author_id)
+            await user.send(f"Using your cookie ({result.get('username')}) for decompilation.")
+        except Exception:
+            pass
+        await enqueue_decompile_task(
+            v.send_func, interaction.user, v.guild, v.channel, v.place_id, v.game_id,
+            v.is_ephemeral, on_status_update=v.on_status_update, user_cookie=user_cookie
         )
 
 class CookieBannedView(discord.ui.View):
@@ -635,6 +646,52 @@ class CookieBannedView(discord.ui.View):
     async def on_timeout(self):
         for child in self.children:
             child.disabled = True
+
+class JoinGameView(discord.ui.View):
+    def __init__(self, join_url: str):
+        super().__init__(timeout=None)
+        button = discord.ui.Button(label="Join Game", style=discord.ButtonStyle.Link, url=join_url)
+        self.add_item(button)
+
+class DownloadView(discord.ui.View):
+    def __init__(self, download_url: str, filename: str):
+        super().__init__(timeout=None)
+        button = discord.ui.Button(label="Download", style=discord.ButtonStyle.Link, url=download_url, emoji="⬇️")
+        self.add_item(button)
+
+def generate_random_filename() -> str:
+    rand_bytes = os.urandom(16)
+    return base64.b32encode(rand_bytes).decode().rstrip("=").lower()
+
+async def get_best_join_url(place_id: str, game_id: str = None) -> str:
+    if game_id:
+        return f"roblox://experiences/start?placeId={place_id}&gameInstanceId={game_id}"
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        async with aiohttp.ClientSession(headers=headers) as session:
+            thumb_url = f"https://games.roblox.com/v1/games/multiget-place-details?placeIds={place_id}"
+            version_id = None
+            async with session.get(thumb_url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if isinstance(data, list) and len(data) > 0:
+                        version_id = data[0].get("imageToken")
+            servers_url = f"https://games.roblox.com/v1/games/{place_id}/servers/Public?sortOrder=Asc&limit=100"
+            async with session.get(servers_url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    servers = data.get("data", [])
+                    best = None
+                    best_players = float("inf")
+                    for srv in servers:
+                        if srv.get("playing", 0) < best_players and srv.get("id"):
+                            best = srv
+                            best_players = srv.get("playing", 0)
+                    if best:
+                        return f"roblox://experiences/start?placeId={place_id}&gameInstanceId={best['id']}"
+    except Exception as e:
+        print(f"[DEBUG] Failed to get best join URL: {e}")
+    return f"roblox://experiences/start?placeId={place_id}"
 
 async def build_setup_dropdown(guild: discord.Guild, author_id: int):
     allowed_types = (discord.TextChannel, discord.ForumChannel)
@@ -1271,7 +1328,6 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
             print(f"[COOKIE] No cookie provided. Defaulting to index 0.")
 
     link = game_id if game_id and game_id.startswith("http") else f"https://www.roblox.com/games/{place_id}/about"
-    join_url = f"roblox://experiences/start?placeId={place_id}"
 
     if game_id:
         print(f"[DEBUG] Processing game_id argument...")
@@ -1281,6 +1337,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
             ps_code = query_params.get("privateServerLinkCode", [None])[0]
             share_code = query_params.get("code", [None])[0]
             link_type = query_params.get("type", ["Server"])[0]
+            join_url = f"roblox://experiences/start?placeId={place_id}"
             if ps_code:
                 launch_json = json.dumps({"psCode": ps_code})
                 encoded_launch = quote(launch_json, safe='')
@@ -1288,7 +1345,9 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
             elif share_code:
                 join_url = f"roblox://navigation/share_links?code={quote(share_code)}&type={quote(link_type)}"
         else:
-            join_url += f"&gameInstanceId={game_id}"
+            join_url = f"roblox://experiences/start?placeId={place_id}&gameInstanceId={game_id}"
+    else:
+        join_url = await get_best_join_url(place_id)
 
     print(f"[DEBUG] Final launch join_url: {join_url}")
 
@@ -1336,7 +1395,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                                 active_cookie_index = original_cookie_index
                                 _replace_roblox_security_cookie(cookies[original_cookie_index])
                             view = CookieBannedView(send_func, author_id, guild, channel, place_id, game_id, is_ephemeral, is_priority, on_status_update)
-                            embed = discord.Embed(title="All Cookies Banned", description="All cookies are banned or invalid for this game.\nProvide your own `.ROBLOSECURITY` cookie to continue.", color=0xE74C3C)
+                            embed = discord.Embed(title="All Cookies Banned", description="WARNING. Your account WILL be at risk of getting banned. Cookies will not be logged.", color=0xE74C3C)
                             await send_msg(send_func, f"<@{author_id}>", embed=embed, ephemeral=is_ephemeral, view=view)
                             return
                     else:
@@ -1359,11 +1418,11 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
         embed.add_field(name="Place ID", value=place_id, inline=True)
         if game_id:
             embed.add_field(name="Job ID", value=game_id, inline=True)
-        embed.add_field(name="Link", value=f"[Game Page]({link})", inline=False)
         if icon_url:
             embed.set_thumbnail(url=icon_url)
 
-        info_msg = await send_msg(send_func, embed=embed, ephemeral=is_ephemeral)
+        join_view = JoinGameView(join_url)
+        info_msg = await send_msg(send_func, embed=embed, ephemeral=is_ephemeral, view=join_view)
 
     rec_ev = asyncio.Event()
     fin_ev = asyncio.Event()
@@ -1430,10 +1489,12 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
 
                 if upload_result:
                     download_url = upload_result["url"]
-                    embed.add_field(name="Download", value=f"[Click here]({download_url})", inline=False)
+                    random_name = generate_random_filename()
                     embed.color = 0x2ECC71
+                    embed.set_footer(text=random_name)
 
-                    await send_msg(send_func, content=f"<@{author_id}>", embed=embed, ephemeral=is_ephemeral)
+                    download_view = DownloadView(download_url, random_name)
+                    await send_msg(send_func, content=f"<@{author_id}>", embed=embed, ephemeral=is_ephemeral, view=download_view)
                 else:
                     await send_msg(send_func, content="Decompilation complete but upload failed.", embed=embed, ephemeral=is_ephemeral)
             else:
