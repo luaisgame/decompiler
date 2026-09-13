@@ -1418,6 +1418,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
         embed.add_field(name="Place ID", value=place_id, inline=True)
         if game_id:
             embed.add_field(name="Job ID", value=game_id, inline=True)
+        embed.add_field(name="Join", value=f"[Click to Join](<{join_url}>)", inline=False)
         if icon_url:
             embed.set_thumbnail(url=icon_url)
 
