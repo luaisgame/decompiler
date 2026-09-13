@@ -1299,29 +1299,21 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
         if game_info.get("error"):
             error_reason = game_info.get("reason", "")
             if "Game is unplayable" in error_reason:
-                ban_keywords = ["banned", "not allowed", "unauthorized", "blocked", "kicked"]
-                is_account_ban = any(kw in error_reason.lower() for kw in ban_keywords)
-                if is_account_ban:
-                    cookies = load_cookies()
-                    if cookie_retries < len(cookies):
-                        if user_cookie and cookie_retries == 0:
-                            print(f"[COOKIE] User cookie banned. Falling back to pool...")
-                            await send_msg(send_func, f"Your cookie is banned for this game. Falling back to cookie pool...", ephemeral=is_ephemeral)
-                            if cookies:
-                                active_cookie_index = 0
-                                _replace_roblox_security_cookie(cookies[0])
-                            else:
-                                await send_msg(send_func, f"<@{author_id}> Your cookie is banned and no pool cookies available.", ephemeral=is_ephemeral)
-                                return
-                        else:
+                if user_cookie and cookie_retries == 0:
+                    print(f"[COOKIE] Roblox API says unplayable but user provided cookie, proceeding anyway...")
+                else:
+                    ban_keywords = ["banned", "not allowed", "unauthorized", "blocked", "kicked"]
+                    is_account_ban = any(kw in error_reason.lower() for kw in ban_keywords)
+                    if is_account_ban:
+                        cookies = load_cookies()
+                        if cookie_retries < len(cookies):
                             old_index = active_cookie_index
                             active_cookie_index = (active_cookie_index + 1) % len(cookies)
                             if active_cookie_index == old_index:
                                 active_cookie_index = 0
                             new_cookie = cookies[active_cookie_index]
                             _replace_roblox_security_cookie(new_cookie)
-                            preview = new_cookie[:30] + "..." if len(new_cookie) > 30 else new_cookie
-                            print(f"[DEBUG] Banned. Auto-switched to cookie {active_cookie_index}: {preview}")
+                            print(f"[DEBUG] Banned. Auto-switched to cookie {active_cookie_index}")
                             if cookie_ban_msg is not None:
                                 try:
                                     await cookie_ban_msg.edit(content=f"Account banned. Switched to cookie `{active_cookie_index}`. Retrying...")
@@ -1329,29 +1321,34 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                                     pass
                             else:
                                 cookie_ban_msg = await send_msg(send_func, f"Account banned. Switched to cookie `{active_cookie_index}`. Retrying...", ephemeral=is_ephemeral)
-                        await asyncio.sleep(0.1)
-                        is_retry = True
-                        await execute_decompile_job(send_func, author_id, guild, channel, place_id, game_id, is_ephemeral, is_priority=is_priority, on_status_update=on_status_update, cookie_retries=cookie_retries + 1, original_cookie_index=original_cookie_index, user_cookie=user_cookie, cookie_ban_msg=cookie_ban_msg)
-                        if original_cookie_index is not None and original_cookie_index < len(cookies):
-                            active_cookie_index = original_cookie_index
-                            _replace_roblox_security_cookie(cookies[original_cookie_index])
-                        return
-                    elif cookie_retries >= len(cookies):
-                        if original_cookie_index is not None and original_cookie_index < len(cookies):
-                            active_cookie_index = original_cookie_index
-                            _replace_roblox_security_cookie(cookies[original_cookie_index])
-                        if user_cookie:
-                            await send_msg(send_func, f"<@{author_id}> All pool cookies are banned.", ephemeral=is_ephemeral)
-                        else:
+                            await asyncio.sleep(0.1)
+                            is_retry = True
+                            await execute_decompile_job(send_func, author_id, guild, channel, place_id, game_id, is_ephemeral, is_priority=is_priority, on_status_update=on_status_update, cookie_retries=cookie_retries + 1, original_cookie_index=original_cookie_index, user_cookie=user_cookie, cookie_ban_msg=cookie_ban_msg)
+                            if original_cookie_index is not None and original_cookie_index < len(cookies):
+                                active_cookie_index = original_cookie_index
+                                _replace_roblox_security_cookie(cookies[original_cookie_index])
+                            return
+                        elif cookie_retries >= len(cookies):
+                            if original_cookie_index is not None and original_cookie_index < len(cookies):
+                                active_cookie_index = original_cookie_index
+                                _replace_roblox_security_cookie(cookies[original_cookie_index])
                             view = CookieBannedView(send_func, author_id, guild, channel, place_id, game_id, is_ephemeral, is_priority, on_status_update)
                             embed = discord.Embed(title="All Cookies Banned", description="All cookies are banned or invalid for this game.\nProvide your own `.ROBLOSECURITY` cookie to continue.", color=0xE74C3C)
                             await send_msg(send_func, f"<@{author_id}>", embed=embed, ephemeral=is_ephemeral, view=view)
+                            return
+                    else:
+                        await send_msg(send_func, f"<@{str(author_id)}> {error_reason}", ephemeral=is_ephemeral)
                         return
-            await send_msg(send_func, f"<@{str(author_id)}> {error_reason}", ephemeral=is_ephemeral)
-            return
+            else:
+                await send_msg(send_func, f"<@{str(author_id)}> {error_reason}", ephemeral=is_ephemeral)
+                return
 
-        game_name = game_info.get("name", f"Place {place_id}")
-        icon_url = game_info.get("icon_url")
+        if not game_info.get("error"):
+            game_name = game_info.get("name", f"Place {place_id}")
+            icon_url = game_info.get("icon_url")
+        else:
+            game_name = f"Place {place_id}"
+            icon_url = None
 
         embed = discord.Embed(title=game_name, url=link, color=0x3498DB)
         embed.add_field(name="Place ID", value=place_id, inline=True)
