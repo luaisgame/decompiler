@@ -650,13 +650,13 @@ class CookieBannedView(discord.ui.View):
 class JoinGameView(discord.ui.View):
     def __init__(self, join_url: str):
         super().__init__(timeout=None)
-        button = discord.ui.Button(label="Join Game", style=discord.ButtonStyle.Link, url=join_url)
+        button = discord.ui.Button(label="Join Game", url=join_url)
         self.add_item(button)
 
 class DownloadView(discord.ui.View):
     def __init__(self, download_url: str, filename: str):
         super().__init__(timeout=None)
-        button = discord.ui.Button(label="Download", style=discord.ButtonStyle.Link, url=download_url, emoji="⬇️")
+        button = discord.ui.Button(label="Download", url=download_url, emoji="⬇️")
         self.add_item(button)
 
 def generate_random_filename() -> str:
