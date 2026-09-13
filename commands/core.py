@@ -1421,7 +1421,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
         if icon_url:
             embed.set_thumbnail(url=icon_url)
 
-        join_view = JoinGameView(join_url)
+        join_view = JoinGameView(link)
         info_msg = await send_msg(send_func, embed=embed, ephemeral=is_ephemeral, view=join_view)
 
     rec_ev = asyncio.Event()
