@@ -90,6 +90,9 @@ def _dpapi_unprotect(data_bytes: bytes) -> bytes | None:
 def _get_roblox_cookie_file() -> str:
     return os.path.join(os.environ.get("LOCALAPPDATA", ""), "Roblox", "LocalStorage", "RobloxCookies.dat")
 
+def _get_roblox_cookie_file_alt() -> str:
+    return os.path.join(os.environ.get("LOCALAPPDATA", ""), "Roblox", "LocalStorage", "_RobloxCookies.dat")
+
 def _read_roblox_cookies() -> str | None:
     fpath = _get_roblox_cookie_file()
     if not os.path.exists(fpath):
@@ -134,7 +137,33 @@ def _replace_roblox_security_cookie(new_cookie_value: str) -> bool:
             new_lines.append(line)
     if not replaced:
         return False
-    return _write_roblox_cookies("\n".join(new_lines))
+    result = _write_roblox_cookies("\n".join(new_lines))
+    alt_path = _get_roblox_cookie_file_alt()
+    if os.path.exists(alt_path):
+        try:
+            with open(alt_path, "r") as f:
+                alt_data = json.load(f)
+            alt_encrypted = base64.b64decode(alt_data["CookiesData"])
+            alt_decrypted = _dpapi_unprotect(alt_encrypted)
+            if alt_decrypted:
+                alt_text = alt_decrypted.decode("utf-8", errors="replace")
+                alt_lines = alt_text.split("\n")
+                alt_new_lines = []
+                for line in alt_lines:
+                    parts = line.split("\t")
+                    if len(parts) >= 6 and parts[5] == ".ROBLOSECURITY":
+                        parts[6] = new_cookie_value if new_cookie_value.startswith("_|") else f"_{{}}{new_cookie_value}"
+                        alt_new_lines.append("\t".join(parts))
+                    else:
+                        alt_new_lines.append(line)
+                protected = _dpapi_protect("\n".join(alt_new_lines).encode("utf-8"))
+                if protected:
+                    with open(alt_path, "w") as f:
+                        json.dump({"CookiesVersion": "1", "CookiesData": base64.b64encode(protected).decode()}, f)
+                    print(f"[COOKIE] Also updated _RobloxCookies.dat")
+        except Exception as e:
+            print(f"[COOKIE] Failed to update _RobloxCookies.dat: {e}")
+    return result
 
 def load_cookies() -> list[str]:
     cookies = []
