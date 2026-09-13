@@ -622,7 +622,7 @@ class CookieBannedView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Continue", style=discord.ButtonStyle.success, emoji="🍪")
+    @discord.ui.button(label="Continue", style=discord.ButtonStyle.success)
     async def continue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(CookieInputModal(self))
 
