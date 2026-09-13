@@ -648,15 +648,15 @@ class CookieBannedView(discord.ui.View):
             child.disabled = True
 
 class JoinGameView(discord.ui.View):
-    def __init__(self, join_url: str):
+    def __init__(self, game_page_url: str):
         super().__init__(timeout=None)
-        button = discord.ui.Button(label="Join Game", url=join_url)
+        button = discord.ui.Button(label="Join Game", url=game_page_url)
         self.add_item(button)
 
 class DownloadView(discord.ui.View):
-    def __init__(self, download_url: str, filename: str):
+    def __init__(self, download_url: str):
         super().__init__(timeout=None)
-        button = discord.ui.Button(label=filename, url=download_url, emoji="⬇️")
+        button = discord.ui.Button(label="Download", url=download_url, emoji="⬇️")
         self.add_item(button)
 
 def generate_random_filename() -> str:
@@ -1489,11 +1489,9 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
 
                 if upload_result:
                     download_url = upload_result["url"]
-                    random_name = generate_random_filename()
                     embed.color = 0x2ECC71
-                    embed.add_field(name="File", value=f"`{random_name}`", inline=False)
 
-                    download_view = DownloadView(download_url, random_name)
+                    download_view = DownloadView(download_url)
                     await send_msg(send_func, content=f"<@{author_id}>", embed=embed, ephemeral=is_ephemeral, view=download_view)
                 else:
                     await send_msg(send_func, content="Decompilation complete but upload failed.", embed=embed, ephemeral=is_ephemeral)
