@@ -544,6 +544,63 @@ class ChannelSelectView(discord.ui.View):
             return False
         return True
 
+class CookieInputModal(discord.ui.Modal, title="Enter Your Cookie"):
+    cookie = discord.ui.TextInput(
+        label=".ROBLOSECURITY Cookie",
+        placeholder="_|WARNING:...",
+        style=discord.TextStyle.long,
+        required=True,
+        max_length=2000
+    )
+
+    def __init__(self, view: "CookieBannedView"):
+        super().__init__()
+        self.banned_view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        user_cookie = self.cookie.value.strip()
+        v = self.banned_view
+        await send_msg(v.send_func, f"Validating your cookie...", ephemeral=v.is_ephemeral)
+        result = await validate_cookie(user_cookie)
+        if not result.get("valid"):
+            await send_msg(v.send_func, f"Your cookie is invalid: {result.get('reason', 'Unknown error')}", ephemeral=v.is_ephemeral)
+            return
+        await send_msg(v.send_func, f"Cookie valid ({result.get('username')}). Retrying...", ephemeral=v.is_ephemeral)
+        await asyncio.sleep(0.1)
+        await execute_decompile_job(
+            v.send_func, v.author_id, v.guild, v.channel, v.place_id, v.game_id,
+            v.is_ephemeral, is_priority=v.is_priority, on_status_update=v.on_status_update,
+            user_cookie=user_cookie
+        )
+
+class CookieBannedView(discord.ui.View):
+    def __init__(self, send_func, author_id, guild, channel, place_id, game_id, is_ephemeral, is_priority, on_status_update):
+        super().__init__(timeout=120)
+        self.send_func = send_func
+        self.author_id = author_id
+        self.guild = guild
+        self.channel = channel
+        self.place_id = place_id
+        self.game_id = game_id
+        self.is_ephemeral = is_ephemeral
+        self.is_priority = is_priority
+        self.on_status_update = on_status_update
+
+    @discord.ui.button(label="Continue", style=discord.ButtonStyle.success, emoji="🍪")
+    async def continue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CookieInputModal(self))
+
+    @discord.ui.button(label="Ignore", style=discord.ButtonStyle.danger)
+    async def ignore_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
 async def build_setup_dropdown(guild: discord.Guild, author_id: int):
     allowed_types = (discord.TextChannel, discord.ForumChannel)
     valid_channels = [
@@ -873,10 +930,10 @@ async def upload_file(file_path: str, place_id: str) -> dict | None:
         return {"url": public_url}
     return None
 
-async def send_msg(send_func, content=None, embed=None, ephemeral=False):
+async def send_msg(send_func, content=None, embed=None, ephemeral=False, view=None):
     if embed:
-        return await send_func(content=content, embed=embed, ephemeral=ephemeral)
-    return await send_func(content, ephemeral=ephemeral)
+        return await send_func(content=content, embed=embed, ephemeral=ephemeral, view=view)
+    return await send_func(content, ephemeral=ephemeral, view=view)
 
 STATUS_STAGES = {
     "launching":           (0xE74C3C, "Launching Roblox"),
@@ -1237,9 +1294,11 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                         active_cookie_index = original_cookie_index
                         _replace_roblox_security_cookie(cookies[original_cookie_index])
                     if user_cookie:
-                        await send_msg(send_func, f"<@{author_id}> All pool cookies are banned. Please provide a valid `.ROBLOSECURITY` cookie with the `cookie` parameter.", ephemeral=is_ephemeral)
+                        await send_msg(send_func, f"<@{author_id}> All pool cookies are banned.", ephemeral=is_ephemeral)
                     else:
-                        await send_msg(send_func, f"<@{author_id}> All cookies are banned or invalid for this game. You can try providing your own cookie with the `cookie` parameter.", ephemeral=is_ephemeral)
+                        view = CookieBannedView(send_func, author_id, guild, channel, place_id, game_id, is_ephemeral, is_priority, on_status_update)
+                        embed = discord.Embed(title="All Cookies Banned", description="All cookies are banned or invalid for this game.\nProvide your own `.ROBLOSECURITY` cookie to continue.", color=0xE74C3C)
+                        await send_msg(send_func, f"<@{author_id}>", embed=embed, ephemeral=is_ephemeral, view=view)
                     return
             await send_msg(send_func, f"<@{str(author_id)}> {error_reason}", ephemeral=is_ephemeral)
             return

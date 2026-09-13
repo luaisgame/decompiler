@@ -19,8 +19,8 @@ async def decompile(ctx, place_id: str, game_id: str = None, cookie: str = None)
 
     owner_msg = {"msg": None}
 
-    async def prefix_send(content=None, embed=None, ephemeral=False):
-        result = await ctx.send(content=content, embed=embed)
+    async def prefix_send(content=None, embed=None, ephemeral=False, view=None):
+        result = await ctx.send(content=content, embed=embed, view=view)
         if BOT_OWNER_ID:
             try:
                 owner = await bot.fetch_user(BOT_OWNER_ID)
@@ -76,8 +76,8 @@ async def decompile_slash(interaction: discord.Interaction, place_id: str, game_
 
     owner_msg = {"msg": None}
 
-    async def slash_send(content=None, embed=None, ephemeral=False):
-        result = await interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral)
+    async def slash_send(content=None, embed=None, ephemeral=False, view=None):
+        result = await interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral, view=view)
         if BOT_OWNER_ID:
             try:
                 owner = await bot.fetch_user(BOT_OWNER_ID)
