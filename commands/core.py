@@ -687,7 +687,7 @@ def generate_random_filename() -> str:
 
 async def get_best_join_url(place_id: str, game_id: str = None) -> str:
     if game_id:
-        return f"https://www.roblox.com/games/start?placeId={place_id}&gameInstanceId={game_id}"
+        return f"roblox://experiences/start?placeId={place_id}&gameInstanceId={game_id}"
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         async with aiohttp.ClientSession(headers=headers) as session:
@@ -710,10 +710,10 @@ async def get_best_join_url(place_id: str, game_id: str = None) -> str:
                             best = srv
                             best_players = srv.get("playing", 0)
                     if best:
-                        return f"https://www.roblox.com/games/start?placeId={place_id}&gameInstanceId={best['id']}"
+                        return f"roblox://experiences/start?placeId={place_id}&gameInstanceId={best['id']}"
     except Exception as e:
         print(f"[DEBUG] Failed to get best join URL: {e}")
-    return f"https://www.roblox.com/games/start?placeId={place_id}"
+    return f"roblox://experiences/start?placeId={place_id}"
 
 async def build_setup_dropdown(guild: discord.Guild, author_id: int):
     allowed_types = (discord.TextChannel, discord.ForumChannel)
@@ -1439,7 +1439,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
         if icon_url:
             embed.set_thumbnail(url=icon_url)
 
-        join_view = JoinGameView(link)
+        join_view = JoinGameView(join_url)
         info_msg = await send_msg(send_func, embed=embed, ephemeral=is_ephemeral, view=join_view)
 
     rec_ev = asyncio.Event()
