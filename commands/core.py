@@ -687,7 +687,7 @@ def generate_random_filename() -> str:
 
 async def get_best_join_url(place_id: str, game_id: str = None) -> str:
     if game_id:
-        return f"roblox://experiences/start?placeId={place_id}&gameInstanceId={game_id}"
+        return f"https://www.roblox.com/games/start?placeId={place_id}&gameInstanceId={game_id}"
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         async with aiohttp.ClientSession(headers=headers) as session:
@@ -710,10 +710,10 @@ async def get_best_join_url(place_id: str, game_id: str = None) -> str:
                             best = srv
                             best_players = srv.get("playing", 0)
                     if best:
-                        return f"roblox://experiences/start?placeId={place_id}&gameInstanceId={best['id']}"
+                        return f"https://www.roblox.com/games/start?placeId={place_id}&gameInstanceId={best['id']}"
     except Exception as e:
         print(f"[DEBUG] Failed to get best join URL: {e}")
-    return f"roblox://experiences/start?placeId={place_id}"
+    return f"https://www.roblox.com/games/start?placeId={place_id}"
 
 async def build_setup_dropdown(guild: discord.Guild, author_id: int):
     allowed_types = (discord.TextChannel, discord.ForumChannel)
@@ -1357,15 +1357,13 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
             ps_code = query_params.get("privateServerLinkCode", [None])[0]
             share_code = query_params.get("code", [None])[0]
             link_type = query_params.get("type", ["Server"])[0]
-            join_url = f"roblox://experiences/start?placeId={place_id}"
+            join_url = f"https://www.roblox.com/games/start?placeId={place_id}"
             if ps_code:
-                launch_json = json.dumps({"psCode": ps_code})
-                encoded_launch = quote(launch_json, safe='')
-                join_url = f"roblox://experiences/start?placeId={place_id}&launchData={encoded_launch}"
+                join_url = f"https://www.roblox.com/games/start?placeId={place_id}&privateServerLinkCode={ps_code}"
             elif share_code:
-                join_url = f"roblox://navigation/share_links?code={quote(share_code)}&type={quote(link_type)}"
+                join_url = f"https://www.roblox.com/games/start?placeId={place_id}"
         else:
-            join_url = f"roblox://experiences/start?placeId={place_id}&gameInstanceId={game_id}"
+            join_url = f"https://www.roblox.com/games/start?placeId={place_id}&gameInstanceId={game_id}"
     else:
         join_url = await get_best_join_url(place_id)
 
