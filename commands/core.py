@@ -1185,10 +1185,10 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
     if SKIP_PROCESSFILE:
         print("[DEBUG] SKIP_PROCESSFILE is enabled; skipping oracle-postprocess post-processor.")
     else:
-        proc_script = os.path.join(decompile_dir, "oracle-postprocess.exe")
+        proc_script = os.path.join(BASE_DIR, "decompile", "oracle-postprocess.exe")
         if not os.path.exists(proc_script):
             print(f"[DEBUG] oracle-postprocess.exe not found at {proc_script}")
-            print("[DEBUG] Place oracle-postprocess.exe in the storage/ folder.")
+            print("[DEBUG] Place oracle-postprocess.exe in the decompile/ folder.")
         else:
             success = False
             max_retries = 5
