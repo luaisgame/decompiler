@@ -53,6 +53,28 @@ user_blacklisted_file = os.path.join(BASE_DIR, "blacklistedusers.txt")
 server_blacklisted_file = os.path.join(BASE_DIR, "blacklistedservers.txt")
 channels_file = os.path.join(BASE_DIR, "allowed_channels.txt")
 cookies_file = os.path.join(BASE_DIR, "cookies.txt")
+storage_dir = os.path.join(BASE_DIR, "storage")
+STORAGE_MAX_BYTES = 25 * 1024 * 1024 * 1024
+
+def _cleanup_storage():
+    try:
+        os.makedirs(storage_dir, exist_ok=True)
+        files = []
+        total = 0
+        for f in os.listdir(storage_dir):
+            fp = os.path.join(storage_dir, f)
+            if os.path.isfile(fp) and not f.endswith(".lock"):
+                size = os.path.getsize(fp)
+                files.append((os.path.getmtime(fp), size, fp))
+                total += size
+        files.sort(key=lambda x: x[0])
+        while total > STORAGE_MAX_BYTES and files:
+            _, size, old_file = files.pop(0)
+            os.remove(old_file)
+            total -= size
+            print(f"[STORAGE] Removed oldest: {os.path.basename(old_file)} ({size} bytes)")
+    except Exception as e:
+        print(f"[STORAGE] Cleanup error: {e}")
 
 active_cookie_index = 0
 default_cookie_index = 0
@@ -1079,8 +1101,10 @@ async def _wait_with_pause(event, total, job_data):
     return event.is_set()
 
 async def process_file(send_func, process, game_name, timeout=60, ephemeral=False, info_msg=None, embed=None, rec_ev=None, fin_ev=None, job_data=None):
-    decompile_dir = os.path.join(BASE_DIR, "decompile")
+    decompile_dir = os.path.join(BASE_DIR, "storage")
     os.makedirs(decompile_dir, exist_ok=True)
+
+    _cleanup_storage()
 
     if rec_ev is None:
         rec_ev = decompile_recieved
