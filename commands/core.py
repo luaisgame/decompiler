@@ -672,8 +672,12 @@ class CookieBannedView(discord.ui.View):
 class JoinGameView(discord.ui.View):
     def __init__(self, game_page_url: str):
         super().__init__(timeout=None)
-        button = discord.ui.Button(label="Join Game", url=game_page_url)
+        button = discord.ui.Button(label="Join Game", url=game_page_url, style=discord.ButtonStyle.link)
         self.add_item(button)
+        chrome = discord.ui.Button(label="Chrome Extension", url="https://chromewebstore.google.com/detail/roblox-jobid-join/pdeebkpgdaflejgihpbniammmelkdnac", style=discord.ButtonStyle.link, emoji="🌐")
+        self.add_item(chrome)
+        firefox = discord.ui.Button(label="Firefox Extension", url="https://addons.mozilla.org/en-US/firefox/addon/roblox-jobid-join/", style=discord.ButtonStyle.link, emoji="🦊")
+        self.add_item(firefox)
 
 class DownloadView(discord.ui.View):
     def __init__(self, download_url: str):
