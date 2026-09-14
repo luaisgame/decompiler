@@ -1024,29 +1024,17 @@ def _terminate_live_roblox():
             continue
 
 def _upload_file_sync(file_path: str, place_id: str) -> str | None:
-    r2_endpoint = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-    s3 = boto3.client(
-        "s3",
-        endpoint_url=r2_endpoint,
-        aws_access_key_id=R2_ACCESS_KEY_ID,
-        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-        config=Config(signature_version="s3v4"),
-    )
     filename = f"{place_id}_{os.path.basename(file_path)}"
+    dest = os.path.join(storage_dir, filename)
     try:
-        s3.upload_file(
-            Filename=file_path,
-            Bucket=R2_BUCKET_NAME,
-            Key=filename,
-            ExtraArgs={"ContentType": "application/octet-stream"},
-        )
-        return f"{R2_PUBLIC_DOMAIN}/{filename}"
+        shutil.copy2(file_path, dest)
+        return f"https://storage.luaisgame.com/{filename}"
     except Exception as e:
-        print(f"[DEBUG] R2 Upload Error: {e}")
+        print(f"[DEBUG] Storage copy error: {e}")
         return None
 
 async def upload_file(file_path: str, place_id: str) -> dict | None:
-    print(f"[DEBUG] Uploading {os.path.basename(file_path)} to Cloudflare R2...")
+    print(f"[DEBUG] Copying {os.path.basename(file_path)} to storage...")
     public_url = await asyncio.to_thread(_upload_file_sync, file_path, place_id)
     if public_url:
         return {"url": public_url}
