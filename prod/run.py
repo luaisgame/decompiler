@@ -36,23 +36,22 @@ def ensure_cloudflared():
     print("[RUNNER] cloudflared not found, installing...")
     try:
         subprocess.run(
-            [sys.executable, "-m", "pip", "install", "cloudflared"],
-            check=True, capture_output=True
-        )
-        return True
-    except Exception:
-        pass
-    try:
-        subprocess.run(
             ["winget", "install", "cloudflare.cloudflared",
              "--accept-package-agreements", "--accept-source-agreements"],
             check=True, capture_output=True
         )
-        return True
     except Exception:
         pass
+    if shutil.which("cloudflared"):
+        return True
+    for p in [
+        os.path.expanduser(r"~\AppData\Local\cloudflared\cloudflared.exe"),
+        r"C:\Program Files\cloudflared\cloudflared.exe",
+    ]:
+        if os.path.exists(p):
+            os.environ["PATH"] = os.path.dirname(p) + os.pathsep + os.environ.get("PATH", "")
+            return True
     print("[RUNNER] Failed to install cloudflared automatically.")
-    print("[RUNNER] Install manually: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/")
     return False
 
 def get_cloudflared_path():
@@ -111,7 +110,7 @@ credentials-file: {cred_file}
 
 ingress:
   - hostname: {TUNNEL_DOMAIN}
-    service: http://127.0.0.1:5000/files
+    service: http://127.0.0.1:5000
   - service: http_status:404
 """
     with open(CLOUDFLARED_CONFIG, "w") as f:

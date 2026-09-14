@@ -87,9 +87,17 @@ def ensure_cloudflared():
              "--accept-package-agreements", "--accept-source-agreements"],
             check=True, capture_output=True
         )
-        return True
     except Exception:
         pass
+    if shutil.which("cloudflared"):
+        return True
+    for p in [
+        os.path.expanduser(r"~\AppData\Local\cloudflared\cloudflared.exe"),
+        r"C:\Program Files\cloudflared\cloudflared.exe",
+    ]:
+        if os.path.exists(p):
+            os.environ["PATH"] = os.path.dirname(p) + os.pathsep + os.environ.get("PATH", "")
+            return True
     print("[STARTUP] Failed to install cloudflared automatically.")
     return False
 
@@ -149,7 +157,7 @@ credentials-file: {cred_file}
 
 ingress:
   - hostname: {TUNNEL_DOMAIN}
-    service: http://127.0.0.1:5000/files
+    service: http://127.0.0.1:5000
   - service: http_status:404
 """
     with open(config_path, "w") as f:
