@@ -4,6 +4,8 @@ import sys
 import types
 import urllib.request
 import json
+import shutil
+import subprocess
 import discord
 
 if getattr(sys, "frozen", False):
@@ -72,6 +74,108 @@ else:
 
 from commands.core import bot, BOT_TOKEN
 
+TUNNEL_NAME = "storage"
+TUNNEL_DOMAIN = "storage.luaisgame.com"
+
+def ensure_cloudflared():
+    if shutil.which("cloudflared"):
+        return True
+    print("[STARTUP] cloudflared not found, installing...")
+    try:
+        subprocess.run(
+            ["winget", "install", "cloudflare.cloudflared",
+             "--accept-package-agreements", "--accept-source-agreements"],
+            check=True, capture_output=True
+        )
+        return True
+    except Exception:
+        pass
+    print("[STARTUP] Failed to install cloudflared automatically.")
+    return False
+
+def get_cloudflared_path():
+    path = shutil.which("cloudflared")
+    if path:
+        return path
+    for p in [
+        os.path.expanduser(r"~\AppData\Local\cloudflared\cloudflared.exe"),
+        r"C:\Program Files\cloudflared\cloudflared.exe",
+    ]:
+        if os.path.exists(p):
+            return p
+    return None
+
+def ensure_tunnel():
+    cf = get_cloudflared_path()
+    if not cf:
+        return False
+
+    cert = os.path.expanduser(r"~\.cloudflared\cert.pem")
+    if not os.path.exists(cert):
+        print("[STARTUP] Cloudflare login required. Opening browser...")
+        subprocess.run([cf, "tunnel", "login"], check=True)
+
+    result = subprocess.run([cf, "tunnel", "list"], capture_output=True, text=True)
+    tunnel_id = None
+    if TUNNEL_NAME in (result.stdout or ""):
+        for line in result.stdout.splitlines():
+            if TUNNEL_NAME in line:
+                tunnel_id = line.split()[0]
+                break
+    else:
+        print("[STARTUP] Creating tunnel...")
+        result = subprocess.run(
+            [cf, "tunnel", "create", TUNNEL_NAME],
+            capture_output=True, text=True
+        )
+        for line in result.stdout.splitlines():
+            if "Created tunnel" in line:
+                tunnel_id = line.split()[-1]
+                break
+        if not tunnel_id:
+            print("[STARTUP] Failed to create tunnel")
+            return False
+        subprocess.run(
+            [cf, "tunnel", "route", "dns", TUNNEL_NAME, TUNNEL_DOMAIN],
+            capture_output=True
+        )
+
+    config_dir = os.path.expanduser(r"~\.cloudflared")
+    os.makedirs(config_dir, exist_ok=True)
+    cred_file = os.path.join(config_dir, f"{tunnel_id}.json")
+    config_path = os.path.join(config_dir, "config.yml")
+    config_content = f"""tunnel: {tunnel_id}
+credentials-file: {cred_file}
+
+ingress:
+  - hostname: {TUNNEL_DOMAIN}
+    service: http://127.0.0.1:5000/files
+  - service: http_status:404
+"""
+    with open(config_path, "w") as f:
+        f.write(config_content)
+    return True
+
+def start_tunnel():
+    cf = get_cloudflared_path()
+    if not cf:
+        return
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq cloudflared.exe"],
+            capture_output=True, text=True
+        )
+        if "cloudflared.exe" in result.stdout:
+            return
+    except Exception:
+        pass
+    subprocess.Popen(
+        [cf, "tunnel", "run", TUNNEL_NAME],
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    print(f"[STARTUP] Tunnel started: https://{TUNNEL_DOMAIN}")
+
 @bot.event
 async def on_ready():
     print(f"[DEBUG] Online as: {bot.user}")
@@ -80,6 +184,10 @@ async def on_ready():
 
     switch_to_default_cookie()
     load_queue()
+
+    if ensure_cloudflared():
+        if ensure_tunnel():
+            start_tunnel()
 
     await start_local_server(port=5000)
 
