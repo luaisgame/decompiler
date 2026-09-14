@@ -3,12 +3,13 @@ import sys
 import os
 import time
 import urllib.request
-import json
 
 REPO = "luaisgame/decompiler"
 BRANCH = "main"
 RAW = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = os.path.dirname(SCRIPT_DIR)
+CHECK = os.path.join(SCRIPT_DIR, ".check_update")
 
 FILES = [
     "bot.py",
@@ -23,22 +24,21 @@ FILES = [
     "commands/help.py",
 ]
 
-def get(path):
-    try:
-        with urllib.request.urlopen(f"{RAW}/{path}", timeout=15) as r:
-            return r.read().decode()
-    except Exception as e:
-        print(f"[FETCH] {path}: {e}")
-        return None
-
 def fetch():
-    d = {}
     for p in FILES:
-        c = get(p)
-        if c is None:
-            return None
-        d[p] = c
-    return d
+        url = f"{RAW}/{p}"
+        dest = os.path.join(PARENT_DIR, p)
+        try:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with urllib.request.urlopen(url, timeout=15) as r:
+                data = r.read()
+            with open(dest, "wb") as f:
+                f.write(data)
+            print(f"[SYNC] {p}")
+        except Exception as e:
+            print(f"[SYNC] FAILED {p}: {e}")
+            return False
+    return True
 
 PY = sys.executable
 if getattr(sys, "frozen", False):
@@ -49,46 +49,31 @@ if getattr(sys, "frozen", False):
                 PY = c
                 break
 
-LAUNCHER = r'''
-import sys,os,json,types
-os.environ["BOT_BASE_DIR"]=r"''' + SCRIPT_DIR.replace("\\","\\\\") + '''"
-_p=json.loads(sys.stdin.readline())
-sys.argv=[sys.argv[0]]
-if "commands" not in sys.modules:
-    pkg=types.ModuleType("commands");pkg.__path__=[];sys.modules["commands"]=pkg
-for path,code in _p.items():
-    if path=="bot.py": continue
-    mn=path.replace("/",".").replace(".py","")
-    if mn.endswith(".__init__"): mn=mn[:-9]
-    pkg="commands" if mn.startswith("commands.") else None
-    m=types.ModuleType(mn,code);m.__file__=f"<github:{mn}>";m.__loader__=None
-    if pkg: m.__package__=pkg
-    sys.modules[mn]=m
-    exec(compile(code,f"<github:{mn}>","exec"),m.__dict__)
-exec(compile(_p["bot.py"],"<github:bot>","exec"),{"__name__":"__main__","__file__":"<github:bot>"})
-'''
-
-print("="*50)
+print("=" * 50)
 print("  Decompiler Bot - GitHub Runner")
-print("="*50)
+print("=" * 50)
 
 while True:
-    files = fetch()
-    if files is None:
+    print("[RUNNER] Fetching latest files from GitHub...")
+    if not fetch():
         print("[RUNNER] Fetch failed, retrying in 5s...")
         time.sleep(5)
         continue
 
-    p = subprocess.Popen([PY,"-c",LAUNCHER], stdin=subprocess.PIPE, stdout=sys.stdout, stderr=sys.stderr)
-    p.stdin.write(json.dumps(files).encode() + b"\n")
-    p.stdin.flush()
+    bot_py = os.path.join(PARENT_DIR, "bot.py")
+    p = subprocess.Popen([PY, bot_py], stdout=sys.stdout, stderr=sys.stderr)
 
     while p.poll() is None:
         time.sleep(10)
+        if os.path.exists(CHECK):
+            os.remove(CHECK)
+            print("[RUNNER] Command used, fetching latest from GitHub...")
+            break
 
-    print(f"[RUNNER] Restarting...")
+    print("[RUNNER] Restarting...")
     try:
-        p.terminate(); p.wait(timeout=5)
-    except:
+        p.terminate()
+        p.wait(timeout=5)
+    except Exception:
         p.kill()
     time.sleep(2)
