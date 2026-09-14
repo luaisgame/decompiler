@@ -970,9 +970,17 @@ async def handle_post(request):
         print(f"[DEBUG] POST handle error: {e}")
         return web.Response(text=str(e), status=400)
 
+async def handle_download(request):
+    filename = request.match_info.get("filename", "")
+    filepath = os.path.join(storage_dir, filename)
+    if not os.path.isfile(filepath):
+        return web.Response(text="Not found", status=404)
+    return web.FileResponse(filepath, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
 async def start_local_server(host="127.0.0.1", port=5000):
     app = web.Application()
     app.router.add_post("/decompile", handle_post)
+    app.router.add_get("/files/{filename}", handle_download)
     runner = web.AppRunner(app)
     await runner.setup()
     for p in range(port, port + 10):
