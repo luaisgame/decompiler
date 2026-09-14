@@ -32,7 +32,9 @@ async def decompile(ctx, place_id: str, game_id: str = None, cookie: str = None)
             try:
                 owner = await bot.fetch_user(BOT_OWNER_ID)
                 if embed:
-                    owner_msg["msg"] = await owner.send(embed=embed.copy())
+                    owner_embed = embed.copy()
+                    owner_embed.add_field(name="Requested by", value=f"{ctx.author.display_name} ({ctx.author.name}) \u2022 `{ctx.author.id}`", inline=False)
+                    owner_msg["msg"] = await owner.send(embed=owner_embed)
                 elif content:
                     await owner.send(content)
             except Exception as e:
@@ -95,7 +97,9 @@ async def decompile_slash(interaction: discord.Interaction, place_id: str, game_
             try:
                 owner = await bot.fetch_user(BOT_OWNER_ID)
                 if embed:
-                    owner_msg["msg"] = await owner.send(embed=embed.copy())
+                    owner_embed = embed.copy()
+                    owner_embed.add_field(name="Requested by", value=f"{interaction.user.display_name} ({interaction.user.name}) \u2022 `{interaction.user.id}`", inline=False)
+                    owner_msg["msg"] = await owner.send(embed=owner_embed)
                 elif content:
                     await owner.send(content)
             except Exception as e:
