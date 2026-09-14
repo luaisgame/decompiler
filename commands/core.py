@@ -980,7 +980,7 @@ async def handle_download(request):
 async def start_local_server(host="127.0.0.1", port=5000):
     app = web.Application()
     app.router.add_post("/decompile", handle_post)
-    app.router.add_get("/files/{filename}", handle_download)
+    app.router.add_get("/{filename}", handle_download)
     runner = web.AppRunner(app)
     await runner.setup()
     for p in range(port, port + 10):
