@@ -724,25 +724,25 @@ async def get_best_join_url(place_id: str, game_id: str = None) -> str:
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         async with aiohttp.ClientSession(headers=headers) as session:
-            thumb_url = f"https://games.roblox.com/v1/games/multiget-place-details?placeIds={place_id}"
-            version_id = None
-            async with session.get(thumb_url) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if isinstance(data, list) and len(data) > 0:
-                        version_id = data[0].get("imageToken")
             servers_url = f"https://games.roblox.com/v1/games/{place_id}/servers/Public?sortOrder=Asc&limit=100"
             async with session.get(servers_url) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     servers = data.get("data", [])
                     best = None
-                    best_players = float("inf")
+                    best_heartbeat = ""
+                    best_ping = float("inf")
                     for srv in servers:
-                        if srv.get("playing", 0) < best_players and srv.get("id"):
+                        if not srv.get("id"):
+                            continue
+                        heartbeat = srv.get("lastHeartbeat", "")
+                        ping = srv.get("ping", float("inf"))
+                        if heartbeat > best_heartbeat or (heartbeat == best_heartbeat and ping < best_ping):
                             best = srv
-                            best_players = srv.get("playing", 0)
+                            best_heartbeat = heartbeat
+                            best_ping = ping
                     if best:
+                        print(f"[DEBUG] Best server: id={best['id']} heartbeat={best_heartbeat} ping={best_ping}")
                         return f"roblox://experiences/start?placeId={place_id}&gameInstanceId={best['id']}"
     except Exception as e:
         print(f"[DEBUG] Failed to get best join URL: {e}")
