@@ -328,7 +328,7 @@ async def _renumber_queue(notify_bumps: bool = False):
                 print(f"[DEBUG] Failed to notify user of queue shift: {e}")
 
 async def enqueue_decompile_task(send_func, user: discord.User | discord.Member, 
-guild, channel, place_id: str, game_id: str, is_ephemeral: bool, on_status_update=None, user_cookie: str = None):
+guild, channel, place_id: str, game_id: str, is_ephemeral: bool, on_status_update=None, user_cookie: str = None, raw: bool = False):
     global queue_counter, current_active_data
     queue_counter += 1
     author_id = user.id
@@ -346,6 +346,7 @@ guild, channel, place_id: str, game_id: str, is_ephemeral: bool, on_status_updat
             "is_ephemeral": is_ephemeral,
             "on_status_update": on_status_update,
             "user_cookie": user_cookie,
+            "raw": raw,
             "future": asyncio.get_running_loop().create_future(),
             "last_pos": None
         }
@@ -421,7 +422,8 @@ async def decompile_queue_worker():
                 resume_info_msg=data.get("resume_info_msg"),
                 resume_embed=data.get("resume_embed"),
                 on_status_update=data.get("on_status_update"),
-                user_cookie=data.get("user_cookie")
+                user_cookie=data.get("user_cookie"),
+                raw=data.get("raw", False)
             )
         except Exception as e:
             print(f"[DEBUG] Queue worker error processing task: {e}")
@@ -1009,9 +1011,83 @@ async def handle_download(request):
         return web.Response(text="Not found", status=404)
     return web.FileResponse(filepath, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
+async def handle_games_json(request):
+    games_json = os.path.join(storage_dir, "games.json")
+    if not os.path.exists(games_json):
+        return web.json_response([])
+    with open(games_json, "r") as f:
+        return web.json_response(json.load(f))
+
+async def handle_index(request):
+    games_json = os.path.join(storage_dir, "games.json")
+    entries = []
+    if os.path.exists(games_json):
+        with open(games_json, "r") as f:
+            entries = json.load(f)
+    games_html = ""
+    for e in entries:
+        games_html += f'''<div class="game-card" data-name="{e.get("game_name","").lower()}" data-user="{e.get("display_name","").lower()}">
+            <div class="game-title">{e.get("game_name","Unknown")}</div>
+            <div class="game-meta">
+                <span class="label">Place ID:</span> <span class="value">{e.get("place_id","")}</span>
+                <span class="label">Version:</span> <span class="value">{e.get("game_version","N/A")}</span>
+                <span class="label">Requested by:</span> <span class="value">{e.get("display_name","Unknown")} ({e.get("user_id","")})</span>
+                <span class="label">Downloaded:</span> <span class="value">{e.get("timestamp","")}</span>
+            </div>
+            <a class="download-btn" href="/{e.get("filename","")}" download>Download</a>
+        </div>'''
+    html = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lua is game</title>
+<style>
+* {{ margin:0; padding:0; box-sizing:border-box; }}
+body {{ background:#0d1117; color:#c9d1d9; font-family:'Segoe UI',system-ui,sans-serif; }}
+.header {{ background:#161b22; padding:20px 40px; border-bottom:1px solid #30363d; display:flex; align-items:center; justify-content:space-between; }}
+.logo {{ font-size:28px; font-weight:700; }}
+.lua {{ color:#58a6ff; }} .is {{ color:#8b949e; }} .game {{ color:#3fb950; }}
+.search {{ background:#0d1117; border:1px solid #30363d; color:#c9d1d9; padding:10px 16px; border-radius:6px; width:300px; font-size:14px; outline:none; }}
+.search:focus {{ border-color:#58a6ff; }}
+.container {{ max-width:1200px; margin:30px auto; padding:0 20px; }}
+.game-card {{ background:#161b22; border:1px solid #30363d; border-radius:8px; padding:20px; margin-bottom:16px; transition:border-color 0.2s; }}
+.game-card:hover {{ border-color:#58a6ff; }}
+.game-title {{ font-size:20px; font-weight:600; color:#f0f6fc; margin-bottom:10px; }}
+.game-meta {{ font-size:13px; color:#8b949e; margin-bottom:14px; line-height:1.8; }}
+.label {{ color:#58a6ff; font-weight:500; }}
+.value {{ color:#c9d1d9; margin-right:16px; }}
+.download-btn {{ display:inline-block; background:#238636; color:#fff; padding:8px 16px; border-radius:6px; text-decoration:none; font-size:13px; font-weight:500; transition:background 0.2s; }}
+.download-btn:hover {{ background:#2ea043; }}
+.count {{ color:#8b949e; font-size:14px; margin-bottom:20px; }}
+</style>
+</head>
+<body>
+<div class="header">
+    <div class="logo"><span class="lua">Lua</span> <span class="is">is</span> <span class="game">game</span></div>
+    <input class="search" type="text" placeholder="Search games..." id="search" oninput="filterGames()">
+</div>
+<div class="container">
+    <div class="count">{len(entries)} game(s) decompiled</div>
+    <div id="games">{games_html}</div>
+</div>
+<script>
+function filterGames() {{
+    var q = document.getElementById("search").value.toLowerCase();
+    document.querySelectorAll(".game-card").forEach(function(c) {{
+        c.style.display = (c.dataset.name.includes(q) || c.dataset.user.includes(q)) ? "" : "none";
+    }});
+}}
+</script>
+</body>
+</html>'''
+    return web.Response(text=html, content_type="text/html")
+
 async def start_local_server(host="127.0.0.1", port=5000):
     app = web.Application()
     app.router.add_post("/decompile", handle_post)
+    app.router.add_get("/games.json", handle_games_json)
+    app.router.add_get("/", handle_index)
     app.router.add_get("/{filename}", handle_download)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -1055,19 +1131,37 @@ def _terminate_live_roblox():
         except Exception:
             continue
 
-def _upload_file_sync(file_path: str, place_id: str) -> str | None:
-    filename = f"{place_id}_{os.path.basename(file_path)}"
+def _upload_file_sync(file_path: str, place_id: str, game_name: str = None, user_id: str = None, display_name: str = None, game_version: str = None) -> str | None:
+    safe_name = "".join(c for c in (game_name or place_id) if c.isalnum() or c in " _-").strip().replace(" ", "_")
+    filename = f"{safe_name}_{place_id}{os.path.splitext(file_path)[1]}"
     dest = os.path.join(storage_dir, filename)
+    games_json = os.path.join(storage_dir, "games.json")
     try:
         shutil.copy2(file_path, dest)
+        entries = []
+        if os.path.exists(games_json):
+            with open(games_json, "r") as f:
+                entries = json.load(f)
+        entries = [e for e in entries if e.get("place_id") != place_id]
+        entries.insert(0, {
+            "game_name": game_name or f"Place {place_id}",
+            "place_id": place_id,
+            "filename": filename,
+            "user_id": user_id or "Unknown",
+            "display_name": display_name or "Unknown",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "game_version": game_version or "N/A"
+        })
+        with open(games_json, "w") as f:
+            json.dump(entries, f, indent=2)
         return f"https://storage.luaisgame.com/{filename}"
     except Exception as e:
         print(f"[DEBUG] Storage copy error: {e}")
         return None
 
-async def upload_file(file_path: str, place_id: str) -> dict | None:
+async def upload_file(file_path: str, place_id: str, game_name: str = None, user_id: str = None, display_name: str = None, game_version: str = None) -> dict | None:
     print(f"[DEBUG] Copying {os.path.basename(file_path)} to storage...")
-    public_url = await asyncio.to_thread(_upload_file_sync, file_path, place_id)
+    public_url = await asyncio.to_thread(_upload_file_sync, file_path, place_id, game_name, user_id, display_name, game_version)
     if public_url:
         return {"url": public_url}
     return None
@@ -1214,8 +1308,8 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
         target_name = f"game{out_ext}"
         print(f"[DEBUG] Renamed to: {target_name}")
 
-    if SKIP_PROCESSFILE:
-        print("[DEBUG] SKIP_PROCESSFILE is enabled; skipping oracle-postprocess post-processor.")
+    if SKIP_PROCESSFILE or raw:
+        print(f"[DEBUG] {'SKIP_PROCESSFILE is enabled' if SKIP_PROCESSFILE else 'Raw mode enabled'}; skipping oracle-postprocess post-processor.")
     else:
         proc_script = os.path.join(BASE_DIR, "decompile", "oracle-postprocess.exe")
         if not os.path.exists(proc_script):
@@ -1292,7 +1386,7 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
     print("[DEBUG] Processed file check timed out.")
     return None, None
 
-async def run_decompile_logic(send_func, user: discord.User | discord.Member, guild, channel, place_id: str, game_id: str = None, is_ephemeral: bool = False, on_status_update=None, user_cookie: str = None):
+async def run_decompile_logic(send_func, user: discord.User | discord.Member, guild, channel, place_id: str, game_id: str = None, is_ephemeral: bool = False, on_status_update=None, user_cookie: str = None, raw: bool = False):
     author_id = user.id
     now = time.time()
 
@@ -1347,9 +1441,9 @@ async def run_decompile_logic(send_func, user: discord.User | discord.Member, gu
         await send_msg(send_func, f"**Unable to decompile game:** {game_name}\n**Reason:** {reason}", ephemeral=is_ephemeral)
         return
 
-    await enqueue_decompile_task(send_func, user, guild, channel, place_id, game_id, is_ephemeral, on_status_update=on_status_update, user_cookie=user_cookie)
+    await enqueue_decompile_task(send_func, user, guild, channel, place_id, game_id, is_ephemeral, on_status_update=on_status_update, user_cookie=user_cookie, raw=raw)
 
-async def execute_decompile_job(send_func, author_id: int, guild, channel, place_id: str, game_id: str = None, is_ephemeral: bool = False, is_priority: bool = False, resume_info_msg=None, resume_embed=None, on_status_update=None, cookie_retries=0, original_cookie_index=None, user_cookie: str = None, cookie_ban_msg=None):
+async def execute_decompile_job(send_func, author_id: int, guild, channel, place_id: str, game_id: str = None, is_ephemeral: bool = False, is_priority: bool = False, resume_info_msg=None, resume_embed=None, on_status_update=None, cookie_retries=0, original_cookie_index=None, user_cookie: str = None, cookie_ban_msg=None, raw: bool = False):
     global is_decompiling, running_jobs, active_events, current_active_data, active_cookie_index, default_cookie_index
     is_retry = False
     saved_user_cookie = None
@@ -1541,7 +1635,15 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
             if file_path:
                 await update_status(info_msg, embed, "uploading")
                 await update_bot_presence(game_name, text="Uploading File...")
-                upload_result = await upload_file(file_path, place_id)
+                game_version = post_data.get("game_version", "N/A")
+                author = await bot.fetch_user(author_id) if author_id else None
+                upload_result = await upload_file(
+                    file_path, place_id,
+                    game_name=game_name,
+                    user_id=str(author_id),
+                    display_name=author.display_name if author else "Unknown",
+                    game_version=game_version
+                )
 
                 if upload_result:
                     download_url = upload_result["url"]
