@@ -1210,11 +1210,14 @@ async def update_status(info_msg, embed, stage):
         except Exception as e:
             print(f"[DEBUG] Failed to call on_status_update: {e}")
 
-async def _wait_with_pause(event, total, job_data):
+async def _wait_with_pause(event, total, job_data, process=None):
     step = 0.5
     waited = 0.0
     while waited < total:
         if job_data and job_data.get("aborted"):
+            return False
+        if process and process.poll() is not None:
+            print("[DEBUG] Roblox process closed unexpectedly.")
             return False
         if event.is_set():
             return True
@@ -1239,7 +1242,7 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
     print("[DEBUG] Waiting for local POST request on http://127.0.0.1:5000/decompile...")
 
     try:
-        if not await _wait_with_pause(rec_ev, 45, job_data):
+        if not await _wait_with_pause(rec_ev, 45, job_data, process=process):
             print("[DEBUG] Timed out or failed waiting for join event.")
             process.kill()
             return None, None
@@ -1258,7 +1261,7 @@ async def process_file(send_func, process, game_name, timeout=60, ephemeral=Fals
         return None, None
 
     try:
-        if not await _wait_with_pause(fin_ev, timeout, job_data):
+        if not await _wait_with_pause(fin_ev, timeout, job_data, process=process):
             print("[DEBUG] Timed out waiting for decompile event.")
             process.kill()
             return None, None
