@@ -670,10 +670,8 @@ class CookieBannedView(discord.ui.View):
             child.disabled = True
 
 class JoinGameView(discord.ui.View):
-    def __init__(self, game_page_url: str):
+    def __init__(self):
         super().__init__(timeout=None)
-        button = discord.ui.Button(label="Join Game", url=game_page_url, style=discord.ButtonStyle.link)
-        self.add_item(button)
         chrome = discord.ui.Button(label="Chrome Extension", url="https://chromewebstore.google.com/detail/roblox-jobid-join/pdeebkpgdaflejgihpbniammmelkdnac", style=discord.ButtonStyle.link, emoji="🌐")
         self.add_item(chrome)
         firefox = discord.ui.Button(label="Firefox Extension", url="https://addons.mozilla.org/en-US/firefox/addon/roblox-jobid-join/", style=discord.ButtonStyle.link, emoji="🦊")
@@ -1448,7 +1446,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
         if icon_url:
             embed.set_thumbnail(url=icon_url)
 
-        join_view = JoinGameView(join_url)
+        join_view = JoinGameView()
         info_msg = await send_msg(send_func, embed=embed, ephemeral=is_ephemeral, view=join_view)
 
     rec_ev = asyncio.Event()
