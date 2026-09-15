@@ -1362,16 +1362,21 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
             share_code = query_params.get("code", [None])[0]
             link_type = query_params.get("type", ["Server"])[0]
             join_url = f"https://www.roblox.com/games/start?placeId={place_id}"
+            launch_url = f"roblox://experiences/start?placeId={place_id}"
             if ps_code:
                 join_url = f"https://www.roblox.com/games/start?placeId={place_id}&privateServerLinkCode={ps_code}"
+                launch_url = f"roblox://experiences/start?placeId={place_id}&launchData={quote(json.dumps({'psCode': ps_code}), safe='')"
             elif share_code:
                 join_url = f"https://www.roblox.com/games/start?placeId={place_id}"
+                launch_url = f"roblox://navigation/share_links?code={quote(share_code)}&type={quote(link_type)}"
         else:
             join_url = f"https://www.roblox.com/games/start?placeId={place_id}&gameInstanceId={game_id}"
+            launch_url = f"roblox://experiences/start?placeId={place_id}&gameInstanceId={game_id}"
     else:
         join_url = await get_best_join_url(place_id)
+        launch_url = join_url.replace("https://www.roblox.com/games/start?", "roblox://experiences/start?")
 
-    print(f"[DEBUG] Final launch join_url: {join_url}")
+    print(f"[DEBUG] Final launch join_url: {launch_url}")
 
     if resume_info_msg is not None and resume_embed is not None:
         info_msg = resume_info_msg
@@ -1493,7 +1498,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
             return
 
         print(f"[DEBUG] Launching Roblox binary at: {roblox}")
-        process = subprocess.Popen([roblox, "--cmd", join_url])
+        process = subprocess.Popen([roblox, "--cmd", launch_url])
         data["process"] = process
         await update_status(info_msg, embed, "joining")
 
