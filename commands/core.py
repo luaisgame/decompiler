@@ -1222,7 +1222,7 @@ async def _wait_with_pause(event, total, job_data):
         waited += step
     return event.is_set()
 
-async def process_file(send_func, process, game_name, timeout=60, ephemeral=False, info_msg=None, embed=None, rec_ev=None, fin_ev=None, job_data=None):
+async def process_file(send_func, process, game_name, timeout=60, ephemeral=False, info_msg=None, embed=None, rec_ev=None, fin_ev=None, job_data=None, raw=False):
     decompile_dir = os.path.join(BASE_DIR, "storage")
     os.makedirs(decompile_dir, exist_ok=True)
 
@@ -1535,7 +1535,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                                 cookie_ban_msg = await send_msg(send_func, embed=embed, ephemeral=is_ephemeral)
                             await asyncio.sleep(0.1)
                             is_retry = True
-                            await execute_decompile_job(send_func, author_id, guild, channel, place_id, game_id, is_ephemeral, is_priority=is_priority, on_status_update=on_status_update, cookie_retries=cookie_retries + 1, original_cookie_index=original_cookie_index, user_cookie=user_cookie, cookie_ban_msg=cookie_ban_msg)
+                            await execute_decompile_job(send_func, author_id, guild, channel, place_id, game_id, is_ephemeral, is_priority=is_priority, on_status_update=on_status_update, cookie_retries=cookie_retries + 1, original_cookie_index=original_cookie_index, user_cookie=user_cookie, cookie_ban_msg=cookie_ban_msg, raw=raw)
                             if original_cookie_index is not None and original_cookie_index < len(cookies):
                                 active_cookie_index = original_cookie_index
                                 _replace_roblox_security_cookie(cookies[original_cookie_index])
@@ -1627,7 +1627,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
 
         game_file = None
         try:
-            file_path, game_file = await process_file(send_func, process, game_name, timeout=60, ephemeral=is_ephemeral, info_msg=info_msg, embed=embed, rec_ev=rec_ev, fin_ev=fin_ev, job_data=data)
+            file_path, game_file = await process_file(send_func, process, game_name, timeout=60, ephemeral=is_ephemeral, info_msg=info_msg, embed=embed, rec_ev=rec_ev, fin_ev=fin_ev, job_data=data, raw=raw)
 
             global SKIP_PROCESSFILE
             SKIP_PROCESSFILE = False
