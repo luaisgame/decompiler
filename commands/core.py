@@ -676,7 +676,6 @@ class JoinGameView(discord.ui.View):
         btn = discord.ui.Button(
             label="Bot has not joined yet" if not join_url else "Copy Join URL",
             style=discord.ButtonStyle.secondary,
-            emoji="roblox",
             disabled=not join_url,
         )
         btn.callback = self._join_callback
