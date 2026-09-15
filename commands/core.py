@@ -672,13 +672,27 @@ class CookieBannedView(discord.ui.View):
 class JoinGameView(discord.ui.View):
     def __init__(self, join_url: str = None):
         super().__init__(timeout=None)
-        if join_url:
-            button = discord.ui.Button(label="Join Game", url=join_url, style=discord.ButtonStyle.link, emoji="roblox")
-            self.add_item(button)
-        chrome = discord.ui.Button(label="Chrome Extension", url="https://chromewebstore.google.com/detail/roblox-jobid-join/pdeebkpgdaflejgihpbniammmelkdnac", style=discord.ButtonStyle.link, emoji="🌐")
-        self.add_item(chrome)
-        firefox = discord.ui.Button(label="Firefox Extension", url="https://addons.mozilla.org/en-US/firefox/addon/roblox-jobid-join/", style=discord.ButtonStyle.link, emoji="🦊")
-        self.add_item(firefox)
+        self.join_url = join_url
+
+    @discord.ui.button(label="Bot has not joined yet", style=discord.ButtonStyle.secondary, emoji="roblox", disabled=True)
+    async def join_copy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.join_url:
+            await interaction.response.send_message(f"**Join URL (copy this):**\n```\n{self.join_url}\n```", ephemeral=True)
+        else:
+            await interaction.response.send_message("Bot has not joined the game yet.", ephemeral=True)
+
+    @discord.ui.button(label="Chrome Extension", url="https://chromewebstore.google.com/detail/roblox-jobid-join/pdeebkpgdaflejgihpbniammmelkdnac", style=discord.ButtonStyle.link, emoji="🌐", row=1)
+    async def chrome_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        pass
+
+    @discord.ui.button(label="Firefox Extension", url="https://addons.mozilla.org/en-US/firefox/addon/roblox-jobid-join/", style=discord.ButtonStyle.link, emoji="🦊", row=1)
+    async def firefox_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        pass
+
+    def set_join_url(self, join_url: str):
+        self.join_url = join_url
+        self.join_copy_button.label = "Copy Join URL"
+        self.join_copy_button.disabled = False
 
 class DownloadView(discord.ui.View):
     def __init__(self, download_url: str):
@@ -1450,7 +1464,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
         if icon_url:
             embed.set_thumbnail(url=icon_url)
 
-        join_view = JoinGameView(join_url)
+        join_view = JoinGameView(join_url if game_id else None)
         info_msg = await send_msg(send_func, embed=embed, ephemeral=is_ephemeral, view=join_view)
 
     rec_ev = asyncio.Event()
