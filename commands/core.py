@@ -1363,7 +1363,9 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
             launch_url = f"roblox://experiences/start?placeId={place_id}"
             if ps_code:
                 join_url = f"https://www.roblox.com/games/start?placeId={place_id}&privateServerLinkCode={ps_code}"
-                launch_url = f"roblox://experiences/start?placeId={place_id}&launchData={quote(json.dumps({'psCode': ps_code}), safe='')}"            elif share_code:
+                ps_json = json.dumps({"psCode": ps_code})
+                launch_url = f"roblox://experiences/start?placeId={place_id}&launchData={quote(ps_json, safe='')}"
+            elif share_code:
                 join_url = f"https://www.roblox.com/games/start?placeId={place_id}"
                 launch_url = f"roblox://navigation/share_links?code={quote(share_code)}&type={quote(link_type)}"
         else:
