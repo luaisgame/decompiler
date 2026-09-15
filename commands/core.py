@@ -673,6 +673,9 @@ class JoinGameView(discord.ui.View):
     def __init__(self, join_url: str = None):
         super().__init__(timeout=None)
         self.join_url = join_url
+        if join_url:
+            self.join_copy_button.label = "Copy Join URL"
+            self.join_copy_button.disabled = False
 
     @discord.ui.button(label="Bot has not joined yet", style=discord.ButtonStyle.secondary, emoji="roblox", disabled=True)
     async def join_copy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
