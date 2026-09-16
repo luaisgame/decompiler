@@ -1418,7 +1418,6 @@ def _upload_file_sync(file_path: str, place_id: str, game_name: str = None, user
         if os.path.exists(games_json):
             with open(games_json, "r") as f:
                 entries = json.load(f)
-        entries = [e for e in entries if e.get("place_id") != place_id]
         entries.insert(0, {
             "game_name": game_name or f"Place {place_id}",
             "place_id": place_id,
