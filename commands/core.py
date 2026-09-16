@@ -1172,17 +1172,21 @@ async def handle_thumbnail(request):
         return web.Response(text="", status=400)
     try:
         async with aiohttp.ClientSession() as session:
-            r = await session.get(f"https://thumbnails.roblox.com/v1/games/icons?placeIds={place_id}&size=420x420&format=Png&isCircular=false")
-            data = await r.json()
-            thumb_url = data.get("data", [{}])[0].get("imageUrl", "")
+            async with session.get(f"https://apis.roblox.com/universes/v1/places/{place_id}/universe") as r:
+                if r.status != 200:
+                    return web.Response(text="", status=404)
+                udata = await r.json()
+                universe_id = udata.get("universeId")
+            if not universe_id:
+                return web.Response(text="", status=404)
+            async with session.get(f"https://thumbnails.roblox.com/v1/games/icons?universeIds={universe_id}&size=420x420&format=Png&isCircular=false") as r:
+                tdata = await r.json()
+                thumb_url = tdata.get("data", [{}])[0].get("imageUrl", "")
             if thumb_url:
-                img = await session.get(thumb_url)
-                return web.Response(body=await img.read(), content_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
-            r2 = await session.get(f"https://www.roblox.com/asset-thumbnail/image?assetId={place_id}&width=420&height=420&format=png")
-            if r2.status == 200:
-                return web.Response(body=await r2.read(), content_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
-    except Exception:
-        pass
+                async with session.get(thumb_url) as img:
+                    return web.Response(body=await img.read(), content_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
+    except Exception as e:
+        print(f"[DEBUG] Thumbnail error: {e}")
     return web.Response(text="", status=404)
 
 async def handle_index(request):
