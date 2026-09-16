@@ -55,6 +55,9 @@ channels_file = os.path.join(BASE_DIR, "allowed_channels.txt")
 cookies_file = os.path.join(BASE_DIR, "cookies.txt")
 storage_dir = os.path.join(BASE_DIR, "storage")
 STORAGE_MAX_BYTES = 25 * 1024 * 1024 * 1024
+admin_password_file = os.path.join(BASE_DIR, "admin_password.txt")
+banned_ips_file = os.path.join(BASE_DIR, "banned_ips.txt")
+ips_file = os.path.join(BASE_DIR, "tracked_ips.json")
 
 def _cleanup_storage():
     try:
@@ -1018,7 +1021,93 @@ async def handle_games_json(request):
     with open(games_json, "r") as f:
         return web.json_response(json.load(f))
 
+def _get_admin_password():
+    if os.path.exists(admin_password_file):
+        with open(admin_password_file, "r") as f:
+            return f.read().strip()
+    pw = uuid.uuid4().hex[:12]
+    with open(admin_password_file, "w") as f:
+        f.write(pw)
+    print(f"[ADMIN] Admin password: {pw}")
+    return pw
+
+def _get_banned_ips():
+    if not os.path.exists(banned_ips_file):
+        return set()
+    with open(banned_ips_file, "r") as f:
+        return {line.strip() for line in f if line.strip()}
+
+def _ban_ip(ip):
+    banned = _get_banned_ips()
+    banned.add(ip)
+    with open(banned_ips_file, "w") as f:
+        for i in banned:
+            f.write(f"{i}\n")
+
+def _unban_ip(ip):
+    banned = _get_banned_ips()
+    banned.discard(ip)
+    with open(banned_ips_file, "w") as f:
+        for i in banned:
+            f.write(f"{i}\n")
+
+def _track_ip(ip):
+    entries = []
+    if os.path.exists(ips_file):
+        with open(ips_file, "r") as f:
+            entries = json.load(f)
+    for e in entries:
+        if e.get("ip") == ip:
+            e["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            e["visits"] = e.get("visits", 0) + 1
+            with open(ips_file, "w") as f:
+                json.dump(entries, f, indent=2)
+            return
+    entries.append({"ip": ip, "first_seen": time.strftime("%Y-%m-%d %H:%M:%S"), "last_seen": time.strftime("%Y-%m-%d %H:%M:%S"), "visits": 1})
+    with open(ips_file, "w") as f:
+        json.dump(entries, f, indent=2)
+
+async def handle_login(request):
+    data = await request.json()
+    password = data.get("password", "")
+    if password == _get_admin_password():
+        resp = web.json_response({"ok": True})
+        resp.set_cookie("admin_token", password, max_age=86400*30, samesite="Lax")
+        return resp
+    return web.json_response({"ok": False, "error": "Wrong password"}, status=401)
+
+def _is_admin(request):
+    token = request.cookies.get("admin_token", "")
+    return token == _get_admin_password()
+
+async def handle_admin_data(request):
+    if not _is_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    ips = []
+    if os.path.exists(ips_file):
+        with open(ips_file, "r") as f:
+            ips = json.load(f)
+    banned = list(_get_banned_ips())
+    return web.json_response({"ips": ips, "banned": banned})
+
+async def handle_ban(request):
+    if not _is_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    data = await request.json()
+    ip = data.get("ip", "")
+    action = data.get("action", "ban")
+    if action == "ban":
+        _ban_ip(ip)
+    else:
+        _unban_ip(ip)
+    return web.json_response({"ok": True})
+
 async def handle_index(request):
+    ip = request.headers.get("X-Forwarded-For", request.remote)
+    _track_ip(ip)
+    if ip in _get_banned_ips():
+        return web.Response(text="Access denied.", status=403)
+    admin = _is_admin(request)
     games_json = os.path.join(storage_dir, "games.json")
     entries = []
     if os.path.exists(games_json):
@@ -1036,6 +1125,35 @@ async def handle_index(request):
             </div>
             <a class="download-btn" href="/{e.get("filename","")}" download>Download</a>
         </div>'''
+    admin_block = ""
+    if admin:
+        admin_block = '''
+        <div class="admin-panel" id="adminPanel">
+            <div class="admin-header">
+                <span class="admin-title">Console</span>
+                <div class="admin-tabs">
+                    <button class="tab active" onclick="showTab('main')">Main</button>
+                    <button class="tab" onclick="showTab('website')">Website</button>
+                </div>
+            </div>
+            <div class="tab-content" id="tab-main">
+                <div class="admin-section">
+                    <h3>Tracked IPs</h3>
+                    <div id="ipList" class="ip-list"></div>
+                </div>
+            </div>
+            <div class="tab-content hidden" id="tab-website">
+                <div class="admin-section">
+                    <h3>Banned IPs</h3>
+                    <div id="banList" class="ip-list"></div>
+                    <div class="ban-form">
+                        <input type="text" id="banIpInput" placeholder="IP to ban/unban">
+                        <button class="btn-ban" onclick="banIp()">Ban</button>
+                        <button class="btn-unban" onclick="unbanIp()">Unban</button>
+                    </div>
+                </div>
+            </div>
+        </div>'''
     html = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1046,32 +1164,87 @@ async def handle_index(request):
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 * {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{ background:#0d1117; color:#c9d1d9; font-family:'Inter','SF Pro Display','Segoe UI',system-ui,-apple-system,sans-serif; }}
-.header {{ background:#161b22; padding:20px 40px; border-bottom:1px solid #30363d; display:flex; align-items:center; justify-content:space-between; }}
-.logo {{ font-size:28px; font-weight:700; }}
+body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',system-ui,-apple-system,sans-serif; min-height:100vh; }}
+.header {{ background:linear-gradient(135deg,#0d1117 0%,#161b22 100%); padding:20px 40px; border-bottom:1px solid #30363d; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:100; backdrop-filter:blur(10px); }}
+.header-left {{ display:flex; align-items:center; gap:20px; }}
+.header-right {{ display:flex; align-items:center; gap:12px; }}
+.logo {{ font-size:26px; font-weight:700; letter-spacing:-0.5px; }}
 .lua {{ color:#58a6ff; }} .is {{ color:#8b949e; }} .game {{ color:#3fb950; }}
-.search {{ background:#0d1117; border:1px solid #30363d; color:#c9d1d9; padding:10px 16px; border-radius:6px; width:300px; font-size:14px; outline:none; }}
-.search:focus {{ border-color:#58a6ff; }}
+.search {{ background:#0d1117; border:1px solid #30363d; color:#c9d1d9; padding:10px 16px; border-radius:8px; width:320px; font-size:14px; outline:none; transition:border-color 0.2s; }}
+.search:focus {{ border-color:#58a6ff; box-shadow:0 0 0 3px rgba(88,166,255,0.15); }}
+.btn {{ padding:10px 20px; border-radius:8px; border:none; font-size:13px; font-weight:600; cursor:pointer; transition:all 0.2s; text-decoration:none; display:inline-flex; align-items:center; gap:6px; }}
+.btn-primary {{ background:#58a6ff; color:#0d1117; }}
+.btn-primary:hover {{ background:#79b8ff; transform:translateY(-1px); }}
+.btn-secondary {{ background:#21262d; color:#c9d1d9; border:1px solid #30363d; }}
+.btn-secondary:hover {{ background:#30363d; }}
 .container {{ max-width:1200px; margin:30px auto; padding:0 20px; }}
-.game-card {{ background:#161b22; border:1px solid #30363d; border-radius:8px; padding:20px; margin-bottom:16px; transition:border-color 0.2s; }}
-.game-card:hover {{ border-color:#58a6ff; }}
-.game-title {{ font-size:20px; font-weight:600; color:#f0f6fc; margin-bottom:10px; }}
-.game-meta {{ font-size:13px; color:#8b949e; margin-bottom:14px; line-height:1.8; }}
+.game-card {{ background:linear-gradient(135deg,#161b22 0%,#1c2333 100%); border:1px solid #30363d; border-radius:12px; padding:24px; margin-bottom:16px; transition:all 0.3s; }}
+.game-card:hover {{ border-color:#58a6ff; transform:translateY(-2px); box-shadow:0 8px 24px rgba(0,0,0,0.3); }}
+.game-title {{ font-size:20px; font-weight:600; color:#f0f6fc; margin-bottom:12px; }}
+.game-meta {{ font-size:13px; color:#8b949e; margin-bottom:16px; line-height:2; }}
 .label {{ color:#58a6ff; font-weight:500; }}
 .value {{ color:#c9d1d9; margin-right:16px; }}
-.download-btn {{ display:inline-block; background:#238636; color:#fff; padding:8px 16px; border-radius:6px; text-decoration:none; font-size:13px; font-weight:500; transition:background 0.2s; }}
-.download-btn:hover {{ background:#2ea043; }}
+.download-btn {{ display:inline-block; background:linear-gradient(135deg,#238636,#2ea043); color:#fff; padding:10px 20px; border-radius:8px; text-decoration:none; font-size:13px; font-weight:600; transition:all 0.2s; }}
+.download-btn:hover {{ transform:translateY(-1px); box-shadow:0 4px 12px rgba(35,134,54,0.4); }}
 .count {{ color:#8b949e; font-size:14px; margin-bottom:20px; }}
+.footer {{ text-align:center; padding:30px; color:#484f58; font-size:13px; border-top:1px solid #21262d; margin-top:40px; }}
+.footer a {{ color:#58a6ff; text-decoration:none; }}
+.admin-panel {{ background:#161b22; border:1px solid #30363d; border-radius:12px; padding:20px; margin-bottom:24px; }}
+.admin-header {{ display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }}
+.admin-title {{ font-size:18px; font-weight:600; color:#f0f6fc; }}
+.admin-tabs {{ display:flex; gap:8px; }}
+.tab {{ padding:8px 16px; border-radius:6px; border:1px solid #30363d; background:#0d1117; color:#8b949e; cursor:pointer; font-size:13px; font-weight:500; transition:all 0.2s; }}
+.tab.active {{ background:#58a6ff; color:#0d1117; border-color:#58a6ff; }}
+.tab:hover:not(.active) {{ border-color:#58a6ff; }}
+.tab-content.hidden {{ display:none; }}
+.admin-section h3 {{ font-size:14px; color:#8b949e; margin-bottom:12px; font-weight:500; }}
+.ip-list {{ max-height:300px; overflow-y:auto; }}
+.ip-item {{ display:flex; justify-content:space-between; align-items:center; padding:10px 14px; background:#0d1117; border:1px solid #21262d; border-radius:8px; margin-bottom:8px; font-size:13px; }}
+.ip-item .ip {{ color:#58a6ff; font-family:monospace; }}
+.ip-item .meta {{ color:#484f58; font-size:12px; }}
+.ban-form {{ display:flex; gap:8px; margin-top:12px; }}
+.ban-form input {{ background:#0d1117; border:1px solid #30363d; color:#c9d1d9; padding:8px 12px; border-radius:6px; font-size:13px; outline:none; flex:1; }}
+.ban-form input:focus {{ border-color:#58a6ff; }}
+.btn-ban {{ background:#da3633; color:#fff; padding:8px 16px; border:none; border-radius:6px; cursor:pointer; font-weight:500; font-size:13px; }}
+.btn-ban:hover {{ background:#f85149; }}
+.btn-unban {{ background:#238636; color:#fff; padding:8px 16px; border:none; border-radius:6px; cursor:pointer; font-weight:500; font-size:13px; }}
+.btn-unban:hover {{ background:#2ea043; }}
+.login-overlay {{ position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.8); display:none; align-items:center; justify-content:center; z-index:1000; }}
+.login-overlay.active {{ display:flex; }}
+.login-box {{ background:#161b22; border:1px solid #30363d; border-radius:12px; padding:32px; width:360px; text-align:center; }}
+.login-box h2 {{ color:#f0f6fc; margin-bottom:20px; font-size:20px; }}
+.login-box input {{ width:100%; background:#0d1117; border:1px solid #30363d; color:#c9d1d9; padding:12px 16px; border-radius:8px; font-size:14px; outline:none; margin-bottom:16px; }}
+.login-box input:focus {{ border-color:#58a6ff; }}
+.login-box .btn {{ width:100%; justify-content:center; }}
+.pulse {{ animation:pulse 2s infinite; }}
+@keyframes pulse {{ 0%,100% {{ opacity:1; }} 50% {{ opacity:0.5; }} }}
 </style>
 </head>
 <body>
 <div class="header">
-    <div class="logo"><span class="lua">Lua</span> <span class="is">is</span> <span class="game">game</span></div>
-    <input class="search" type="text" placeholder="Search games..." id="search" oninput="filterGames()">
+    <div class="header-left">
+        <div class="logo"><span class="lua">Lua</span> <span class="is">is</span> <span class="game">game</span></div>
+        <input class="search" type="text" placeholder="Search games..." id="search" oninput="filterGames()">
+    </div>
+    <div class="header-right">
+        <a class="btn btn-primary" href="https://discord.com/api/oauth2/authorize?client_id=1532820804402806844&permissions=8&scope=bot%20applications.commands" target="_blank">Add Bot</a>
+        {"<button class='btn btn-secondary' onclick='toggleAdmin()'>Console</button>" if admin else "<button class='btn btn-secondary' onclick='showLogin()'>Login</button>"}
+    </div>
 </div>
 <div class="container">
+    {admin_block}
     <div class="count">{len(entries)} game(s) decompiled</div>
     <div id="games">{games_html}</div>
+</div>
+<div class="footer">
+    Created by: <strong>iispeaklua</strong> (Crimson) &bull; <a href="https://discord.gg/luaisgame">Discord</a>
+</div>
+<div class="login-overlay" id="loginOverlay">
+    <div class="login-box">
+        <h2>Admin Login</h2>
+        <input type="password" id="loginPw" placeholder="Enter password" onkeydown="if(event.key==='Enter')doLogin()">
+        <button class="btn btn-primary" onclick="doLogin()">Login</button>
+    </div>
 </div>
 <script>
 function filterGames() {{
@@ -1080,6 +1253,65 @@ function filterGames() {{
         c.style.display = (c.dataset.name.includes(q) || c.dataset.user.includes(q)) ? "" : "none";
     }});
 }}
+function showLogin() {{ document.getElementById("loginOverlay").classList.add("active"); }}
+function toggleAdmin() {{
+    var p = document.getElementById("adminPanel");
+    if (p) p.style.display = p.style.display === "none" ? "block" : "none";
+}}
+async function doLogin() {{
+    var pw = document.getElementById("loginPw").value;
+    var r = await fetch("/api/login", {{method:"POST", headers:{{"Content-Type":"application/json"}}, body:JSON.stringify({{password:pw}})}});
+    if (r.ok) {{ location.reload(); }} else {{ alert("Wrong password"); }}
+}}
+async function loadAdmin() {{
+    var r = await fetch("/api/admin");
+    if (!r.ok) return;
+    var d = await r.json();
+    var ipHtml = "";
+    (d.ips||[]).forEach(function(e) {{
+        var banned = (d.banned||[]).includes(e.ip);
+        ipHtml += '<div class="ip-item"><span class="ip">' + e.ip + (banned ? ' <span style="color:#da3633">(BANNED)</span>' : '') + '</span><span class="meta">Visits: ' + e.visits + ' | Last: ' + e.last_seen + '</span></div>';
+    }});
+    document.getElementById("ipList").innerHTML = ipHtml || "<p style='color:#484f58'>No IPs tracked yet</p>";
+    var banHtml = "";
+    (d.banned||[]).forEach(function(ip) {{
+        banHtml += '<div class="ip-item"><span class="ip">' + ip + '</span><span class="meta">Banned</span></div>';
+    }});
+    document.getElementById("banList").innerHTML = banHtml || "<p style='color:#484f58'>No banned IPs</p>";
+}}
+async function banIp() {{
+    var ip = document.getElementById("banIpInput").value;
+    if (!ip) return;
+    await fetch("/api/ban", {{method:"POST", headers:{{"Content-Type":"application/json"}}, body:JSON.stringify({{ip:ip, action:"ban"}})}});
+    document.getElementById("banIpInput").value = "";
+    loadAdmin();
+}}
+async function unbanIp() {{
+    var ip = document.getElementById("banIpInput").value;
+    if (!ip) return;
+    await fetch("/api/ban", {{method:"POST", headers:{{"Content-Type":"application/json"}}, body:JSON.stringify({{ip:ip, action:"unban"}})}});
+    document.getElementById("banIpInput").value = "";
+    loadAdmin();
+}}
+function showTab(name) {{
+    document.querySelectorAll(".tab-content").forEach(function(t) {{ t.classList.add("hidden"); }});
+    document.querySelectorAll(".tab").forEach(function(t) {{ t.classList.remove("active"); }});
+    document.getElementById("tab-"+name).classList.remove("hidden");
+    event.target.classList.add("active");
+}}
+setInterval(function() {{
+    fetch("/games.json").then(function(r) {{ return r.json(); }}).then(function(data) {{
+        var c = document.getElementById("games");
+        if (!c) return;
+        var h = "";
+        data.forEach(function(e) {{
+            h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-title">'+(e.game_name||'Unknown')+'</div><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><a class="download-btn" href="/'+e.filename+'" download>Download</a></div>';
+        }});
+        c.innerHTML = h;
+        document.querySelector(".count").textContent = data.length + " game(s) decompiled";
+    }});
+}}, 5000);
+if (document.getElementById("adminPanel")) {{ loadAdmin(); setInterval(loadAdmin, 10000); }}
 </script>
 </body>
 </html>'''
@@ -1089,6 +1321,9 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app = web.Application()
     app.router.add_post("/decompile", handle_post)
     app.router.add_get("/games.json", handle_games_json)
+    app.router.add_post("/api/login", handle_login)
+    app.router.add_get("/api/admin", handle_admin_data)
+    app.router.add_post("/api/ban", handle_ban)
     app.router.add_get("/", handle_index)
     app.router.add_get("/{filename}", handle_download)
     runner = web.AppRunner(app)
