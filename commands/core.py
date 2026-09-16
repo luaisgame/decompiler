@@ -1214,20 +1214,23 @@ async def handle_index(request):
                         <span class="label">Requested by:</span> <span class="value">{e.get("display_name","Unknown")} ({e.get("user_id","")})</span>
                         <span class="label">Downloaded:</span> <span class="value">{e.get("timestamp","")}</span>
                     </div>
-                    <a class="download-btn" href="/{e.get("filename","")}" download>Download</a>
+                    <div class="game-buttons">
+                        <a class="download-btn" href="/{e.get("filename","")}" download>Download</a>
+                        <button class="copy-btn" onclick="copyUrl(this)" data-url="https://storage.luaisgame.com/{e.get("filename","")}">Copy Link</button>
+                    </div>
                 </div>
             </div>
         </div>'''
     admin_block = ""
     if admin:
         admin_block = '''
-        <div class="admin-panel" id="adminPanel">
+        <div class="admin-panel" id="adminPanel" style="display:none">
             <div class="admin-header">
                 <span class="admin-title">Console</span>
                 <div class="admin-tabs">
-                    <button class="tab active" onclick="showTab('main')">Main</button>
-                    <button class="tab" onclick="showTab('website')">Website</button>
-                    <button class="tab" onclick="showTab('downloads')">Downloads</button>
+                    <button class="tab active" onclick="showTab('main', this)">Main</button>
+                    <button class="tab" onclick="showTab('website', this)">Website</button>
+                    <button class="tab" onclick="showTab('downloads', this)">Downloads</button>
                 </div>
             </div>
             <div class="tab-content" id="tab-main">
@@ -1268,7 +1271,8 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
 .header {{ background:linear-gradient(135deg,#0d1117 0%,#161b22 100%); padding:20px 40px; border-bottom:1px solid #30363d; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:100; backdrop-filter:blur(10px); }}
 .header-left {{ display:flex; align-items:center; gap:20px; }}
 .header-right {{ display:flex; align-items:center; gap:12px; }}
-.logo {{ font-size:26px; font-weight:700; letter-spacing:-0.5px; }}
+.logo {{ font-size:26px; font-weight:700; letter-spacing:-0.5px; display:flex; align-items:center; gap:8px; }}
+.roblox-icon {{ width:32px; height:32px; }}
 .lua {{ color:#58a6ff; }} .is {{ color:#8b949e; }} .game {{ color:#3fb950; }}
 .search {{ background:#0d1117; border:1px solid #30363d; color:#c9d1d9; padding:10px 16px; border-radius:8px; width:320px; font-size:14px; outline:none; transition:border-color 0.2s; }}
 .search:focus {{ border-color:#58a6ff; box-shadow:0 0 0 3px rgba(88,166,255,0.15); }}
@@ -1291,6 +1295,9 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
 .value {{ color:#c9d1d9; margin-right:16px; }}
 .download-btn {{ display:inline-block; background:linear-gradient(135deg,#238636,#2ea043); color:#fff; padding:10px 20px; border-radius:8px; text-decoration:none; font-size:13px; font-weight:600; transition:all 0.2s; }}
 .download-btn:hover {{ transform:translateY(-1px); box-shadow:0 4px 12px rgba(35,134,54,0.4); }}
+.game-buttons {{ display:flex; gap:8px; }}
+.copy-btn {{ background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:10px 20px; border-radius:8px; font-size:13px; font-weight:600; cursor:pointer; transition:all 0.2s; }}
+.copy-btn:hover {{ background:#30363d; border-color:#58a6ff; }}
 .count {{ color:#8b949e; font-size:14px; margin-bottom:20px; }}
 .footer {{ text-align:center; padding:30px; color:#484f58; font-size:13px; border-top:1px solid #21262d; margin-top:40px; }}
 .footer a {{ color:#58a6ff; text-decoration:none; }}
@@ -1328,7 +1335,7 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
 <body>
 <div class="header">
     <div class="header-left">
-        <div class="logo"><span class="lua">Lua</span> <span class="is">is</span> <span class="game">game</span></div>
+        <div class="logo"><svg class="roblox-icon" viewBox="0 0 352 512" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M232.7 232.7L149.1 8.3C143.5-1.4 132.5-3.2 124.4 4.3L12.3 115.7c-12.3 11.3-8.8 30.8 5.6 37.4l82.6 38.1L131 187l-34.3 165.9-82.5 37.7c-14.3 6.5-15.7 26.2-2.2 34.3l111.6 66.8c9.3 5.6 20.4 3.9 26.8-3.7L281.2 367c10.4-12.2 8.8-30.6-4.1-40.1l-43.5-32.2 40-56 58.8-3.5c15.1-.9 24.7-17 17.1-30.2l-17.2-30c-7.5-13-23.4-16.5-35.6-8.4zm-96 15.6l-56-26.2 56-26.2 56 26.2-56 26.2z" fill="#E2E2E2"/></svg><span class="lua">Lua</span> <span class="is">is</span> <span class="game">game</span></div>
         <input class="search" type="text" placeholder="Search games..." id="search" oninput="filterGames()">
     </div>
     <div class="header-right">
@@ -1346,6 +1353,15 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
     Created by: <strong>iispeaklua</strong> (Crimson) &bull; <a href="https://discord.gg/robloxdecompiler">Discord</a>
 </div>
 <script>
+function copyUrl(btn) {{
+    navigator.clipboard.writeText(btn.dataset.url);
+    var orig = btn.textContent;
+    btn.textContent = "Copied!";
+    btn.style.background = "#238636";
+    btn.style.color = "#fff";
+    btn.style.borderColor = "#238636";
+    setTimeout(function() {{ btn.textContent = orig; btn.style.background = ""; btn.style.color = ""; btn.style.borderColor = ""; }}, 2000);
+}}
 function filterGames() {{
     var q = document.getElementById("search").value.toLowerCase();
     document.querySelectorAll(".game-card").forEach(function(c) {{
@@ -1354,7 +1370,13 @@ function filterGames() {{
 }}
 function toggleAdmin() {{
     var p = document.getElementById("adminPanel");
-    if (p) p.style.display = p.style.display === "none" ? "block" : "none";
+    if (!p) return;
+    if (p.style.display === "none" || p.style.display === "") {{
+        p.style.display = "block";
+        loadAdmin();
+    }} else {{
+        p.style.display = "none";
+    }}
 }}
 async function loadAdmin() {{
     var r = await fetch("/api/admin");
@@ -1391,11 +1413,11 @@ async function unbanIp() {{
     document.getElementById("banIpInput").value = "";
     loadAdmin();
 }}
-function showTab(name) {{
+function showTab(name, btn) {{
     document.querySelectorAll(".tab-content").forEach(function(t) {{ t.classList.add("hidden"); }});
     document.querySelectorAll(".tab").forEach(function(t) {{ t.classList.remove("active"); }});
     document.getElementById("tab-"+name).classList.remove("hidden");
-    event.target.classList.add("active");
+    if (btn) btn.classList.add("active");
 }}
 setInterval(function() {{
     fetch("/games.json").then(function(r) {{ return r.json(); }}).then(function(data) {{
@@ -1403,13 +1425,13 @@ setInterval(function() {{
         if (!c) return;
         var h = "";
         data.forEach(function(e) {{
-            h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="/api/thumb?placeId='+e.place_id+'" alt="thumb" onerror="this.style.display=\'none\'"><div class="game-info"><div class="game-title">'+(e.game_name||'Unknown')+'</div><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><a class="download-btn" href="/'+e.filename+'" download>Download</a></div></div></div>';
+            h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="/api/thumb?placeId='+e.place_id+'" alt="thumb" onerror="this.style.display=\'none\'"><div class="game-info"><div class="game-title">'+(e.game_name||'Unknown')+'</div><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><div class="game-buttons"><a class="download-btn" href="/'+e.filename+'" download>Download</a><button class="copy-btn" onclick="copyUrl(this)" data-url="https://storage.luaisgame.com/'+e.filename+'">Copy Link</button></div></div></div></div>';
         }});
         c.innerHTML = h;
         document.querySelector(".count").textContent = data.length + " game(s) decompiled";
     }});
 }}, 5000);
-if (document.getElementById("adminPanel")) {{ loadAdmin(); setInterval(loadAdmin, 3000); }}
+if (document.getElementById("adminPanel")) {{ setInterval(loadAdmin, 3000); }}
 </script>
 </body>
 </html>'''
@@ -1846,6 +1868,8 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
         embed = resume_embed
         game_name = embed.title
     else:
+        info_msg = None
+        embed = None
         game_info = await get_place_info(place_id)
         if game_info.get("error"):
             error_reason = game_info.get("reason", "")
@@ -1867,12 +1891,13 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                             print(f"[DEBUG] Banned. Auto-switched to cookie {active_cookie_index}")
                             if cookie_ban_msg is not None:
                                 try:
-                                    embed.set_field_at(0, name="Cookie", value=f"Index {active_cookie_index}")
-                                    await cookie_ban_msg.edit(embed=embed)
+                                    if embed is not None:
+                                        embed.set_field_at(0, name="Cookie", value=f"Index {active_cookie_index}")
+                                        await cookie_ban_msg.edit(embed=embed)
                                 except Exception:
                                     pass
                             else:
-                                cookie_ban_msg = await send_msg(send_func, embed=embed, ephemeral=is_ephemeral)
+                                cookie_ban_msg = await send_msg(send_func, content=f"<@{author_id}> Auto-switched to cookie {active_cookie_index}", ephemeral=is_ephemeral)
                             await asyncio.sleep(0.1)
                             is_retry = True
                             await execute_decompile_job(send_func, author_id, guild, channel, place_id, game_id, is_ephemeral, is_priority=is_priority, on_status_update=on_status_update, cookie_retries=cookie_retries + 1, original_cookie_index=original_cookie_index, user_cookie=user_cookie, cookie_ban_msg=cookie_ban_msg, raw=raw)
