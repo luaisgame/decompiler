@@ -1182,7 +1182,7 @@ async def handle_index(request):
     for e in entries:
         games_html += f'''<div class="game-card" data-name="{e.get("game_name","").lower()}" data-user="{e.get("display_name","").lower()}">
             <div class="game-card-inner">
-                <img class="game-thumb" src="https://www.roblox.com/asset-thumbnail/image?assetId={e.get("place_id","")}&width=420&height=420&format=png" alt="thumb" onerror="this.style.display='none'">
+                <img class="game-thumb" src="https://thumbnails.roblox.com/v1/games/icons?placeIds={e.get("place_id","")}&size=420x420&format=Png&isCircular=false" alt="thumb" onerror="this.onerror=null;this.src='https://www.roblox.com/asset-thumbnail/image?assetId={e.get("place_id","")}&width=420&height=420&format=png';" onload="if(this.naturalWidth<=1)this.onerror()">
                 <div class="game-info">
                     <div class="game-title">{e.get("game_name","Unknown")}</div>
                     <div class="game-meta">
@@ -1380,7 +1380,7 @@ setInterval(function() {{
         if (!c) return;
         var h = "";
         data.forEach(function(e) {{
-            h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="https://www.roblox.com/asset-thumbnail/image?assetId='+e.place_id+'&width=420&height=420&format=png" alt="thumb" onerror="this.style.display=\'none\'"><div class="game-info"><div class="game-title">'+(e.game_name||'Unknown')+'</div><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><a class="download-btn" href="/'+e.filename+'" download>Download</a></div></div></div>';
+            h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="https://thumbnails.roblox.com/v1/games/icons?placeIds='+e.place_id+'&size=420x420&format=Png&isCircular=false" alt="thumb" onerror="this.onerror=null;this.src=\'https://www.roblox.com/asset-thumbnail/image?assetId='+e.place_id+'&width=420&height=420&format=png\';" onload="if(this.naturalWidth<=1)this.onerror()"><div class="game-info"><div class="game-title">'+(e.game_name||'Unknown')+'</div><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><a class="download-btn" href="/'+e.filename+'" download>Download</a></div></div></div>';
         }});
         c.innerHTML = h;
         document.querySelector(".count").textContent = data.length + " game(s) decompiled";
