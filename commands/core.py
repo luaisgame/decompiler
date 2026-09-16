@@ -1434,9 +1434,17 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
 </div>
 <script>
 function copyUrl(e, url) {{
+    e.preventDefault();
     e.stopPropagation();
-    navigator.clipboard.writeText(url);
-    var btn = e.target;
+    var btn = e.currentTarget;
+    var tmp = document.createElement("textarea");
+    tmp.value = url;
+    tmp.style.position = "fixed";
+    tmp.style.opacity = "0";
+    document.body.appendChild(tmp);
+    tmp.select();
+    document.execCommand("copy");
+    document.body.removeChild(tmp);
     var orig = btn.textContent;
     btn.textContent = "Copied!";
     btn.style.background = "#238636";
@@ -1447,48 +1455,60 @@ function copyUrl(e, url) {{
 function filterGames() {{
     var q = document.getElementById("search").value.toLowerCase();
     document.querySelectorAll(".game-card").forEach(function(c) {{
-        c.style.display = (c.dataset.name.includes(q) || c.dataset.user.includes(q)) ? "" : "none";
+        c.style.display = (c.dataset.name.indexOf(q) !== -1 || c.dataset.user.indexOf(q) !== -1) ? "" : "none";
     }});
 }}
 function toggleAdmin() {{
     var p = document.getElementById("adminPanel");
     if (!p) return;
-    p.style.display = (p.style.display === "none" || p.style.display === "") ? "block" : "none";
-    if (p.style.display === "block") loadAdmin();
+    if (p.style.display === "none" || p.style.display === "" || p.style.display === undefined) {{
+        p.style.display = "block";
+        loadAdmin();
+    }} else {{
+        p.style.display = "none";
+    }}
 }}
 async function loadAdmin() {{
-    var r = await fetch("/api/admin");
-    if (!r.ok) return;
-    var d = await r.json();
-    var ipHtml = "";
-    (d.ips||[]).forEach(function(e) {{
-        var banned = (d.banned||[]).includes(e.ip);
-        ipHtml += '<div class="ip-item"><span class="ip">' + e.ip + (banned ? ' <span style="color:#da3633">(BANNED)</span>' : '') + '</span><span class="meta">Visits: ' + e.visits + ' | Last: ' + e.last_seen + '</span></div>';
-    }});
-    document.getElementById("ipList").innerHTML = ipHtml || "<p style='color:#484f58'>No IPs tracked yet</p>";
-    var banHtml = "";
-    (d.banned||[]).forEach(function(ip) {{
-        banHtml += '<div class="ip-item"><span class="ip">' + ip + '</span><span class="meta">Banned</span></div>';
-    }});
-    document.getElementById("banList").innerHTML = banHtml || "<p style='color:#484f58'>No banned IPs</p>";
-    var pyEl = document.getElementById("pyLog");
-    if (pyEl) {{
-        var pr = await fetch("/api/logs?type=py&count=200");
-        if (pr.ok) {{
-            var pd = await pr.json();
-            pyEl.textContent = pd.logs || "No logs yet";
-            pyEl.scrollTop = pyEl.scrollHeight;
+    try {{
+        var r = await fetch("/api/admin");
+        if (!r.ok) return;
+        var d = await r.json();
+        var ipEl = document.getElementById("ipList");
+        if (ipEl) {{
+            var ipHtml = "";
+            (d.ips||[]).forEach(function(e) {{
+                var banned = (d.banned||[]).indexOf(e.ip) !== -1;
+                ipHtml += '<div class="ip-item"><span class="ip">' + e.ip + (banned ? ' <span style="color:#da3633">(BANNED)</span>' : '') + '</span><span class="meta">Visits: ' + e.visits + ' | Last: ' + e.last_seen + '</span></div>';
+            }});
+            ipEl.innerHTML = ipHtml || "<p style='color:#484f58'>No IPs tracked yet</p>";
         }}
-    }}
-    var tEl = document.getElementById("tunnelLog");
-    if (tEl) {{
-        var tr = await fetch("/api/logs?type=tunnel&count=200");
-        if (tr.ok) {{
-            var td = await tr.json();
-            tEl.textContent = td.logs || "No logs yet";
-            tEl.scrollTop = tEl.scrollHeight;
+        var banEl = document.getElementById("banList");
+        if (banEl) {{
+            var banHtml = "";
+            (d.banned||[]).forEach(function(ip) {{
+                banHtml += '<div class="ip-item"><span class="ip">' + ip + '</span><span class="meta">Banned</span></div>';
+            }});
+            banEl.innerHTML = banHtml || "<p style='color:#484f58'>No banned IPs</p>";
         }}
-    }}
+        var pyEl = document.getElementById("pyLog");
+        if (pyEl) {{
+            var pr = await fetch("/api/logs?type=py&count=200");
+            if (pr.ok) {{
+                var pd = await pr.json();
+                pyEl.textContent = pd.logs || "No logs yet";
+                pyEl.scrollTop = pyEl.scrollHeight;
+            }}
+        }}
+        var tEl = document.getElementById("tunnelLog");
+        if (tEl) {{
+            var tr = await fetch("/api/logs?type=tunnel&count=200");
+            if (tr.ok) {{
+                var td = await tr.json();
+                tEl.textContent = td.logs || "No logs yet";
+                tEl.scrollTop = tEl.scrollHeight;
+            }}
+        }}
+    }} catch(err) {{ console.error("loadAdmin error:", err); }}
 }}
 async function banIp() {{
     var ip = document.getElementById("banIpInput").value;
@@ -1507,19 +1527,24 @@ async function unbanIp() {{
 function showTab(name, btn) {{
     document.querySelectorAll(".tab-content").forEach(function(t) {{ t.classList.add("hidden"); }});
     document.querySelectorAll(".tab").forEach(function(t) {{ t.classList.remove("active"); }});
-    document.getElementById("tab-"+name).classList.remove("hidden");
+    var el = document.getElementById("tab-"+name);
+    if (el) el.classList.remove("hidden");
     if (btn) btn.classList.add("active");
+}}
+function buildGameCards(data) {{
+    var h = "";
+    data.forEach(function(e) {{
+        h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="/api/thumb?placeId='+e.place_id+'" alt="thumb" onerror="this.style.display=\'none\'"><div class="game-info"><a class="game-title" href="https://www.roblox.com/games/'+e.place_id+'" target="_blank">'+(e.game_name||'Unknown')+'</a><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><div class="game-buttons"><a class="download-btn" href="/'+e.filename+'" download>Download</a><button class="copy-btn" onclick="copyUrl(event, \'https://storage.luaisgame.com/'+e.filename+'\')">Copy Link</button></div></div></div></div>';
+    }});
+    return h;
 }}
 setInterval(function() {{
     fetch("/games.json").then(function(r) {{ return r.json(); }}).then(function(data) {{
         var c = document.getElementById("games");
         if (!c) return;
-        var h = "";
-        data.forEach(function(e) {{
-            h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="/api/thumb?placeId='+e.place_id+'" alt="thumb" onerror="this.style.display=\'none\'"><div class="game-info"><a class="game-title" href="https://www.roblox.com/games/'+e.place_id+'" target="_blank">'+(e.game_name||'Unknown')+'</a><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><div class="game-buttons"><a class="download-btn" href="/'+e.filename+'" download>Download</a><button class="copy-btn" onclick="copyUrl(event, \'https://storage.luaisgame.com/'+e.filename+'\')">Copy Link</button></div></div></div></div>';
-        }});
-        c.innerHTML = h;
+        c.innerHTML = buildGameCards(data);
         document.querySelector(".count").textContent = data.length + " game(s) decompiled";
+        filterGames();
     }});
 }}, 5000);
 if (document.getElementById("adminPanel")) {{ setInterval(loadAdmin, 3000); }}
