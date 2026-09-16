@@ -1335,7 +1335,7 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
 <body>
 <div class="header">
     <div class="header-left">
-        <div class="logo"><svg class="roblox-icon" viewBox="0 0 352 512" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M232.7 232.7L149.1 8.3C143.5-1.4 132.5-3.2 124.4 4.3L12.3 115.7c-12.3 11.3-8.8 30.8 5.6 37.4l82.6 38.1L131 187l-34.3 165.9-82.5 37.7c-14.3 6.5-15.7 26.2-2.2 34.3l111.6 66.8c9.3 5.6 20.4 3.9 26.8-3.7L281.2 367c10.4-12.2 8.8-30.6-4.1-40.1l-43.5-32.2 40-56 58.8-3.5c15.1-.9 24.7-17 17.1-30.2l-17.2-30c-7.5-13-23.4-16.5-35.6-8.4zm-96 15.6l-56-26.2 56-26.2 56 26.2-56 26.2z" fill="#E2E2E2"/></svg><span class="lua">Lua</span> <span class="is">is</span> <span class="game">game</span></div>
+        <div class="logo"><img src="https://upload.wikimedia.org/wikipedia/commons/b/b2/Roblox_Icon_2022.png" class="roblox-icon" alt="Roblox"><span class="lua">Lua</span> <span class="is">is</span> <span class="game">game</span></div>
         <input class="search" type="text" placeholder="Search games..." id="search" oninput="filterGames()">
     </div>
     <div class="header-right">
