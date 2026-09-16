@@ -9,3 +9,9 @@ decompile/
 opencode.json
 pfp.gif
 banner.gif
+admin_password.txt
+.check_update
+storage/
+prod/.last_commit
+banned_ips.txt
+tracked_ips.json
