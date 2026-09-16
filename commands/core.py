@@ -1133,7 +1133,8 @@ def _terminate_live_roblox():
 
 def _upload_file_sync(file_path: str, place_id: str, game_name: str = None, user_id: str = None, display_name: str = None, game_version: str = None) -> str | None:
     safe_name = "".join(c for c in (game_name or place_id) if c.isalnum() or c in " _-").strip().replace(" ", "_")
-    filename = f"{safe_name}_{place_id}{os.path.splitext(file_path)[1]}"
+    rand_suffix = uuid.uuid4().hex[:8]
+    filename = f"{safe_name}_{place_id}_{rand_suffix}{os.path.splitext(file_path)[1]}"
     dest = os.path.join(storage_dir, filename)
     games_json = os.path.join(storage_dir, "games.json")
     try:
