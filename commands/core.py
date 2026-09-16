@@ -55,9 +55,12 @@ channels_file = os.path.join(BASE_DIR, "allowed_channels.txt")
 cookies_file = os.path.join(BASE_DIR, "cookies.txt")
 storage_dir = os.path.join(BASE_DIR, "storage")
 STORAGE_MAX_BYTES = 25 * 1024 * 1024 * 1024
-admin_password_file = os.path.join(BASE_DIR, "admin_password.txt")
 banned_ips_file = os.path.join(BASE_DIR, "banned_ips.txt")
 ips_file = os.path.join(BASE_DIR, "tracked_ips.json")
+DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "1532820804402806844")
+DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "xN_MmWZKUhswwN3jSe2XnCQKBnBviKti")
+DISCORD_REDIRECT_URI = os.environ.get("DISCORD_REDIRECT_URI", "https://storage.luaisgame.com/api/auth/callback")
+BOT_OWNER_ID = int(os.environ.get("BOT_OWNER_ID", "1293889121374179328"))
 
 def _cleanup_storage():
     try:
@@ -1022,14 +1025,7 @@ async def handle_games_json(request):
         return web.json_response(json.load(f))
 
 def _get_admin_password():
-    if os.path.exists(admin_password_file):
-        with open(admin_password_file, "r") as f:
-            return f.read().strip()
-    pw = uuid.uuid4().hex[:12]
-    with open(admin_password_file, "w") as f:
-        f.write(pw)
-    print(f"[ADMIN] Admin password: {pw}")
-    return pw
+    return ""
 
 def _get_banned_ips():
     if not os.path.exists(banned_ips_file):
@@ -1067,18 +1063,68 @@ def _track_ip(ip):
     with open(ips_file, "w") as f:
         json.dump(entries, f, indent=2)
 
-async def handle_login(request):
-    data = await request.json()
-    password = data.get("password", "")
-    if password == _get_admin_password():
-        resp = web.json_response({"ok": True})
-        resp.set_cookie("admin_token", password, max_age=86400*30, samesite="Lax")
-        return resp
-    return web.json_response({"ok": False, "error": "Wrong password"}, status=401)
+async def handle_discord_auth(request):
+    state = uuid.uuid4().hex
+    resp = web.Response(status=302)
+    resp.headers["Location"] = (
+        f"https://discord.com/api/oauth2/authorize"
+        f"?client_id={DISCORD_CLIENT_ID}"
+        f"&redirect_uri={DISCORD_REDIRECT_URI}"
+        f"&response_type=code"
+        f"&scope=identify"
+        f"&state={state}"
+    )
+    resp.set_cookie("oauth_state", state, max_age=600, samesite="Lax")
+    return resp
+
+async def handle_discord_callback(request):
+    code = request.query.get("code")
+    if not code:
+        return web.Response(text="No code provided", status=400)
+    async with aiohttp.ClientSession() as session:
+        token_resp = await session.post(
+            "https://discord.com/api/oauth2/token",
+            data={
+                "client_id": DISCORD_CLIENT_ID,
+                "client_secret": DISCORD_CLIENT_SECRET,
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": DISCORD_REDIRECT_URI,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        token_data = await token_resp.json()
+        access_token = token_data.get("access_token")
+        if not access_token:
+            return web.Response(text="Failed to get token", status=400)
+        user_resp = await session.get(
+            "https://discord.com/api/users/@me",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        user_data = await user_resp.json()
+    user_id = user_data.get("id", "")
+    username = user_data.get("username", "")
+    avatar = user_data.get("avatar", "")
+    resp = web.Response(status=302)
+    resp.headers["Location"] = "/"
+    user_info = json.dumps({"id": user_id, "username": username, "avatar": avatar})
+    resp.set_cookie("user_info", user_info, max_age=86400 * 30, samesite="Lax")
+    return resp
+
+def _get_user_info(request):
+    raw = request.cookies.get("user_info", "")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
 
 def _is_admin(request):
-    token = request.cookies.get("admin_token", "")
-    return token == _get_admin_password()
+    user = _get_user_info(request)
+    if not user:
+        return False
+    return int(user.get("id", 0)) == BOT_OWNER_ID
 
 async def handle_admin_data(request):
     if not _is_admin(request):
@@ -1108,6 +1154,7 @@ async def handle_index(request):
     if ip in _get_banned_ips():
         return web.Response(text="Access denied.", status=403)
     admin = _is_admin(request)
+    user_info = _get_user_info(request)
     games_json = os.path.join(storage_dir, "games.json")
     entries = []
     if os.path.exists(games_json):
@@ -1177,6 +1224,8 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
 .btn-primary:hover {{ background:#79b8ff; transform:translateY(-1px); }}
 .btn-secondary {{ background:#21262d; color:#c9d1d9; border:1px solid #30363d; }}
 .btn-secondary:hover {{ background:#30363d; }}
+.btn-discord {{ background:#5865F2; color:#fff; }}
+.btn-discord:hover {{ background:#4752C4; transform:translateY(-1px); }}
 .container {{ max-width:1200px; margin:30px auto; padding:0 20px; }}
 .game-card {{ background:linear-gradient(135deg,#161b22 0%,#1c2333 100%); border:1px solid #30363d; border-radius:12px; padding:24px; margin-bottom:16px; transition:all 0.3s; }}
 .game-card:hover {{ border-color:#58a6ff; transform:translateY(-2px); box-shadow:0 8px 24px rgba(0,0,0,0.3); }}
@@ -1228,7 +1277,8 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
     </div>
     <div class="header-right">
         <a class="btn btn-primary" href="https://discord.com/api/oauth2/authorize?client_id=1532820804402806844&permissions=8&scope=bot%20applications.commands" target="_blank">Add Bot</a>
-        {"<button class='btn btn-secondary' onclick='toggleAdmin()'>Console</button>" if admin else "<button class='btn btn-secondary' onclick='showLogin()'>Login</button>"}
+        {"<button class='btn btn-secondary' onclick='toggleAdmin()'>Console</button>" if admin else ""}
+        {"<a class='btn btn-discord' href='/api/auth/login'><img src='https://assets-global.website-files.com/6257adef93867af50d15defa/625e5f573f2ac47aeab0b87a_Discord-Logo-White.svg' width='18' height='14'> " + user_info["username"] + "</a>" if user_info else "<a class='btn btn-discord' href='/api/auth/login'><img src='https://assets-global.website-files.com/6257adef93867af50d15defa/625e5f573f2ac47aeab0b87a_Discord-Logo-White.svg' width='18' height='14'> Login with Discord</a>"}
     </div>
 </div>
 <div class="container">
@@ -1239,13 +1289,6 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
 <div class="footer">
     Created by: <strong>iispeaklua</strong> (Crimson) &bull; <a href="https://discord.gg/robloxdecompiler">Discord</a>
 </div>
-<div class="login-overlay" id="loginOverlay">
-    <div class="login-box">
-        <h2>Admin Login</h2>
-        <input type="password" id="loginPw" placeholder="Enter password" onkeydown="if(event.key==='Enter')doLogin()">
-        <button class="btn btn-primary" onclick="doLogin()">Login</button>
-    </div>
-</div>
 <script>
 function filterGames() {{
     var q = document.getElementById("search").value.toLowerCase();
@@ -1253,15 +1296,9 @@ function filterGames() {{
         c.style.display = (c.dataset.name.includes(q) || c.dataset.user.includes(q)) ? "" : "none";
     }});
 }}
-function showLogin() {{ document.getElementById("loginOverlay").classList.add("active"); }}
 function toggleAdmin() {{
     var p = document.getElementById("adminPanel");
     if (p) p.style.display = p.style.display === "none" ? "block" : "none";
-}}
-async function doLogin() {{
-    var pw = document.getElementById("loginPw").value;
-    var r = await fetch("/api/login", {{method:"POST", headers:{{"Content-Type":"application/json"}}, body:JSON.stringify({{password:pw}})}});
-    if (r.ok) {{ location.reload(); }} else {{ alert("Wrong password"); }}
 }}
 async function loadAdmin() {{
     var r = await fetch("/api/admin");
@@ -1321,7 +1358,8 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app = web.Application()
     app.router.add_post("/decompile", handle_post)
     app.router.add_get("/games.json", handle_games_json)
-    app.router.add_post("/api/login", handle_login)
+    app.router.add_get("/api/auth/login", handle_discord_auth)
+    app.router.add_get("/api/auth/callback", handle_discord_callback)
     app.router.add_get("/api/admin", handle_admin_data)
     app.router.add_post("/api/ban", handle_ban)
     app.router.add_get("/", handle_index)
