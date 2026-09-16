@@ -1274,7 +1274,7 @@ async def handle_index(request):
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 * {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',system-ui,-apple-system,sans-serif; min-height:100vh; }}
+body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',system-ui,-apple-system,sans-serif; min-height:100vh; padding-bottom:60px; }}
 .header {{ background:linear-gradient(135deg,#0d1117 0%,#161b22 100%); padding:20px 40px; border-bottom:1px solid #30363d; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:100; backdrop-filter:blur(10px); }}
 .header-left {{ display:flex; align-items:center; gap:20px; }}
 .header-right {{ display:flex; align-items:center; gap:12px; }}
@@ -1306,8 +1306,32 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
 .copy-btn {{ background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:10px 20px; border-radius:8px; font-size:13px; font-weight:600; cursor:pointer; transition:all 0.2s; }}
 .copy-btn:hover {{ background:#30363d; border-color:#58a6ff; }}
 .count {{ color:#8b949e; font-size:14px; margin-bottom:20px; }}
-.footer {{ text-align:center; padding:30px; color:#484f58; font-size:13px; border-top:1px solid #21262d; margin-top:40px; }}
+.footer {{ text-align:center; padding:20px; color:#484f58; font-size:13px; border-top:1px solid #21262d; position:fixed; bottom:0; left:0; right:0; background:#0a0e14; z-index:50; }}
 .footer a {{ color:#58a6ff; text-decoration:none; }}
+@keyframes pulse {{ 0%,100% {{ opacity:1; }} 50% {{ opacity:0.5; }} }}
+@media (max-width:768px) {{
+    .header {{ padding:12px 16px; flex-wrap:wrap; gap:10px; }}
+    .header-left {{ width:100%; justify-content:space-between; }}
+    .header-right {{ width:100%; justify-content:center; flex-wrap:wrap; }}
+    .search {{ width:100%; }}
+    .container {{ padding:0 12px; margin-top:16px; margin-bottom:60px; }}
+    .game-card-inner {{ flex-direction:column; }}
+    .game-thumb {{ width:100%; height:200px; border-radius:12px 12px 0 0; }}
+    .game-info {{ padding:16px; }}
+    .game-title {{ font-size:16px; }}
+    .game-meta {{ font-size:12px; line-height:1.8; }}
+    .value {{ margin-right:8px; }}
+    .game-buttons {{ flex-direction:column; }}
+    .game-buttons .download-btn, .game-buttons .copy-btn {{ text-align:center; }}
+    .btn {{ padding:8px 14px; font-size:12px; }}
+    .admin-panel {{ padding:12px; }}
+    .admin-header {{ flex-direction:column; gap:10px; }}
+    .admin-tabs {{ flex-wrap:wrap; justify-content:center; }}
+    .ip-item {{ flex-direction:column; align-items:flex-start; gap:4px; }}
+    .ban-form {{ flex-direction:column; }}
+    .logo {{ font-size:20px; }}
+    .roblox-icon {{ width:24px; height:24px; }}
+}}
 .admin-panel {{ background:#161b22; border:1px solid #30363d; border-radius:12px; padding:20px; margin-bottom:24px; }}
 .admin-header {{ display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }}
 .admin-title {{ font-size:18px; font-weight:600; color:#f0f6fc; }}
@@ -1335,8 +1359,6 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
 .login-box input {{ width:100%; background:#0d1117; border:1px solid #30363d; color:#c9d1d9; padding:12px 16px; border-radius:8px; font-size:14px; outline:none; margin-bottom:16px; }}
 .login-box input:focus {{ border-color:#58a6ff; }}
 .login-box .btn {{ width:100%; justify-content:center; }}
-.pulse {{ animation:pulse 2s infinite; }}
-@keyframes pulse {{ 0%,100% {{ opacity:1; }} 50% {{ opacity:0.5; }} }}
 </style>
 </head>
 <body>
