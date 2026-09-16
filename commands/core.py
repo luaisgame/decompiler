@@ -1263,6 +1263,13 @@ async def handle_index(request):
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Lua is game</title>
+<link rel="icon" href="https://upload.wikimedia.org/wikipedia/commons/b/b2/Roblox_Icon_2022.png" type="image/png">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Lua is game">
+<meta property="og:description" content="Decompiled Roblox games archive. Download and browse decompiled game files.">
+<meta property="og:image" content="https://upload.wikimedia.org/wikipedia/commons/b/b2/Roblox_Icon_2022.png">
+<meta property="og:url" content="https://storage.luaisgame.com">
+<meta name="theme-color" content="#0d1117">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
