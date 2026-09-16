@@ -1181,14 +1181,19 @@ async def handle_index(request):
     games_html = ""
     for e in entries:
         games_html += f'''<div class="game-card" data-name="{e.get("game_name","").lower()}" data-user="{e.get("display_name","").lower()}">
-            <div class="game-title">{e.get("game_name","Unknown")}</div>
-            <div class="game-meta">
-                <span class="label">Place ID:</span> <span class="value">{e.get("place_id","")}</span>
-                <span class="label">Version:</span> <span class="value">{e.get("game_version","N/A")}</span>
-                <span class="label">Requested by:</span> <span class="value">{e.get("display_name","Unknown")} ({e.get("user_id","")})</span>
-                <span class="label">Downloaded:</span> <span class="value">{e.get("timestamp","")}</span>
+            <div class="game-card-inner">
+                <img class="game-thumb" src="https://www.roblox.com/asset-thumbnail/image?assetId={e.get("place_id","")}&width=420&height=420&format=png" alt="thumb" onerror="this.style.display='none'">
+                <div class="game-info">
+                    <div class="game-title">{e.get("game_name","Unknown")}</div>
+                    <div class="game-meta">
+                        <span class="label">Place ID:</span> <span class="value">{e.get("place_id","")}</span>
+                        <span class="label">Version:</span> <span class="value">{e.get("game_version","N/A")}</span>
+                        <span class="label">Requested by:</span> <span class="value">{e.get("display_name","Unknown")} ({e.get("user_id","")})</span>
+                        <span class="label">Downloaded:</span> <span class="value">{e.get("timestamp","")}</span>
+                    </div>
+                    <a class="download-btn" href="/{e.get("filename","")}" download>Download</a>
+                </div>
             </div>
-            <a class="download-btn" href="/{e.get("filename","")}" download>Download</a>
         </div>'''
     admin_block = ""
     if admin:
@@ -1252,8 +1257,11 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
 .btn-discord {{ background:#5865F2; color:#fff; }}
 .btn-discord:hover {{ background:#4752C4; transform:translateY(-1px); }}
 .container {{ max-width:1200px; margin:30px auto; padding:0 20px; }}
-.game-card {{ background:linear-gradient(135deg,#161b22 0%,#1c2333 100%); border:1px solid #30363d; border-radius:12px; padding:24px; margin-bottom:16px; transition:all 0.3s; }}
+.game-card {{ background:linear-gradient(135deg,#161b22 0%,#1c2333 100%); border:1px solid #30363d; border-radius:12px; padding:0; margin-bottom:16px; transition:all 0.3s; overflow:hidden; }}
 .game-card:hover {{ border-color:#58a6ff; transform:translateY(-2px); box-shadow:0 8px 24px rgba(0,0,0,0.3); }}
+.game-card-inner {{ display:flex; gap:0; }}
+.game-thumb {{ width:180px; height:180px; object-fit:cover; border-radius:12px 0 0 12px; flex-shrink:0; background:#0d1117; }}
+.game-info {{ padding:20px; flex:1; display:flex; flex-direction:column; justify-content:center; }}
 .game-title {{ font-size:20px; font-weight:600; color:#f0f6fc; margin-bottom:12px; }}
 .game-meta {{ font-size:13px; color:#8b949e; margin-bottom:16px; line-height:2; }}
 .label {{ color:#58a6ff; font-weight:500; }}
@@ -1372,7 +1380,7 @@ setInterval(function() {{
         if (!c) return;
         var h = "";
         data.forEach(function(e) {{
-            h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-title">'+(e.game_name||'Unknown')+'</div><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><a class="download-btn" href="/'+e.filename+'" download>Download</a></div>';
+            h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="https://www.roblox.com/asset-thumbnail/image?assetId='+e.place_id+'&width=420&height=420&format=png" alt="thumb" onerror="this.style.display=\'none\'"><div class="game-info"><div class="game-title">'+(e.game_name||'Unknown')+'</div><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><a class="download-btn" href="/'+e.filename+'" download>Download</a></div></div></div>';
         }});
         c.innerHTML = h;
         document.querySelector(".count").textContent = data.length + " game(s) decompiled";
