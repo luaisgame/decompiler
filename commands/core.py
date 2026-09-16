@@ -1207,7 +1207,7 @@ async def handle_index(request):
             <div class="game-card-inner">
                 <img class="game-thumb" src="/api/thumb?placeId={e.get("place_id","")}" alt="thumb" onerror="this.style.display='none'">
                 <div class="game-info">
-                    <div class="game-title">{e.get("game_name","Unknown")}</div>
+                    <a class="game-title" href="https://www.roblox.com/games/{e.get("place_id","")}" target="_blank">{e.get("game_name","Unknown")}</a>
                     <div class="game-meta">
                         <span class="label">Place ID:</span> <span class="value">{e.get("place_id","")}</span>
                         <span class="label">Version:</span> <span class="value">{e.get("game_version","N/A")}</span>
@@ -1216,7 +1216,7 @@ async def handle_index(request):
                     </div>
                     <div class="game-buttons">
                         <a class="download-btn" href="/{e.get("filename","")}" download>Download</a>
-                        <button class="copy-btn" onclick="copyUrl(this)" data-url="https://storage.luaisgame.com/{e.get("filename","")}">Copy Link</button>
+                        <button class="copy-btn" onclick="copyUrl(event, 'https://storage.luaisgame.com/{e.get("filename","")}')">Copy Link</button>
                     </div>
                 </div>
             </div>
@@ -1296,7 +1296,8 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
 .game-card-inner {{ display:flex; gap:0; }}
 .game-thumb {{ width:180px; height:180px; object-fit:cover; border-radius:12px 0 0 12px; flex-shrink:0; background:#0d1117; }}
 .game-info {{ padding:20px; flex:1; display:flex; flex-direction:column; justify-content:center; }}
-.game-title {{ font-size:20px; font-weight:600; color:#f0f6fc; margin-bottom:12px; }}
+.game-title {{ font-size:20px; font-weight:600; color:#f0f6fc; margin-bottom:12px; text-decoration:none; display:inline-block; transition:color 0.2s; }}
+.game-title:hover {{ color:#58a6ff; }}
 .game-meta {{ font-size:13px; color:#8b949e; margin-bottom:16px; line-height:2; }}
 .label {{ color:#58a6ff; font-weight:500; }}
 .value {{ color:#c9d1d9; margin-right:16px; }}
@@ -1382,8 +1383,10 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
     Created by: <strong>iispeaklua</strong> (Crimson) &bull; <a href="https://discord.gg/robloxdecompiler">Discord</a>
 </div>
 <script>
-function copyUrl(btn) {{
-    navigator.clipboard.writeText(btn.dataset.url);
+function copyUrl(e, url) {{
+    e.stopPropagation();
+    navigator.clipboard.writeText(url);
+    var btn = e.target;
     var orig = btn.textContent;
     btn.textContent = "Copied!";
     btn.style.background = "#238636";
@@ -1450,7 +1453,7 @@ setInterval(function() {{
         if (!c) return;
         var h = "";
         data.forEach(function(e) {{
-            h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="/api/thumb?placeId='+e.place_id+'" alt="thumb" onerror="this.style.display=\'none\'"><div class="game-info"><div class="game-title">'+(e.game_name||'Unknown')+'</div><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><div class="game-buttons"><a class="download-btn" href="/'+e.filename+'" download>Download</a><button class="copy-btn" onclick="copyUrl(this)" data-url="https://storage.luaisgame.com/'+e.filename+'">Copy Link</button></div></div></div></div>';
+            h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="/api/thumb?placeId='+e.place_id+'" alt="thumb" onerror="this.style.display=\'none\'"><div class="game-info"><a class="game-title" href="https://www.roblox.com/games/'+e.place_id+'" target="_blank">'+(e.game_name||'Unknown')+'</a><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><div class="game-buttons"><a class="download-btn" href="/'+e.filename+'" download>Download</a><button class="copy-btn" onclick="copyUrl(event, \'https://storage.luaisgame.com/'+e.filename+'\')">Copy Link</button></div></div></div></div>';
         }});
         c.innerHTML = h;
         document.querySelector(".count").textContent = data.length + " game(s) decompiled";
