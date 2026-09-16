@@ -6,6 +6,7 @@ import urllib.request
 import json
 import shutil
 import subprocess
+import threading
 import discord
 
 if getattr(sys, "frozen", False):
@@ -177,11 +178,20 @@ def start_tunnel():
             return
     except Exception:
         pass
-    subprocess.Popen(
+    proc = subprocess.Popen(
         [cf, "tunnel", "run", TUNNEL_NAME],
         creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT
     )
+    def _read_tunnel(out):
+        try:
+            from commands.core import tunnel_log
+            for line in iter(out.readline, b""):
+                if line:
+                    tunnel_log.write(line.decode(errors="replace").rstrip())
+        except Exception:
+            pass
+    threading.Thread(target=_read_tunnel, args=(proc.stdout,), daemon=True).start()
     print(f"[STARTUP] Tunnel started: https://{TUNNEL_DOMAIN}")
 
 @bot.event

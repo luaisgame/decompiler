@@ -3,6 +3,7 @@ import base64
 from urllib.parse import parse_qs, urlparse, quote
 import os
 import sys
+import io
 import random
 import string
 import shutil
@@ -48,6 +49,38 @@ for _g, _v in json.loads(os.getenv("QUEUE_ROLE_IDS", "{}")).items():
     QUEUE_ROLE_IDS[int(_g)] = [int(_v)] if isinstance(_v, int) else [int(x) for x in _v]
 
 BASE_DIR = _BASE_DIR
+
+class LogBuffer:
+    def __init__(self, max_lines=500):
+        self.lines = []
+        self.max_lines = max_lines
+    def write(self, text):
+        for line in text.rstrip("\n").split("\n"):
+            if line.strip():
+                ts = time.strftime("%H:%M:%S")
+                self.lines.append(f"[{ts}] {line}")
+        self.lines = self.lines[-self.max_lines:]
+    def get(self, count=100):
+        return "\n".join(self.lines[-count:])
+    def clear(self):
+        self.lines.clear()
+
+py_log = LogBuffer()
+tunnel_log = LogBuffer()
+
+class TeeWriter:
+    def __init__(self, original, buffer):
+        self.original = original
+        self.buffer = buffer
+    def write(self, text):
+        self.original.write(text)
+        self.buffer.write(text)
+    def flush(self):
+        self.original.flush()
+
+sys.stdout = TeeWriter(sys.stdout, py_log)
+sys.stderr = TeeWriter(sys.stderr, py_log)
+
 blacklistedtxt = os.path.join(BASE_DIR, "blacklistedgames.txt")
 user_blacklisted_file = os.path.join(BASE_DIR, "blacklistedusers.txt")
 server_blacklisted_file = os.path.join(BASE_DIR, "blacklistedservers.txt")
@@ -1166,6 +1199,15 @@ async def handle_ban(request):
         _unban_ip(ip)
     return web.json_response({"ok": True})
 
+async def handle_logs(request):
+    if not _is_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    log_type = request.query.get("type", "py")
+    count = int(request.query.get("count", "100"))
+    if log_type == "tunnel":
+        return web.json_response({"logs": tunnel_log.get(count)})
+    return web.json_response({"logs": py_log.get(count)})
+
 async def handle_thumbnail(request):
     place_id = request.query.get("placeId", "")
     if not place_id or not place_id.isdigit():
@@ -1228,18 +1270,19 @@ async def handle_index(request):
             <div class="admin-header">
                 <span class="admin-title">Console</span>
                 <div class="admin-tabs">
-                    <button class="tab active" onclick="showTab('main', this)">Main</button>
-                    <button class="tab" onclick="showTab('website', this)">Website</button>
-                    <button class="tab" onclick="showTab('downloads', this)">Downloads</button>
+                    <button class="tab active" onclick="showTab('ips', this)">IPs</button>
+                    <button class="tab" onclick="showTab('banips', this)">Ban IPs</button>
+                    <button class="tab" onclick="showTab('pyconsole', this)">Python Console</button>
+                    <button class="tab" onclick="showTab('tunnelconsole', this)">Tunnel Console</button>
                 </div>
             </div>
-            <div class="tab-content" id="tab-main">
+            <div class="tab-content" id="tab-ips">
                 <div class="admin-section">
                     <h3>Tracked IPs</h3>
                     <div id="ipList" class="ip-list"></div>
                 </div>
             </div>
-            <div class="tab-content hidden" id="tab-website">
+            <div class="tab-content hidden" id="tab-banips">
                 <div class="admin-section">
                     <h3>Banned IPs</h3>
                     <div id="banList" class="ip-list"></div>
@@ -1250,10 +1293,16 @@ async def handle_index(request):
                     </div>
                 </div>
             </div>
-            <div class="tab-content hidden" id="tab-downloads">
+            <div class="tab-content hidden" id="tab-pyconsole">
                 <div class="admin-section">
-                    <h3>Recent Downloads</h3>
-                    <div id="downloadList" class="ip-list"></div>
+                    <h3>Python Console (Live)</h3>
+                    <div id="pyLog" class="console-log"></div>
+                </div>
+            </div>
+            <div class="tab-content hidden" id="tab-tunnelconsole">
+                <div class="admin-section">
+                    <h3>Tunnel Console (Live)</h3>
+                    <div id="tunnelLog" class="console-log"></div>
                 </div>
             </div>
         </div>'''
@@ -1346,6 +1395,7 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
 .ip-item {{ display:flex; justify-content:space-between; align-items:center; padding:10px 14px; background:#0d1117; border:1px solid #21262d; border-radius:8px; margin-bottom:8px; font-size:13px; }}
 .ip-item .ip {{ color:#58a6ff; font-family:monospace; }}
 .ip-item .meta {{ color:#484f58; font-size:12px; }}
+.console-log {{ background:#0d1117; border:1px solid #21262d; border-radius:8px; padding:12px; max-height:400px; overflow-y:auto; font-family:'Cascadia Code','Fira Code',monospace; font-size:12px; line-height:1.6; color:#8b949e; white-space:pre-wrap; word-break:break-all; }}
 .ban-form {{ display:flex; gap:8px; margin-top:12px; }}
 .ban-form input {{ background:#0d1117; border:1px solid #30363d; color:#c9d1d9; padding:8px 12px; border-radius:6px; font-size:13px; outline:none; flex:1; }}
 .ban-form input:focus {{ border-color:#58a6ff; }}
@@ -1421,11 +1471,24 @@ async function loadAdmin() {{
         banHtml += '<div class="ip-item"><span class="ip">' + ip + '</span><span class="meta">Banned</span></div>';
     }});
     document.getElementById("banList").innerHTML = banHtml || "<p style='color:#484f58'>No banned IPs</p>";
-    var dlHtml = "";
-    (d.downloads||[]).forEach(function(e) {{
-        dlHtml += '<div class="ip-item"><span class="ip">' + e.filename + '</span><span class="meta">From: ' + e.ip + ' | ' + e.timestamp + '</span></div>';
-    }});
-    document.getElementById("downloadList").innerHTML = dlHtml || "<p style='color:#484f58'>No downloads yet</p>";
+    var pyEl = document.getElementById("pyLog");
+    if (pyEl) {{
+        var pr = await fetch("/api/logs?type=py&count=200");
+        if (pr.ok) {{
+            var pd = await pr.json();
+            pyEl.textContent = pd.logs || "No logs yet";
+            pyEl.scrollTop = pyEl.scrollHeight;
+        }}
+    }}
+    var tEl = document.getElementById("tunnelLog");
+    if (tEl) {{
+        var tr = await fetch("/api/logs?type=tunnel&count=200");
+        if (tr.ok) {{
+            var td = await tr.json();
+            tEl.textContent = td.logs || "No logs yet";
+            tEl.scrollTop = tEl.scrollHeight;
+        }}
+    }}
 }}
 async function banIp() {{
     var ip = document.getElementById("banIpInput").value;
@@ -1473,6 +1536,7 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_get("/api/auth/login", handle_discord_auth)
     app.router.add_get("/api/auth/callback", handle_discord_callback)
     app.router.add_get("/api/admin", handle_admin_data)
+    app.router.add_get("/api/logs", handle_logs)
     app.router.add_post("/api/ban", handle_ban)
     app.router.add_get("/", handle_index)
     app.router.add_get("/{filename}", handle_download)
@@ -1964,7 +2028,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
         if icon_url:
             embed.set_thumbnail(url=icon_url)
 
-        join_view = JoinGameView(join_url if game_id else None)
+        join_view = JoinGameView(join_url)
         info_msg = await send_msg(send_func, embed=embed, ephemeral=is_ephemeral, view=join_view)
 
     rec_ev = asyncio.Event()
