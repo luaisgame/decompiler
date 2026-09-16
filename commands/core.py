@@ -1042,9 +1042,11 @@ async def handle_index(request):
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Lua is game</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 * {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{ background:#0d1117; color:#c9d1d9; font-family:'Segoe UI',system-ui,sans-serif; }}
+body {{ background:#0d1117; color:#c9d1d9; font-family:'Inter','SF Pro Display','Segoe UI',system-ui,-apple-system,sans-serif; }}
 .header {{ background:#161b22; padding:20px 40px; border-bottom:1px solid #30363d; display:flex; align-items:center; justify-content:space-between; }}
 .logo {{ font-size:28px; font-weight:700; }}
 .lua {{ color:#58a6ff; }} .is {{ color:#8b949e; }} .game {{ color:#3fb950; }}
@@ -1134,7 +1136,7 @@ def _terminate_live_roblox():
 def _upload_file_sync(file_path: str, place_id: str, game_name: str = None, user_id: str = None, display_name: str = None, game_version: str = None) -> str | None:
     safe_name = "".join(c for c in (game_name or place_id) if c.isalnum() or c in " _-").strip().replace(" ", "_")
     rand_suffix = uuid.uuid4().hex[:8]
-    filename = f"{safe_name}_{place_id}_{rand_suffix}{os.path.splitext(file_path)[1]}"
+    filename = f"{safe_name}_{place_id}_{user_id or 'anon'}_{rand_suffix}{os.path.splitext(file_path)[1]}"
     dest = os.path.join(storage_dir, filename)
     games_json = os.path.join(storage_dir, "games.json")
     try:
