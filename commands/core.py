@@ -1166,6 +1166,25 @@ async def handle_ban(request):
         _unban_ip(ip)
     return web.json_response({"ok": True})
 
+async def handle_thumbnail(request):
+    place_id = request.query.get("placeId", "")
+    if not place_id or not place_id.isdigit():
+        return web.Response(text="", status=400)
+    try:
+        async with aiohttp.ClientSession() as session:
+            r = await session.get(f"https://thumbnails.roblox.com/v1/games/icons?placeIds={place_id}&size=420x420&format=Png&isCircular=false")
+            data = await r.json()
+            thumb_url = data.get("data", [{}])[0].get("imageUrl", "")
+            if thumb_url:
+                img = await session.get(thumb_url)
+                return web.Response(body=await img.read(), content_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
+            r2 = await session.get(f"https://www.roblox.com/asset-thumbnail/image?assetId={place_id}&width=420&height=420&format=png")
+            if r2.status == 200:
+                return web.Response(body=await r2.read(), content_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
+    except Exception:
+        pass
+    return web.Response(text="", status=404)
+
 async def handle_index(request):
     ip = request.headers.get("X-Forwarded-For", request.remote)
     _track_ip(ip)
@@ -1182,7 +1201,7 @@ async def handle_index(request):
     for e in entries:
         games_html += f'''<div class="game-card" data-name="{e.get("game_name","").lower()}" data-user="{e.get("display_name","").lower()}">
             <div class="game-card-inner">
-                <img class="game-thumb" src="https://thumbnails.roblox.com/v1/games/icons?placeIds={e.get("place_id","")}&size=420x420&format=Png&isCircular=false" alt="thumb" onerror="this.onerror=null;this.src='https://www.roblox.com/asset-thumbnail/image?assetId={e.get("place_id","")}&width=420&height=420&format=png';" onload="if(this.naturalWidth<=1)this.onerror()">
+                <img class="game-thumb" src="/api/thumb?placeId={e.get("place_id","")}" alt="thumb" onerror="this.style.display='none'">
                 <div class="game-info">
                     <div class="game-title">{e.get("game_name","Unknown")}</div>
                     <div class="game-meta">
@@ -1380,7 +1399,7 @@ setInterval(function() {{
         if (!c) return;
         var h = "";
         data.forEach(function(e) {{
-            h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="https://thumbnails.roblox.com/v1/games/icons?placeIds='+e.place_id+'&size=420x420&format=Png&isCircular=false" alt="thumb" onerror="this.onerror=null;this.src=\'https://www.roblox.com/asset-thumbnail/image?assetId='+e.place_id+'&width=420&height=420&format=png\';" onload="if(this.naturalWidth<=1)this.onerror()"><div class="game-info"><div class="game-title">'+(e.game_name||'Unknown')+'</div><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><a class="download-btn" href="/'+e.filename+'" download>Download</a></div></div></div>';
+            h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="/api/thumb?placeId='+e.place_id+'" alt="thumb" onerror="this.style.display=\'none\'"><div class="game-info"><div class="game-title">'+(e.game_name||'Unknown')+'</div><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><a class="download-btn" href="/'+e.filename+'" download>Download</a></div></div></div>';
         }});
         c.innerHTML = h;
         document.querySelector(".count").textContent = data.length + " game(s) decompiled";
@@ -1396,6 +1415,7 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app = web.Application()
     app.router.add_post("/decompile", handle_post)
     app.router.add_get("/games.json", handle_games_json)
+    app.router.add_get("/api/thumb", handle_thumbnail)
     app.router.add_get("/api/auth/login", handle_discord_auth)
     app.router.add_get("/api/auth/callback", handle_discord_callback)
     app.router.add_get("/api/admin", handle_admin_data)
