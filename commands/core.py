@@ -1258,7 +1258,7 @@ async def handle_index(request):
                     </div>
                     <div class="game-buttons">
                         <a class="download-btn" href="/{e.get("filename","")}" download>Download</a>
-                        <button class="copy-btn" onclick="copyUrl(event, 'https://storage.luaisgame.com/{e.get("filename","")}')">Copy Link</button>
+                        <button class="copy-btn" data-url="https://storage.luaisgame.com/{e.get("filename","")}">Copy Link</button>
                     </div>
                 </div>
             </div>
@@ -1270,10 +1270,10 @@ async def handle_index(request):
             <div class="admin-header">
                 <span class="admin-title">Console</span>
                 <div class="admin-tabs">
-                    <button class="tab active" onclick="showTab('ips', this)">IPs</button>
-                    <button class="tab" onclick="showTab('banips', this)">Ban IPs</button>
-                    <button class="tab" onclick="showTab('pyconsole', this)">Python Console</button>
-                    <button class="tab" onclick="showTab('tunnelconsole', this)">Tunnel Console</button>
+                    <button class="tab active" data-tab="ips">IPs</button>
+                    <button class="tab" data-tab="banips">Ban IPs</button>
+                    <button class="tab" data-tab="pyconsole">Python Console</button>
+                    <button class="tab" data-tab="tunnelconsole">Tunnel Console</button>
                 </div>
             </div>
             <div class="tab-content" id="tab-ips">
@@ -1288,8 +1288,8 @@ async def handle_index(request):
                     <div id="banList" class="ip-list"></div>
                     <div class="ban-form">
                         <input type="text" id="banIpInput" placeholder="IP to ban/unban">
-                        <button class="btn-ban" onclick="banIp()">Ban</button>
-                        <button class="btn-unban" onclick="unbanIp()">Unban</button>
+                        <button class="btn-ban" id="banBtn">Ban</button>
+                        <button class="btn-unban" id="unbanBtn">Unban</button>
                     </div>
                 </div>
             </div>
@@ -1416,11 +1416,11 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
 <div class="header">
     <div class="header-left">
         <div class="logo"><img src="https://upload.wikimedia.org/wikipedia/commons/b/b2/Roblox_Icon_2022.png" class="roblox-icon" alt="Roblox"><span class="lua">Lua</span> <span class="is">is</span> <span class="game">game</span></div>
-        <input class="search" type="text" placeholder="Search games..." id="search" oninput="filterGames()">
+        <input class="search" type="text" placeholder="Search games..." id="search">
     </div>
     <div class="header-right">
         <a class="btn btn-primary" href="https://discord.com/api/oauth2/authorize?client_id=1532820804402806844&permissions=8&scope=bot%20applications.commands" target="_blank">Add Bot</a>
-        {"<button class='btn btn-secondary' onclick='toggleAdmin()'>Console</button>" if admin else ""}
+        {"<button class='btn btn-secondary' data-action='toggle-console'>Console</button>" if admin else ""}
         {"<a class='btn btn-discord' href='/api/auth/login'><svg width='18' height='14' viewBox='0 0 71 55' fill='none' xmlns='http://www.w3.org/2000/svg'><path d='M60.1 4.9A58.5 58.5 0 0 0 45.4.2a.2.2 0 0 0-.2.1 40.8 40.8 0 0 0-1.8 3.7 54 54 0 0 0-16.2 0 26.5 26.5 0 0 0-1.8-3.7.2.2 0 0 0-.2-.1A58.4 58.4 0 0 0 10.9 4.9a.2.2 0 0 0-.1.1C1.6 18.4-.5 31.7.5 44.8a.2.2 0 0 0 .1.1 58.7 58.7 0 0 0 17.7 9 .2.2 0 0 0 .2-.1 42 42 0 0 0 3.6-5.9.2.2 0 0 0-.1-.3 38.7 38.7 0 0 1-5.5-2.6.2.2 0 0 1 0-.4c.4-.3.7-.6 1.1-.9a.2.2 0 0 1 .2 0c11.5 5.3 24 5.3 35.4 0a.2.2 0 0 1 .2 0l1.1.9a.2.2 0 0 1 0 .4c-1.8 1-3.6 1.9-5.6 2.6a.2.2 0 0 0-.1.3 47.2 47.2 0 0 0 3.7 5.9.2.2 0 0 0 .2.1 58.5 58.5 0 0 0 17.7-9 .2.2 0 0 0 .1-.1c1.2-15-2-28.3-8.5-39.8a.2.2 0 0 0-.1-.1ZM23.7 36.3c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1 6.5 3.2 6.4 7.1-2.8 7.1-6.4 7.1Zm23.6 0c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1 6.5 3.2 6.4 7.1-2.8 7.1-6.4 7.1Z' fill='white'/></svg> " + user_info["username"] + "</a>" if user_info else "<a class='btn btn-discord' href='/api/auth/login'><svg width='18' height='14' viewBox='0 0 71 55' fill='none' xmlns='http://www.w3.org/2000/svg'><path d='M60.1 4.9A58.5 58.5 0 0 0 45.4.2a.2.2 0 0 0-.2.1 40.8 40.8 0 0 0-1.8 3.7 54 54 0 0 0-16.2 0 26.5 26.5 0 0 0-1.8-3.7.2.2 0 0 0-.2-.1A58.4 58.4 0 0 0 10.9 4.9a.2.2 0 0 0-.1.1C1.6 18.4-.5 31.7.5 44.8a.2.2 0 0 0 .1.1 58.7 58.7 0 0 0 17.7 9 .2.2 0 0 0 .2-.1 42 42 0 0 0 3.6-5.9.2.2 0 0 0-.1-.3 38.7 38.7 0 0 1-5.5-2.6.2.2 0 0 1 0-.4c.4-.3.7-.6 1.1-.9a.2.2 0 0 1 .2 0c11.5 5.3 24 5.3 35.4 0a.2.2 0 0 1 .2 0l1.1.9a.2.2 0 0 1 0 .4c-1.8 1-3.6 1.9-5.6 2.6a.2.2 0 0 0-.1.3 47.2 47.2 0 0 0 3.7 5.9.2.2 0 0 0 .2.1 58.5 58.5 0 0 0 17.7-9 .2.2 0 0 0 .1-.1c1.2-15-2-28.3-8.5-39.8a.2.2 0 0 0-.1-.1ZM23.7 36.3c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1 6.5 3.2 6.4 7.1-2.8 7.1-6.4 7.1Zm23.6 0c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1 6.5 3.2 6.4 7.1-2.8 7.1-6.4 7.1Z' fill='white'/></svg> Login with Discord</a>"}
     </div>
 </div>
@@ -1433,41 +1433,58 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
     Created by: <strong>iispeaklua</strong> (Crimson) &bull; <a href="https://discord.gg/robloxdecompiler">Discord</a>
 </div>
 <script>
-function copyUrl(e, url) {{
-    e.preventDefault();
-    e.stopPropagation();
-    var btn = e.currentTarget;
-    var tmp = document.createElement("textarea");
-    tmp.value = url;
-    tmp.style.position = "fixed";
-    tmp.style.opacity = "0";
-    document.body.appendChild(tmp);
-    tmp.select();
-    document.execCommand("copy");
-    document.body.removeChild(tmp);
-    var orig = btn.textContent;
-    btn.textContent = "Copied!";
-    btn.style.background = "#238636";
-    btn.style.color = "#fff";
-    btn.style.borderColor = "#238636";
-    setTimeout(function() {{ btn.textContent = orig; btn.style.background = ""; btn.style.color = ""; btn.style.borderColor = ""; }}, 2000);
-}}
-function filterGames() {{
-    var q = document.getElementById("search").value.toLowerCase();
+document.addEventListener("click", function(ev) {{
+    var btn = ev.target.closest(".copy-btn");
+    if (btn) {{
+        ev.preventDefault();
+        ev.stopPropagation();
+        var url = btn.getAttribute("data-url");
+        if (!url) return;
+        var tmp = document.createElement("textarea");
+        tmp.value = url;
+        tmp.style.position = "fixed";
+        tmp.style.opacity = "0";
+        document.body.appendChild(tmp);
+        tmp.select();
+        document.execCommand("copy");
+        document.body.removeChild(tmp);
+        var orig = btn.textContent;
+        btn.textContent = "Copied!";
+        btn.style.background = "#238636";
+        btn.style.color = "#fff";
+        btn.style.borderColor = "#238636";
+        setTimeout(function() {{ btn.textContent = orig; btn.style.background = ""; btn.style.color = ""; btn.style.borderColor = ""; }}, 2000);
+    }}
+}});
+document.getElementById("search").addEventListener("input", function() {{
+    var q = this.value.toLowerCase();
     document.querySelectorAll(".game-card").forEach(function(c) {{
         c.style.display = (c.dataset.name.indexOf(q) !== -1 || c.dataset.user.indexOf(q) !== -1) ? "" : "none";
     }});
+}});
+var adminPanelEl = document.getElementById("adminPanel");
+if (adminPanelEl) {{
+    document.querySelector("[data-action='toggle-console']").addEventListener("click", function() {{
+        if (adminPanelEl.style.display === "none" || adminPanelEl.style.display === "" || adminPanelEl.style.display === undefined) {{
+            adminPanelEl.style.display = "block";
+            loadAdmin();
+        }} else {{
+            adminPanelEl.style.display = "none";
+        }}
+    }});
 }}
-function toggleAdmin() {{
-    var p = document.getElementById("adminPanel");
-    if (!p) return;
-    if (p.style.display === "none" || p.style.display === "" || p.style.display === undefined) {{
-        p.style.display = "block";
-        loadAdmin();
-    }} else {{
-        p.style.display = "none";
+document.addEventListener("click", function(ev) {{
+    var tab = ev.target.closest(".tab");
+    if (tab) {{
+        var name = tab.getAttribute("data-tab");
+        if (!name) return;
+        document.querySelectorAll(".tab-content").forEach(function(t) {{ t.classList.add("hidden"); }});
+        document.querySelectorAll(".tab").forEach(function(t) {{ t.classList.remove("active"); }});
+        var el = document.getElementById("tab-" + name);
+        if (el) el.classList.remove("hidden");
+        tab.classList.add("active");
     }}
-}}
+}});
 async function loadAdmin() {{
     try {{
         var r = await fetch("/api/admin");
@@ -1510,31 +1527,24 @@ async function loadAdmin() {{
         }}
     }} catch(err) {{ console.error("loadAdmin error:", err); }}
 }}
-async function banIp() {{
-    var ip = document.getElementById("banIpInput").value;
-    if (!ip) return;
-    await fetch("/api/ban", {{method:"POST", headers:{{"Content-Type":"application/json"}}, body:JSON.stringify({{ip:ip, action:"ban"}})}});
-    document.getElementById("banIpInput").value = "";
-    loadAdmin();
-}}
-async function unbanIp() {{
-    var ip = document.getElementById("banIpInput").value;
-    if (!ip) return;
-    await fetch("/api/ban", {{method:"POST", headers:{{"Content-Type":"application/json"}}, body:JSON.stringify({{ip:ip, action:"unban"}})}});
-    document.getElementById("banIpInput").value = "";
-    loadAdmin();
-}}
-function showTab(name, btn) {{
-    document.querySelectorAll(".tab-content").forEach(function(t) {{ t.classList.add("hidden"); }});
-    document.querySelectorAll(".tab").forEach(function(t) {{ t.classList.remove("active"); }});
-    var el = document.getElementById("tab-"+name);
-    if (el) el.classList.remove("hidden");
-    if (btn) btn.classList.add("active");
-}}
+document.addEventListener("click", function(ev) {{
+    var btn = ev.target.closest("#banBtn");
+    if (btn) {{
+        var ip = document.getElementById("banIpInput").value;
+        if (!ip) return;
+        fetch("/api/ban", {{method:"POST", headers:{{"Content-Type":"application/json"}}, body:JSON.stringify({{ip:ip, action:"ban"}})}}).then(function() {{ document.getElementById("banIpInput").value = ""; loadAdmin(); }});
+    }}
+    var btn2 = ev.target.closest("#unbanBtn");
+    if (btn2) {{
+        var ip2 = document.getElementById("banIpInput").value;
+        if (!ip2) return;
+        fetch("/api/ban", {{method:"POST", headers:{{"Content-Type":"application/json"}}, body:JSON.stringify({{ip:ip2, action:"unban"}})}}).then(function() {{ document.getElementById("banIpInput").value = ""; loadAdmin(); }});
+    }}
+}});
 function buildGameCards(data) {{
     var h = "";
     data.forEach(function(e) {{
-        h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="/api/thumb?placeId='+e.place_id+'" alt="thumb" onerror="this.style.display=\'none\'"><div class="game-info"><a class="game-title" href="https://www.roblox.com/games/'+e.place_id+'" target="_blank">'+(e.game_name||'Unknown')+'</a><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><div class="game-buttons"><a class="download-btn" href="/'+e.filename+'" download>Download</a><button class="copy-btn" onclick="copyUrl(event, \'https://storage.luaisgame.com/'+e.filename+'\')">Copy Link</button></div></div></div></div>';
+        h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="/api/thumb?placeId='+e.place_id+'" alt="thumb" onerror="this.style.display=\'none\'"><div class="game-info"><a class="game-title" href="https://www.roblox.com/games/'+e.place_id+'" target="_blank">'+(e.game_name||'Unknown')+'</a><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><div class="game-buttons"><a class="download-btn" href="/'+e.filename+'" download>Download</a><button class="copy-btn" data-url="https://storage.luaisgame.com/'+e.filename+'">Copy Link</button></div></div></div></div>';
     }});
     return h;
 }}
@@ -1544,7 +1554,12 @@ setInterval(function() {{
         if (!c) return;
         c.innerHTML = buildGameCards(data);
         document.querySelector(".count").textContent = data.length + " game(s) decompiled";
-        filterGames();
+        var q = document.getElementById("search").value.toLowerCase();
+        if (q) {{
+            document.querySelectorAll(".game-card").forEach(function(card) {{
+                card.style.display = (card.dataset.name.indexOf(q) !== -1 || card.dataset.user.indexOf(q) !== -1) ? "" : "none";
+            }});
+        }}
     }});
 }}, 5000);
 if (document.getElementById("adminPanel")) {{ setInterval(loadAdmin, 3000); }}
