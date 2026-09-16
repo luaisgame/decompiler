@@ -1237,7 +1237,7 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
     <div id="games">{games_html}</div>
 </div>
 <div class="footer">
-    Created by: <strong>iispeaklua</strong> (Crimson) &bull; <a href="https://discord.gg/luaisgame">Discord</a>
+    Created by: <strong>iispeaklua</strong> (Crimson) &bull; <a href="https://discord.gg/robloxdecompiler">Discord</a>
 </div>
 <div class="login-overlay" id="loginOverlay">
     <div class="login-box">
