@@ -1010,11 +1010,24 @@ async def handle_post(request):
         print(f"[DEBUG] POST handle error: {e}")
         return web.Response(text=str(e), status=400)
 
+def _track_download(ip, filename):
+    dl_file = os.path.join(BASE_DIR, "downloads.json")
+    entries = []
+    if os.path.exists(dl_file):
+        with open(dl_file, "r") as f:
+            entries = json.load(f)
+    entries.insert(0, {"ip": ip, "filename": filename, "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")})
+    entries = entries[:500]
+    with open(dl_file, "w") as f:
+        json.dump(entries, f, indent=2)
+
 async def handle_download(request):
     filename = request.match_info.get("filename", "")
     filepath = os.path.join(storage_dir, filename)
     if not os.path.isfile(filepath):
         return web.Response(text="Not found", status=404)
+    ip = request.headers.get("X-Forwarded-For", request.remote)
+    _track_download(ip, filename)
     return web.FileResponse(filepath, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 async def handle_games_json(request):
@@ -1134,7 +1147,12 @@ async def handle_admin_data(request):
         with open(ips_file, "r") as f:
             ips = json.load(f)
     banned = list(_get_banned_ips())
-    return web.json_response({"ips": ips, "banned": banned})
+    downloads = []
+    dl_file = os.path.join(BASE_DIR, "downloads.json")
+    if os.path.exists(dl_file):
+        with open(dl_file, "r") as f:
+            downloads = json.load(f)
+    return web.json_response({"ips": ips, "banned": banned, "downloads": downloads})
 
 async def handle_ban(request):
     if not _is_admin(request):
@@ -1181,6 +1199,7 @@ async def handle_index(request):
                 <div class="admin-tabs">
                     <button class="tab active" onclick="showTab('main')">Main</button>
                     <button class="tab" onclick="showTab('website')">Website</button>
+                    <button class="tab" onclick="showTab('downloads')">Downloads</button>
                 </div>
             </div>
             <div class="tab-content" id="tab-main">
@@ -1198,6 +1217,12 @@ async def handle_index(request):
                         <button class="btn-ban" onclick="banIp()">Ban</button>
                         <button class="btn-unban" onclick="unbanIp()">Unban</button>
                     </div>
+                </div>
+            </div>
+            <div class="tab-content hidden" id="tab-downloads">
+                <div class="admin-section">
+                    <h3>Recent Downloads</h3>
+                    <div id="downloadList" class="ip-list"></div>
                 </div>
             </div>
         </div>'''
@@ -1315,6 +1340,11 @@ async function loadAdmin() {{
         banHtml += '<div class="ip-item"><span class="ip">' + ip + '</span><span class="meta">Banned</span></div>';
     }});
     document.getElementById("banList").innerHTML = banHtml || "<p style='color:#484f58'>No banned IPs</p>";
+    var dlHtml = "";
+    (d.downloads||[]).forEach(function(e) {{
+        dlHtml += '<div class="ip-item"><span class="ip">' + e.filename + '</span><span class="meta">From: ' + e.ip + ' | ' + e.timestamp + '</span></div>';
+    }});
+    document.getElementById("downloadList").innerHTML = dlHtml || "<p style='color:#484f58'>No downloads yet</p>";
 }}
 async function banIp() {{
     var ip = document.getElementById("banIpInput").value;
@@ -1348,7 +1378,7 @@ setInterval(function() {{
         document.querySelector(".count").textContent = data.length + " game(s) decompiled";
     }});
 }}, 5000);
-if (document.getElementById("adminPanel")) {{ loadAdmin(); setInterval(loadAdmin, 10000); }}
+if (document.getElementById("adminPanel")) {{ loadAdmin(); setInterval(loadAdmin, 3000); }}
 </script>
 </body>
 </html>'''
