@@ -827,12 +827,13 @@ async def reset_bot_presence():
     )
     await bot.change_presence(status=discord.Status.online, activity=activity)
 
-async def get_place_info(place_id: str) -> dict:
+async def get_place_info(place_id: str, cookie: str = None) -> dict:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
-    if get_active_cookie():
-        headers["Cookie"] = f".ROBLOSECURITY={get_active_cookie()}"
+    use_cookie = cookie or get_active_cookie()
+    if use_cookie:
+        headers["Cookie"] = f".ROBLOSECURITY={use_cookie}"
     for attempt in range(3):
         try:
             async with aiohttp.ClientSession(headers=headers) as session:
@@ -853,7 +854,43 @@ async def get_place_info(place_id: str) -> dict:
                     universe_id = data.get("universeId")
                 if not universe_id:
                     return {"error": True, "reason": "Universe ID not found for this place."}
-                if get_active_cookie():
+
+                game_name = f"Place {place_id}"
+                details_url = f"https://games.roblox.com/v1/games?universeIds={universe_id}"
+                async with session.get(details_url) as resp:
+                    if resp.status == 429:
+                        retry_after = float(resp.headers.get("Retry-After", 2))
+                        print(f"[DEBUG] Rate limited, retrying in {retry_after}s...")
+                        await asyncio.sleep(retry_after)
+                        continue
+                    if resp.status == 200:
+                        details_data = await resp.json()
+                        if isinstance(details_data, dict):
+                            games = details_data.get("data", [])
+                            if games and isinstance(games, list):
+                                game = games[0] or {}
+                                if game.get("isArchived", False):
+                                    return {"error": True, "reason": "Game has been archived or deleted."}
+                                game_name = game.get("name", game_name)
+
+                icon_url = None
+                thumb_url = f"https://thumbnails.roblox.com/v1/places/gameicons?placeIds={place_id}&size=512x512&format=Png&isCircular=false"
+                async with session.get(thumb_url) as thumb_resp:
+                    if thumb_resp.status == 429:
+                        retry_after = float(thumb_resp.headers.get("Retry-After", 2))
+                        print(f"[DEBUG] Rate limited, retrying in {retry_after}s...")
+                        await asyncio.sleep(retry_after)
+                        continue
+                    if thumb_resp.status == 200:
+                        thumb_data = await thumb_resp.json()
+                        if isinstance(thumb_data, dict):
+                            data_list = thumb_data.get("data", [])
+                            if data_list and isinstance(data_list, list) and len(data_list) > 0:
+                                first = data_list[0]
+                                if isinstance(first, dict):
+                                    icon_url = first.get("imageUrl")
+
+                if use_cookie:
                     play_url = f"https://games.roblox.com/v1/games/multiget-playability-status?universeIds={universe_id}"
                     async with session.get(play_url) as play_resp:
                         if play_resp.status == 429:
@@ -877,39 +914,11 @@ async def get_place_info(place_id: str) -> dict:
                                     ban_reason = body_text or unplayable_text or "UNKNOWN"
                                     return {
                                         "error": True,
-                                        "reason": f"Game is unplayable: {ban_reason}"
+                                        "reason": f"Game is unplayable: {ban_reason}",
+                                        "name": game_name,
+                                        "icon_url": icon_url
                                     }
-                game_name = f"Place {place_id}"
-                details_url = f"https://games.roblox.com/v1/games?universeIds={universe_id}"
-                async with session.get(details_url) as resp:
-                    if resp.status == 429:
-                        retry_after = float(resp.headers.get("Retry-After", 2))
-                        print(f"[DEBUG] Rate limited, retrying in {retry_after}s...")
-                        await asyncio.sleep(retry_after)
-                        continue
-                    if resp.status == 200:
-                        details_data = await resp.json()
-                        if isinstance(details_data, dict):
-                            games = details_data.get("data", [])
-                            if games and isinstance(games, list):
-                                game = games[0] or {}
-                                if game.get("isArchived", False):
-                                    return {"error": True, "reason": "Game has been archived or deleted."}
-                                game_name = game.get("name", game_name)
-                icon_url = None
-                thumb_url = f"https://thumbnails.roblox.com/v1/places/gameicons?placeIds={place_id}&size=512x512&format=Png&isCircular=false"
-                async with session.get(thumb_url) as thumb_resp:
-                    if thumb_resp.status == 429:
-                        retry_after = float(thumb_resp.headers.get("Retry-After", 2))
-                        print(f"[DEBUG] Rate limited, retrying in {retry_after}s...")
-                        await asyncio.sleep(retry_after)
-                        continue
-                    if thumb_resp.status == 200:
-                        thumb_data = await thumb_resp.json()
-                        if isinstance(thumb_data, dict):
-                            data_list = thumb_data.get("data", [])
-                            if data_list and isinstance(data_list, list):
-                                icon_url = data_list[0].get("imageUrl")
+
                 return {
                     "error": False,
                     "name": game_name,
@@ -1951,7 +1960,7 @@ async def run_decompile_logic(send_func, user: discord.User | discord.Member, gu
     blacklisted_games = load_blacklisted_games()
     if str(place_id).strip() in blacklisted_games:
         reason = blacklisted_games[str(place_id).strip()]
-        game_info = await get_place_info(place_id)
+        game_info = await get_place_info(place_id, cookie=user_cookie)
         game_name = game_info.get("name") if not game_info.get("error") else f"Place {place_id}"
 
         await send_msg(send_func, f"**Unable to decompile game:** {game_name}\n**Reason:** {reason}", ephemeral=is_ephemeral)
@@ -2024,7 +2033,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
     else:
         info_msg = None
         embed = None
-        game_info = await get_place_info(place_id)
+        game_info = await get_place_info(place_id, cookie=user_cookie)
         if game_info.get("error"):
             error_reason = game_info.get("reason", "")
             if "Game is unplayable" in error_reason:
@@ -2074,8 +2083,8 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                 await send_msg(send_func, f"<@{str(author_id)}> {error_reason}", ephemeral=is_ephemeral)
                 return
 
-        if not game_info.get("error"):
-            game_name = game_info.get("name", f"Place {place_id}")
+        if not game_info.get("error") or (user_cookie and cookie_retries == 0):
+            game_name = game_info.get("name") or f"Place {place_id}"
             icon_url = game_info.get("icon_url")
         else:
             game_name = f"Place {place_id}"
@@ -2128,7 +2137,10 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
     await update_status(info_msg, embed, "launching")
     
     saved_cookie_index = active_cookie_index
-    print(f"[COOKIE] Using cookie {active_cookie_index} for launch")
+    if user_cookie:
+        print(f"[COOKIE] Using custom cookie for launch")
+    else:
+        print(f"[COOKIE] Using cookie {active_cookie_index} for launch")
     
     try:
         roblox = find_roblox()
