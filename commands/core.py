@@ -1261,7 +1261,12 @@ async def handle_thumbnail(request):
                 return web.Response(text="", status=404)
             async with session.get(f"https://thumbnails.roblox.com/v1/games/icons?universeIds={universe_id}&size=420x420&format=Png&isCircular=false") as r:
                 tdata = await r.json()
-                thumb_url = tdata.get("data", [{}])[0].get("imageUrl", "")
+                data_list = tdata.get("data", [])
+                thumb_url = ""
+                if data_list and isinstance(data_list, list) and len(data_list) > 0:
+                    first = data_list[0]
+                    if isinstance(first, dict):
+                        thumb_url = first.get("imageUrl", "")
             if thumb_url:
                 async with session.get(thumb_url) as img:
                     return web.Response(body=await img.read(), content_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
