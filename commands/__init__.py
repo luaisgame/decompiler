@@ -5,3 +5,4 @@ from . import cookie
 from . import decompile
 from . import help
 from . import setup
+from . import support
