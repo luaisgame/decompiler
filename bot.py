@@ -204,6 +204,11 @@ async def on_ready():
     switch_to_default_cookie()
     load_queue()
 
+    from commands.support import TICKETS, PersistentClaimView
+    for ticket_id in TICKETS:
+        bot.add_view(PersistentClaimView(ticket_id))
+    print(f"[DEBUG] Registered {len(TICKETS)} persistent ticket views.")
+
     if ensure_cloudflared():
         if ensure_tunnel():
             start_tunnel()
