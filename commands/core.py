@@ -157,6 +157,7 @@ def _get_roblox_cookie_file_alt() -> str:
 def _read_roblox_cookies() -> str | None:
     fpath = _get_roblox_cookie_file()
     if not os.path.exists(fpath):
+        print(f"[COOKIE] _read_roblox_cookies: file not found at {fpath}")
         return None
     try:
         with open(fpath, "r") as f:
@@ -164,7 +165,8 @@ def _read_roblox_cookies() -> str | None:
         encrypted = base64.b64decode(data["CookiesData"])
         decrypted = _dpapi_unprotect(encrypted)
         return decrypted.decode("utf-8", errors="replace") if decrypted else None
-    except Exception:
+    except Exception as e:
+        print(f"[COOKIE] _read_roblox_cookies error: {e}")
         return None
 
 def _write_roblox_cookies(cookie_text: str) -> bool:
@@ -184,6 +186,7 @@ def _write_roblox_cookies(cookie_text: str) -> bool:
 def _replace_roblox_security_cookie(new_cookie_value: str) -> bool:
     cookie_text = _read_roblox_cookies()
     if not cookie_text:
+        print(f"[COOKIE] _replace_roblox_security_cookie: _read_roblox_cookies() returned empty")
         return False
     lines = cookie_text.split("\n")
     new_lines = []
@@ -197,8 +200,10 @@ def _replace_roblox_security_cookie(new_cookie_value: str) -> bool:
         else:
             new_lines.append(line)
     if not replaced:
+        print(f"[COOKIE] _replace_roblox_security_cookie: no .ROBLOSECURITY line found in cookie file")
         return False
     result = _write_roblox_cookies("\n".join(new_lines))
+    print(f"[COOKIE] _replace_roblox_security_cookie: _write_roblox_cookies returned {result}")
     alt_path = _get_roblox_cookie_file_alt()
     if os.path.exists(alt_path):
         try:
@@ -224,6 +229,8 @@ def _replace_roblox_security_cookie(new_cookie_value: str) -> bool:
                     print(f"[COOKIE] Also updated _RobloxCookies.dat")
         except Exception as e:
             print(f"[COOKIE] Failed to update _RobloxCookies.dat: {e}")
+    else:
+        print(f"[COOKIE] _RobloxCookies.dat not found at {alt_path}")
     return result
 
 def load_cookies() -> list[str]:
@@ -1988,7 +1995,8 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
             return
         saved_user_cookie = get_active_cookie()
         saved_user_cookie_index = active_cookie_index
-        _replace_roblox_security_cookie(user_cookie)
+        replaced = _replace_roblox_security_cookie(user_cookie)
+        print(f"[COOKIE] _replace_roblox_security_cookie for user cookie returned: {replaced}")
         cookie_info = f"Custom ({result.get('username')})"
     elif not user_cookie and cookie_retries == 0:
         cookies = load_cookies()
