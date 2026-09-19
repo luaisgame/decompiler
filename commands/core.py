@@ -1290,7 +1290,7 @@ async def handle_index(request):
     for e in entries:
         games_html += f'''<div class="game-card" data-name="{e.get("game_name","").lower()}" data-user="{e.get("display_name","").lower()}">
             <div class="game-card-inner">
-                <img class="game-thumb" src="/api/thumb?placeId={e.get("place_id","")}" alt="thumb" onerror="this.style.display='none'">
+                <img class="game-thumb" src="{e.get('icon_url') or ''}" alt="thumb" onerror="this.style.display='none'">
                 <div class="game-info">
                     <a class="game-title" href="https://www.roblox.com/games/{e.get("place_id","")}" target="_blank">{e.get("game_name","Unknown")}</a>
                     <div class="game-meta">
@@ -1587,7 +1587,7 @@ document.addEventListener("click", function(ev) {{
 function buildGameCards(data) {{
     var h = "";
     data.forEach(function(e) {{
-        h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="/api/thumb?placeId='+e.place_id+'" alt="thumb" onerror="this.parentElement.removeChild(this)"><div class="game-info"><a class="game-title" href="https://www.roblox.com/games/'+e.place_id+'" target="_blank">'+(e.game_name||'Unknown')+'</a><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><div class="game-buttons"><a class="download-btn" href="/'+e.filename+'" download>Download</a><button class="copy-btn" data-url="https://storage.luaisgame.com/'+e.filename+'">Copy Link</button></div></div></div></div>';
+        h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="'+(e.icon_url||'/api/thumb?placeId='+e.place_id)+'" alt="thumb" onerror="this.parentElement.removeChild(this)"><div class="game-info"><a class="game-title" href="https://www.roblox.com/games/'+e.place_id+'" target="_blank">'+(e.game_name||'Unknown')+'</a><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><div class="game-buttons"><a class="download-btn" href="/'+e.filename+'" download>Download</a><button class="copy-btn" data-url="https://storage.luaisgame.com/'+e.filename+'">Copy Link</button></div></div></div></div>';
     }});
     return h;
 }}
@@ -1665,7 +1665,7 @@ def _terminate_live_roblox():
         except Exception:
             continue
 
-def _upload_file_sync(file_path: str, place_id: str, game_name: str = None, user_id: str = None, display_name: str = None, game_version: str = None) -> str | None:
+def _upload_file_sync(file_path: str, place_id: str, game_name: str = None, user_id: str = None, display_name: str = None, game_version: str = None, icon_url: str = None) -> str | None:
     safe_name = "".join(c for c in (game_name or place_id) if c.isalnum() or c in " _-").strip().replace(" ", "_")
     rand_suffix = uuid.uuid4().hex[:8]
     filename = f"{safe_name}_{place_id}_{user_id or 'anon'}_{rand_suffix}{os.path.splitext(file_path)[1]}"
@@ -1684,7 +1684,8 @@ def _upload_file_sync(file_path: str, place_id: str, game_name: str = None, user
             "user_id": user_id or "Unknown",
             "display_name": display_name or "Unknown",
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "game_version": game_version or "N/A"
+            "game_version": game_version or "N/A",
+            "icon_url": icon_url or ""
         })
         with open(games_json, "w") as f:
             json.dump(entries, f, indent=2)
@@ -1693,9 +1694,9 @@ def _upload_file_sync(file_path: str, place_id: str, game_name: str = None, user
         print(f"[DEBUG] Storage copy error: {e}")
         return None
 
-async def upload_file(file_path: str, place_id: str, game_name: str = None, user_id: str = None, display_name: str = None, game_version: str = None) -> dict | None:
+async def upload_file(file_path: str, place_id: str, game_name: str = None, user_id: str = None, display_name: str = None, game_version: str = None, icon_url: str = None) -> dict | None:
     print(f"[DEBUG] Copying {os.path.basename(file_path)} to storage...")
-    public_url = await asyncio.to_thread(_upload_file_sync, file_path, place_id, game_name, user_id, display_name, game_version)
+    public_url = await asyncio.to_thread(_upload_file_sync, file_path, place_id, game_name, user_id, display_name, game_version, icon_url)
     if public_url:
         return {"url": public_url}
     return None
@@ -2186,7 +2187,8 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                     game_name=game_name,
                     user_id=str(author_id),
                     display_name=author.display_name if author else "Unknown",
-                    game_version=game_version
+                    game_version=game_version,
+                    icon_url=icon_url
                 )
 
                 if upload_result:

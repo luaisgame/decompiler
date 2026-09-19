@@ -88,6 +88,9 @@ class SupportView(discord.ui.View):
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey, emoji="\u274c")
     async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != BOT_OWNER_ID:
+            await interaction.response.send_message("Only the bot owner can cancel tickets.", ephemeral=True)
+            return
         for child in self.children:
             child.disabled = True
         try:
@@ -99,9 +102,6 @@ class SupportView(discord.ui.View):
 
 @bot.command(name="setup-support")
 async def setup_support_prefix(ctx):
-    if ctx.author.id != BOT_OWNER_ID:
-        await ctx.send("Only the bot owner can use this command.")
-        return
     if not ctx.guild:
         await ctx.send("This command can only be used in a server.")
         return
