@@ -29,6 +29,7 @@ RAW_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
 GITHUB_FILES = [
     "commands/core.py",
     "commands/setup.py",
+    "commands/support.py",
     "commands/blacklist.py",
     "commands/blacklistuser.py",
     "commands/blacklistserver.py",
