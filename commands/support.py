@@ -64,15 +64,8 @@ class ErrorModal(SupportTicketModal):
 
 
 class SupportView(discord.ui.View):
-    def __init__(self, author_id: int):
+    def __init__(self):
         super().__init__(timeout=300)
-        self.author_id = author_id
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("This ticket system is not for you.", ephemeral=True)
-            return False
-        return True
 
     @discord.ui.button(label="Report User", style=discord.ButtonStyle.danger, emoji="\U0001f6ab")
     async def report_user_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -102,6 +95,9 @@ class SupportView(discord.ui.View):
 
 @bot.command(name="setup-support")
 async def setup_support_prefix(ctx):
+    if ctx.author.id != BOT_OWNER_ID:
+        await ctx.send("Only the bot owner can use this command.")
+        return
     if not ctx.guild:
         await ctx.send("This command can only be used in a server.")
         return
@@ -110,5 +106,5 @@ async def setup_support_prefix(ctx):
         description="Need help? Click a button below to open a support ticket.",
         color=0x5865F2
     )
-    view = SupportView(ctx.author.id)
+    view = SupportView()
     await ctx.send(embed=embed, view=view)
