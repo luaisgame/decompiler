@@ -833,70 +833,92 @@ async def get_place_info(place_id: str) -> dict:
     }
     if get_active_cookie():
         headers["Cookie"] = f".ROBLOSECURITY={get_active_cookie()}"
-    async with aiohttp.ClientSession(headers=headers) as session:
+    for attempt in range(3):
         try:
-            universe_url = f"https://apis.roblox.com/universes/v1/places/{place_id}/universe"
-            async with session.get(universe_url) as resp:
-                if resp.status in (403, 404):
-                    return {"error": True, "reason": "Place is banned, content-deleted, or moderated by Roblox."}
-                if resp.status != 200:
-                    return {"error": True, "reason": f"Roblox API returned status code {resp.status}."}
-                data = await resp.json()
-                if not isinstance(data, dict):
-                    return {"error": True, "reason": "Invalid response from universe resolution API."}
-                universe_id = data.get("universeId")
-            if not universe_id:
-                return {"error": True, "reason": "Universe ID not found for this place."}
-            if get_active_cookie():
-                play_url = f"https://games.roblox.com/v1/games/multiget-playability-status?universeIds={universe_id}"
-                async with session.get(play_url) as play_resp:
-                    if play_resp.status == 200:
-                        play_data = await play_resp.json()
-                        if isinstance(play_data, list) and len(play_data) > 0:
-                            status_info = play_data[0] or {}
-                            is_playable = status_info.get("isPlayable", True)
-                            unplayable_text = status_info.get("unplayableDisplayText", "")
-                            if not is_playable:
-                                body_text = None
-                                ux_treatment = status_info.get("playableUxTreatment")
-                                if isinstance(ux_treatment, dict):
-                                    ux_data = ux_treatment.get("data")
-                                    if isinstance(ux_data, dict):
-                                        body_text = ux_data.get("bodyText")
-                                ban_reason = body_text or unplayable_text or "UNKNOWN"
-                                return {
-                                    "error": True,
-                                    "reason": f"Game is unplayable: {ban_reason}"
-                                }
-            game_name = f"Place {place_id}"
-            details_url = f"https://games.roblox.com/v1/games?universeIds={universe_id}"
-            async with session.get(details_url) as resp:
-                if resp.status == 200:
-                    details_data = await resp.json()
-                    if isinstance(details_data, dict):
-                        games = details_data.get("data", [])
-                        if games and isinstance(games, list):
-                            game = games[0] or {}
-                            if game.get("isArchived", False):
-                                return {"error": True, "reason": "Game has been archived or deleted."}
-                            game_name = game.get("name", game_name)
-            icon_url = None
-            thumb_url = f"https://thumbnails.roblox.com/v1/places/gameicons?placeIds={place_id}&size=512x512&format=Png&isCircular=false"
-            async with session.get(thumb_url) as thumb_resp:
-                if thumb_resp.status == 200:
-                    thumb_data = await thumb_resp.json()
-                    if isinstance(thumb_data, dict):
-                        data_list = thumb_data.get("data", [])
-                        if data_list and isinstance(data_list, list):
-                            icon_url = data_list[0].get("imageUrl")
-            return {
-                "error": False,
-                "name": game_name,
-                "icon_url": icon_url
-            }
+            async with aiohttp.ClientSession(headers=headers) as session:
+                universe_url = f"https://apis.roblox.com/universes/v1/places/{place_id}/universe"
+                async with session.get(universe_url) as resp:
+                    if resp.status == 429:
+                        retry_after = float(resp.headers.get("Retry-After", 2))
+                        print(f"[DEBUG] Rate limited, retrying in {retry_after}s...")
+                        await asyncio.sleep(retry_after)
+                        continue
+                    if resp.status in (403, 404):
+                        return {"error": True, "reason": "Place is banned, content-deleted, or moderated by Roblox."}
+                    if resp.status != 200:
+                        return {"error": True, "reason": f"Roblox API returned status code {resp.status}."}
+                    data = await resp.json()
+                    if not isinstance(data, dict):
+                        return {"error": True, "reason": "Invalid response from universe resolution API."}
+                    universe_id = data.get("universeId")
+                if not universe_id:
+                    return {"error": True, "reason": "Universe ID not found for this place."}
+                if get_active_cookie():
+                    play_url = f"https://games.roblox.com/v1/games/multiget-playability-status?universeIds={universe_id}"
+                    async with session.get(play_url) as play_resp:
+                        if play_resp.status == 429:
+                            retry_after = float(play_resp.headers.get("Retry-After", 2))
+                            print(f"[DEBUG] Rate limited, retrying in {retry_after}s...")
+                            await asyncio.sleep(retry_after)
+                            continue
+                        if play_resp.status == 200:
+                            play_data = await play_resp.json()
+                            if isinstance(play_data, list) and len(play_data) > 0:
+                                status_info = play_data[0] or {}
+                                is_playable = status_info.get("isPlayable", True)
+                                unplayable_text = status_info.get("unplayableDisplayText", "")
+                                if not is_playable:
+                                    body_text = None
+                                    ux_treatment = status_info.get("playableUxTreatment")
+                                    if isinstance(ux_treatment, dict):
+                                        ux_data = ux_treatment.get("data")
+                                        if isinstance(ux_data, dict):
+                                            body_text = ux_data.get("bodyText")
+                                    ban_reason = body_text or unplayable_text or "UNKNOWN"
+                                    return {
+                                        "error": True,
+                                        "reason": f"Game is unplayable: {ban_reason}"
+                                    }
+                game_name = f"Place {place_id}"
+                details_url = f"https://games.roblox.com/v1/games?universeIds={universe_id}"
+                async with session.get(details_url) as resp:
+                    if resp.status == 429:
+                        retry_after = float(resp.headers.get("Retry-After", 2))
+                        print(f"[DEBUG] Rate limited, retrying in {retry_after}s...")
+                        await asyncio.sleep(retry_after)
+                        continue
+                    if resp.status == 200:
+                        details_data = await resp.json()
+                        if isinstance(details_data, dict):
+                            games = details_data.get("data", [])
+                            if games and isinstance(games, list):
+                                game = games[0] or {}
+                                if game.get("isArchived", False):
+                                    return {"error": True, "reason": "Game has been archived or deleted."}
+                                game_name = game.get("name", game_name)
+                icon_url = None
+                thumb_url = f"https://thumbnails.roblox.com/v1/places/gameicons?placeIds={place_id}&size=512x512&format=Png&isCircular=false"
+                async with session.get(thumb_url) as thumb_resp:
+                    if thumb_resp.status == 429:
+                        retry_after = float(thumb_resp.headers.get("Retry-After", 2))
+                        print(f"[DEBUG] Rate limited, retrying in {retry_after}s...")
+                        await asyncio.sleep(retry_after)
+                        continue
+                    if thumb_resp.status == 200:
+                        thumb_data = await thumb_resp.json()
+                        if isinstance(thumb_data, dict):
+                            data_list = thumb_data.get("data", [])
+                            if data_list and isinstance(data_list, list):
+                                icon_url = data_list[0].get("imageUrl")
+                return {
+                    "error": False,
+                    "name": game_name,
+                    "icon_url": icon_url
+                }
         except Exception as e:
             print(f"[DEBUG] Error fetching Roblox place info: {e}")
             return {"error": True, "reason": f"Exception occurred: {str(e)}"}
+    return {"error": True, "reason": "Roblox API rate limited. Please try again in a few seconds."}
 
 async def get_current_user_id() -> int | None:
     try:
