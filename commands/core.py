@@ -1174,12 +1174,12 @@ DISCORD_CALLBACK_PAGE = r'''<!DOCTYPE html>
         .then(function(r){return r.json()})
         .then(function(d){
           if(d&&d.id){document.cookie='user_info='+encodeURIComponent(JSON.stringify(d))+';path=/;max-age='+(86400*30)}
-          window.location.hash='';window.location='/mc';
-        }).catch(function(){window.location='/mc'});
+          window.location.hash='';window.location.href='/mc';
+        }).catch(function(){window.location.href='/mc'});
       return;
     }
   }
-  window.location='/mc';
+  window.location.href='/mc';
 })();
 </script>
 <p style="color:white;background:#0a0a0f;text-align:center;padding:40px;font-family:sans-serif">Logging in...</p>
@@ -1894,7 +1894,10 @@ function checkAuth(){
     }
   }
   userInfo=parseCookie();
-  if(!userInfo){window.location.href='/';return false}
+  if(!userInfo){
+    document.getElementById('consoleWrap').innerHTML='<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;gap:16px"><div style="font-size:18px;color:rgba(255,255,255,.5)">Login to access servers</div><a href="/api/auth/login" style="padding:12px 24px;border-radius:10px;border:1.5px solid rgba(88,101,242,.5);background:rgba(88,101,242,.08);color:#5865f2;font-size:14px;font-weight:600;text-decoration:none;font-family:inherit;transition:all .3s">Login with Discord</a></div>';
+    return false;
+  }
   document.getElementById('userInfo').innerHTML='<img src="https://cdn.discordapp.com/avatars/'+userInfo.id+'/'+userInfo.avatar+'.png" onerror="this.style.display=\'none\'"><span class="name">'+userInfo.username+'</span>';
   return true;
 }
