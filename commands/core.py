@@ -2257,12 +2257,13 @@ function createServer(){
   });
 }
 var lastLineCount=0;
+var lastWSServer='';
 function selectServer(name){
   activeServer=name;
   autoScroll=true;
   modsVisible=false;
   loadServers();
-  connectWS(name);
+  if(lastWSServer!==name){connectWS(name);lastWSServer=name;lastLineCount=0}
   fetch('/api/mc/console?name='+encodeURIComponent(name),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
     var wrap=document.getElementById('consoleWrap');
     var out=document.getElementById('consoleOutput');
@@ -2351,7 +2352,7 @@ function connectWS(name){
       }
     }catch(e){}
   };
-  ws.onclose=function(){setTimeout(function(){if(activeServer===name)connectWS(name)},3000)};
+  ws.onclose=function(){setTimeout(function(){if(activeServer===name&&lastWSServer===name)connectWS(name)},3000)};
 }
 function sendCmd(){
   var inp=document.getElementById('cmdInput');
@@ -2365,11 +2366,11 @@ function startServer(){
   if(!activeServer)return;
   var sel=document.getElementById('loaderSelect');
   var loader=sel?sel.value:'fabric';
-  fetch('/api/mc/start',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer,loader:loader})}).then(function(r){return r.json()}).then(function(){setTimeout(function(){selectServer(activeServer);loadServers()},1000)});
+  fetch('/api/mc/start',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer,loader:loader})}).then(function(r){return r.json()}).then(function(){loadServers()});
 }
 function stopServer(){
   if(!activeServer)return;
-  fetch('/api/mc/stop',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer})}).then(function(r){return r.json()}).then(function(){setTimeout(function(){selectServer(activeServer);loadServers()},1000)});
+  fetch('/api/mc/stop',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer})}).then(function(r){return r.json()}).then(function(){loadServers()});
 }
 if(checkAuth()){
   loadServers();
