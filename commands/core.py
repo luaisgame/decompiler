@@ -2256,6 +2256,7 @@ function createServer(){
     inp.value='';loadServers();selectServer(name);
   });
 }
+var lastLineCount=0;
 function selectServer(name){
   activeServer=name;
   autoScroll=true;
@@ -2264,13 +2265,27 @@ function selectServer(name){
   connectWS(name);
   fetch('/api/mc/console?name='+encodeURIComponent(name),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
     var wrap=document.getElementById('consoleWrap');
-    wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
     var out=document.getElementById('consoleOutput');
+    if(out&&out.dataset.server===name){
+      var lines=d.lines||[];
+      if(lines.length>lastLineCount){
+        for(var i=lastLineCount;i<lines.length;i++)appendLine(out,lines[i],false);
+        lastLineCount=lines.length;
+        if(autoScroll)out.scrollTop=out.scrollHeight;
+      }
+      document.getElementById('cmdInput').focus();
+      return;
+    }
+    wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
+    out=document.getElementById('consoleOutput');
+    out.dataset.server=name;
     out.addEventListener('scroll',function(){
       var atBottom=out.scrollHeight-out.scrollTop-out.clientHeight<50;
       autoScroll=atBottom;
     });
-    (d.lines||[]).forEach(function(line){appendLine(out,line,false)});
+    var lines=d.lines||[];
+    lines.forEach(function(line){appendLine(out,line,false)});
+    lastLineCount=lines.length;
     out.scrollTop=out.scrollHeight;
     document.getElementById('cmdInput').focus();
     if(userInfo)loadMods();
