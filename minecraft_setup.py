@@ -360,11 +360,12 @@ def _detect_mc_ver(server_dir):
 
 
 def _get_java_for_server(server_dir):
-    mc_ver = _detect_mc_ver(server_dir)
-    if mc_ver:
-        java_ver = _mc_ver_to_java(mc_ver)
-        return _find_java(java_ver), mc_ver
-    return "java", None
+    if _is_forge_server(server_dir):
+        mc_ver = _detect_mc_ver(server_dir)
+        if mc_ver:
+            java_ver = _mc_ver_to_java(mc_ver)
+            return _find_java(java_ver), mc_ver
+    return "java", _detect_mc_ver(server_dir)
 
 
 FORGE_JVM_ARGS = [

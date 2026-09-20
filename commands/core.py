@@ -1705,14 +1705,15 @@ def _mc_detect_ver(server_dir):
     return None
 
 def _mc_get_java(server_dir):
-    try:
-        from minecraft_setup import _mc_ver_to_java, _find_java
-        mc_ver = _mc_detect_ver(server_dir)
-        if mc_ver:
-            java_ver = _mc_ver_to_java(mc_ver)
-            return _find_java(java_ver)
-    except Exception:
-        pass
+    if _mc_is_forge(server_dir):
+        try:
+            from minecraft_setup import _mc_ver_to_java, _find_java
+            mc_ver = _mc_detect_ver(server_dir)
+            if mc_ver:
+                java_ver = _mc_ver_to_java(mc_ver)
+                return _find_java(java_ver)
+        except Exception:
+            pass
     return "java"
 
 FORGE_JVM_ARGS = [
