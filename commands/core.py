@@ -1707,7 +1707,22 @@ async def mc_api_start(request):
         return web.json_response({"error": "Already running"}, status=400)
     jar = _mc_find_jar(server_dir)
     if not jar:
-        return web.json_response({"error": "No server jar found"}, status=404)
+        buf = mc_console_buffers.setdefault(name, [])
+        buf.append(f"[{time.strftime('%H:%M:%S')}] No server.jar found, installing Fabric server...")
+        try:
+            from minecraft_setup import setup_server
+            ok = await asyncio.to_thread(setup_server, server_dir)
+            if not ok:
+                buf.append(f"[{time.strftime('%H:%M:%S')}] Failed to install Fabric server.")
+                return web.json_response({"error": "Fabric install failed"}, status=500)
+            buf.append(f"[{time.strftime('%H:%M:%S')}] Fabric installed successfully.")
+        except Exception as e:
+            buf.append(f"[{time.strftime('%H:%M:%S')}] Setup error: {e}")
+            return web.json_response({"error": str(e)}, status=500)
+        jar = _mc_find_jar(server_dir)
+        if not jar:
+            buf.append(f"[{time.strftime('%H:%M:%S')}] Still no server.jar after install.")
+            return web.json_response({"error": "No server jar after install"}, status=500)
     mem = os.environ.get("MC_MEMORY", "2G")
     proc = await asyncio.create_subprocess_exec(
         "java", f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui",
@@ -1720,6 +1735,17 @@ async def mc_api_start(request):
     mc_console_buffers.setdefault(name, [])
     asyncio.create_task(_mc_read_output(name, proc))
     return web.json_response({"ok": True, "pid": proc.pid})
+
+async def mc_api_create(request):
+    data = await request.json()
+    name = data.get("name", "").strip()
+    if not name or not all(c.isalnum() or c in "-_" for c in name):
+        return web.json_response({"error": "Invalid server name (alphanumeric, - _) only"}, status=400)
+    server_dir = os.path.join(MC_DIR, name)
+    if os.path.exists(server_dir):
+        return web.json_response({"error": "Server folder already exists"}, status=409)
+    os.makedirs(server_dir, exist_ok=True)
+    return web.json_response({"ok": True})
 
 async def mc_api_stop(request):
     data = await request.json()
@@ -1842,9 +1868,10 @@ body{background:#0a0a0f;color:#e0e0e0;font-family:'Consolas','Courier New',monos
   <div class="user" id="userInfo"></div>
 </div>
 <div class="main">
-  <div class="sidebar">
+    <div class="sidebar">
     <div class="title">Servers</div>
     <div class="server-list" id="serverList"></div>
+    <div style="padding:8px"><input type="text" id="newServerName" placeholder="New server name..." style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.04);color:#fff;font-size:12px;font-family:inherit;outline:none;margin-bottom:6px" onkeydown="if(event.key==='Enter')createServer()"><button onclick="createServer()" style="width:100%;padding:8px;border-radius:6px;border:1px solid rgba(0,220,120,.3);background:rgba(0,220,120,.05);color:#00dc78;font-size:12px;font-family:inherit;cursor:pointer">+ Create Server</button></div>
   </div>
   <div class="console-wrap" id="consoleWrap">
     <div class="no-servers" id="noSelect">Select a server</div>
@@ -1881,6 +1908,15 @@ function loadServers(){
       item.onclick=function(){selectServer(s.name)};
       el.appendChild(item);
     });
+  });
+}
+function createServer(){
+  var inp=document.getElementById('newServerName');
+  var name=inp.value.trim();
+  if(!name)return;
+  fetch('/api/mc/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(function(r){return r.json()}).then(function(d){
+    if(d.error){alert(d.error);return}
+    inp.value='';loadServers();selectServer(name);
   });
 }
 function selectServer(name){
@@ -1961,6 +1997,7 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_get("/", handle_index)
     app.router.add_get("/mc", handle_mc_page)
     app.router.add_get("/api/mc/servers", mc_api_servers)
+    app.router.add_post("/api/mc/create", mc_api_create)
     app.router.add_post("/api/mc/start", mc_api_start)
     app.router.add_post("/api/mc/stop", mc_api_stop)
     app.router.add_post("/api/mc/command", mc_api_command)
