@@ -1149,8 +1149,7 @@ def _track_ip(ip):
 
 async def handle_discord_auth(request):
     resp = web.Response(status=302)
-    origin = f"{request.scheme}://{request.host}"
-    redirect = origin + "/api/auth/callback"
+    redirect = "https://storage.luaisgame.com/api/auth/callback"
     resp.headers["Location"] = (
         f"https://discord.com/api/oauth2/authorize"
         f"?client_id={DISCORD_CLIENT_ID}"
