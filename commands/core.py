@@ -2117,7 +2117,7 @@ function createServer(){
   var inp=document.getElementById('newServerName');
   var name=inp.value.trim();
   if(!name)return;
-  fetch('/api/mc/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}).then(function(r){return r.json()}).then(function(d){
+  fetch('/api/mc/create',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:name})}).then(function(r){return r.json()}).then(function(d){
     if(d.error){alert(d.error);return}
     inp.value='';loadServers();selectServer(name);
   });
@@ -2168,14 +2168,14 @@ function formatSize(b){if(b>1048576)return(b/1048576).toFixed(1)+'MB';return(b/1
 function uploadMod(input){
   var file=input.files[0];if(!file)return;
   var fd=new FormData();fd.append('file',file);fd.append('server',activeServer);
-  fetch('/api/mc/upload-mod',{method:'POST',body:fd}).then(function(r){return r.json()}).then(function(d){
+  fetch('/api/mc/upload-mod',{method:'POST',body:fd,credentials:'include'}).then(function(r){return r.json()}).then(function(d){
     if(d.error){alert(d.error);return}loadMods();
     var out=document.getElementById('consoleOutput');if(out)appendLine(out,'['+new Date().toTimeString().slice(0,8)+'] Mod installed: '+d.name,false);
   });
 }
 function deleteMod(mod){
   if(!confirm('Remove '+mod+'?'))return;
-  fetch('/api/mc/delete-mod',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:activeServer,mod:mod})}).then(function(r){return r.json()}).then(function(d){
+  fetch('/api/mc/delete-mod',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer,mod:mod})}).then(function(r){return r.json()}).then(function(d){
     if(d.error){alert(d.error);return}loadMods();
   });
 }
@@ -2216,11 +2216,11 @@ function startServer(){
   if(!activeServer)return;
   var sel=document.getElementById('loaderSelect');
   var loader=sel?sel.value:'fabric';
-  fetch('/api/mc/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:activeServer,loader:loader})}).then(function(r){return r.json()}).then(function(){setTimeout(function(){selectServer(activeServer);loadServers()},1000)});
+  fetch('/api/mc/start',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer,loader:loader})}).then(function(r){return r.json()}).then(function(){setTimeout(function(){selectServer(activeServer);loadServers()},1000)});
 }
 function stopServer(){
   if(!activeServer)return;
-  fetch('/api/mc/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:activeServer})}).then(function(r){return r.json()}).then(function(){setTimeout(function(){selectServer(activeServer);loadServers()},1000)});
+  fetch('/api/mc/stop',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer})}).then(function(r){return r.json()}).then(function(){setTimeout(function(){selectServer(activeServer);loadServers()},1000)});
 }
 if(checkAuth()){
   loadServers();
