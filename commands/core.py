@@ -1377,40 +1377,48 @@ async def handle_index(request):
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 * {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',system-ui,-apple-system,sans-serif; min-height:100vh; padding-bottom:60px; }}
-.header {{ background:linear-gradient(135deg,#0d1117 0%,#161b22 100%); padding:20px 40px; border-bottom:1px solid #30363d; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:100; backdrop-filter:blur(10px); }}
+body {{ background:#050508; color:#c9d1d9; font-family:'Inter','SF Pro Display',system-ui,-apple-system,sans-serif; min-height:100vh; padding-bottom:60px; position:relative; }}
+.bg-grid {{ position:fixed; top:0; left:0; width:100%; height:100%; z-index:0; pointer-events:none;
+  background-image: linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px), linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px);
+  background-size:60px 60px; }}
+.bg-glow {{ position:fixed; width:600px; height:600px; border-radius:50%;
+  background:radial-gradient(circle,rgba(0,200,120,.06),transparent 70%);
+  top:50%; left:50%; transform:translate(-50%,-50%); z-index:0; pointer-events:none;
+  animation:pulse 6s ease-in-out infinite alternate; }}
+@keyframes pulse {{ 0%{{opacity:.6;transform:translate(-50%,-50%) scale(1)}} 100%{{opacity:1;transform:translate(-50%,-50%) scale(1.15)}} }}
+.header {{ background:rgba(13,17,23,.85); padding:20px 40px; border-bottom:1px solid rgba(0,220,120,.08); display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:100; backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); }}
 .header-left {{ display:flex; align-items:center; gap:20px; }}
 .header-right {{ display:flex; align-items:center; gap:12px; }}
 .logo {{ font-size:26px; font-weight:700; letter-spacing:-0.5px; display:flex; align-items:center; gap:8px; }}
 .roblox-icon {{ width:32px; height:32px; }}
 .lua {{ color:#58a6ff; }} .is {{ color:#8b949e; }} .game {{ color:#3fb950; }}
-.search {{ background:#0d1117; border:1px solid #30363d; color:#c9d1d9; padding:10px 16px; border-radius:8px; width:320px; font-size:14px; outline:none; transition:border-color 0.2s; }}
-.search:focus {{ border-color:#58a6ff; box-shadow:0 0 0 3px rgba(88,166,255,0.15); }}
+.search {{ background:rgba(13,17,23,.6); border:1px solid rgba(255,255,255,.06); color:#c9d1d9; padding:10px 16px; border-radius:8px; width:320px; font-size:14px; outline:none; transition:border-color 0.2s; }}
+.search:focus {{ border-color:rgba(0,220,120,.3); box-shadow:0 0 0 3px rgba(0,220,120,.08); }}
 .btn {{ padding:10px 20px; border-radius:8px; border:none; font-size:13px; font-weight:600; cursor:pointer; transition:all 0.2s; text-decoration:none; display:inline-flex; align-items:center; gap:6px; }}
-.btn-primary {{ background:#58a6ff; color:#0d1117; }}
-.btn-primary:hover {{ background:#79b8ff; transform:translateY(-1px); }}
-.btn-secondary {{ background:#21262d; color:#c9d1d9; border:1px solid #30363d; }}
-.btn-secondary:hover {{ background:#30363d; }}
-.btn-discord {{ background:#5865F2; color:#fff; }}
-.btn-discord:hover {{ background:#4752C4; transform:translateY(-1px); }}
-.container {{ max-width:1200px; margin:30px auto; padding:0 20px; }}
-.game-card {{ background:linear-gradient(135deg,#161b22 0%,#1c2333 100%); border:1px solid #30363d; border-radius:12px; padding:0; margin-bottom:16px; transition:all 0.3s; overflow:hidden; }}
-.game-card:hover {{ border-color:#58a6ff; transform:translateY(-2px); box-shadow:0 8px 24px rgba(0,0,0,0.3); }}
+.btn-primary {{ background:#00dc78; color:#050508; }}
+.btn-primary:hover {{ background:#00ff8a; transform:translateY(-1px); }}
+.btn-secondary {{ background:rgba(255,255,255,.04); color:#c9d1d9; border:1px solid rgba(255,255,255,.06); }}
+.btn-secondary:hover {{ background:rgba(255,255,255,.08); }}
+.btn-discord {{ background:rgba(88,101,242,.8); color:#fff; border:1px solid rgba(88,101,242,.3); }}
+.btn-discord:hover {{ background:#5865f2; transform:translateY(-1px); }}
+.container {{ max-width:1200px; margin:30px auto; padding:0 20px; position:relative; z-index:1; }}
+.game-card {{ background:rgba(22,27,34,.6); border:1px solid rgba(0,220,120,.08); border-radius:12px; padding:0; margin-bottom:16px; transition:all 0.3s; overflow:hidden; backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); }}
+.game-card:hover {{ border-color:rgba(0,220,120,.25); transform:translateY(-2px); box-shadow:0 8px 24px rgba(0,0,0,0.3); }}
 .game-card-inner {{ display:flex; gap:0; }}
 .game-thumb {{ width:180px; height:180px; object-fit:cover; border-radius:12px 0 0 12px; flex-shrink:0; background:#0d1117; }}
 .game-info {{ padding:20px; flex:1; display:flex; flex-direction:column; justify-content:center; }}
 .game-title {{ font-size:20px; font-weight:600; color:#f0f6fc; margin-bottom:12px; text-decoration:none; display:inline-block; transition:color 0.2s; }}
-.game-title:hover {{ color:#58a6ff; }}
+.game-title:hover {{ color:#00dc78; }}
 .game-meta {{ font-size:13px; color:#8b949e; margin-bottom:16px; line-height:2; }}
-.label {{ color:#58a6ff; font-weight:500; }}
+.label {{ color:#00dc78; font-weight:500; }}
 .value {{ color:#c9d1d9; margin-right:16px; }}
 .download-btn {{ display:inline-block; background:linear-gradient(135deg,#238636,#2ea043); color:#fff; padding:10px 20px; border-radius:8px; text-decoration:none; font-size:13px; font-weight:600; transition:all 0.2s; }}
 .download-btn:hover {{ transform:translateY(-1px); box-shadow:0 4px 12px rgba(35,134,54,0.4); }}
 .game-buttons {{ display:flex; gap:8px; }}
-.copy-btn {{ background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:10px 20px; border-radius:8px; font-size:13px; font-weight:600; cursor:pointer; transition:all 0.2s; }}
-.copy-btn:hover {{ background:#30363d; border-color:#58a6ff; }}
+.copy-btn {{ background:rgba(255,255,255,.04); color:#c9d1d9; border:1px solid rgba(255,255,255,.06); padding:10px 20px; border-radius:8px; font-size:13px; font-weight:600; cursor:pointer; transition:all 0.2s; }}
+.copy-btn:hover {{ background:rgba(255,255,255,.08); border-color:rgba(0,220,120,.2); }}
 .count {{ color:#8b949e; font-size:14px; margin-bottom:20px; }}
-.footer {{ text-align:center; padding:20px; color:#484f58; font-size:13px; border-top:1px solid #21262d; position:fixed; bottom:0; left:0; right:0; background:#0a0e14; z-index:50; }}
+.footer {{ text-align:center; padding:20px; color:#484f58; font-size:13px; border-top:1px solid rgba(0,220,120,.06); position:fixed; bottom:0; left:0; right:0; background:rgba(5,5,8,.85); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); z-index:50; }}
 .footer a {{ color:#58a6ff; text-decoration:none; }}
 @keyframes pulse {{ 0%,100% {{ opacity:1; }} 50% {{ opacity:0.5; }} }}
 @media (max-width:768px) {{
@@ -1436,37 +1444,39 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
     .logo {{ font-size:20px; }}
     .roblox-icon {{ width:24px; height:24px; }}
 }}
-.admin-panel {{ background:#161b22; border:1px solid #30363d; border-radius:12px; padding:20px; margin-bottom:24px; }}
+.admin-panel {{ background:rgba(22,27,34,.7); border:1px solid rgba(0,220,120,.08); border-radius:12px; padding:20px; margin-bottom:24px; backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); }}
 .admin-header {{ display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }}
 .admin-title {{ font-size:18px; font-weight:600; color:#f0f6fc; }}
 .admin-tabs {{ display:flex; gap:8px; }}
-.tab {{ padding:8px 16px; border-radius:6px; border:1px solid #30363d; background:#0d1117; color:#8b949e; cursor:pointer; font-size:13px; font-weight:500; transition:all 0.2s; }}
-.tab.active {{ background:#58a6ff; color:#0d1117; border-color:#58a6ff; }}
-.tab:hover:not(.active) {{ border-color:#58a6ff; }}
+.tab {{ padding:8px 16px; border-radius:6px; border:1px solid rgba(255,255,255,.06); background:rgba(13,17,23,.6); color:#8b949e; cursor:pointer; font-size:13px; font-weight:500; transition:all 0.2s; }}
+.tab.active {{ background:rgba(0,220,120,.15); color:#00dc78; border-color:rgba(0,220,120,.3); }}
+.tab:hover:not(.active) {{ border-color:rgba(0,220,120,.2); }}
 .tab-content.hidden {{ display:none; }}
 .admin-section h3 {{ font-size:14px; color:#8b949e; margin-bottom:12px; font-weight:500; }}
 .ip-list {{ max-height:300px; overflow-y:auto; }}
-.ip-item {{ display:flex; justify-content:space-between; align-items:center; padding:10px 14px; background:#0d1117; border:1px solid #21262d; border-radius:8px; margin-bottom:8px; font-size:13px; }}
-.ip-item .ip {{ color:#58a6ff; font-family:monospace; }}
+.ip-item {{ display:flex; justify-content:space-between; align-items:center; padding:10px 14px; background:rgba(13,17,23,.6); border:1px solid rgba(255,255,255,.04); border-radius:8px; margin-bottom:8px; font-size:13px; }}
+.ip-item .ip {{ color:#00dc78; font-family:monospace; }}
 .ip-item .meta {{ color:#484f58; font-size:12px; }}
-.console-log {{ background:#0d1117; border:1px solid #21262d; border-radius:8px; padding:12px; max-height:400px; overflow-y:auto; font-family:'Cascadia Code','Fira Code',monospace; font-size:12px; line-height:1.6; color:#8b949e; white-space:pre-wrap; word-break:break-all; }}
+.console-log {{ background:rgba(13,17,23,.6); border:1px solid rgba(255,255,255,.04); border-radius:8px; padding:12px; max-height:400px; overflow-y:auto; font-family:'Cascadia Code','Fira Code',monospace; font-size:12px; line-height:1.6; color:#8b949e; white-space:pre-wrap; word-break:break-all; }}
 .ban-form {{ display:flex; gap:8px; margin-top:12px; }}
-.ban-form input {{ background:#0d1117; border:1px solid #30363d; color:#c9d1d9; padding:8px 12px; border-radius:6px; font-size:13px; outline:none; flex:1; }}
-.ban-form input:focus {{ border-color:#58a6ff; }}
+.ban-form input {{ background:rgba(13,17,23,.6); border:1px solid rgba(255,255,255,.06); color:#c9d1d9; padding:8px 12px; border-radius:6px; font-size:13px; outline:none; flex:1; }}
+.ban-form input:focus {{ border-color:rgba(0,220,120,.3); }}
 .btn-ban {{ background:#da3633; color:#fff; padding:8px 16px; border:none; border-radius:6px; cursor:pointer; font-weight:500; font-size:13px; }}
 .btn-ban:hover {{ background:#f85149; }}
 .btn-unban {{ background:#238636; color:#fff; padding:8px 16px; border:none; border-radius:6px; cursor:pointer; font-weight:500; font-size:13px; }}
 .btn-unban:hover {{ background:#2ea043; }}
 .login-overlay {{ position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.8); display:none; align-items:center; justify-content:center; z-index:1000; }}
 .login-overlay.active {{ display:flex; }}
-.login-box {{ background:#161b22; border:1px solid #30363d; border-radius:12px; padding:32px; width:360px; text-align:center; }}
+.login-box {{ background:rgba(22,27,34,.9); border:1px solid rgba(0,220,120,.15); border-radius:12px; padding:32px; width:360px; text-align:center; backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px); }}
 .login-box h2 {{ color:#f0f6fc; margin-bottom:20px; font-size:20px; }}
-.login-box input {{ width:100%; background:#0d1117; border:1px solid #30363d; color:#c9d1d9; padding:12px 16px; border-radius:8px; font-size:14px; outline:none; margin-bottom:16px; }}
-.login-box input:focus {{ border-color:#58a6ff; }}
+.login-box input {{ width:100%; background:rgba(13,17,23,.6); border:1px solid rgba(255,255,255,.06); color:#c9d1d9; padding:12px 16px; border-radius:8px; font-size:14px; outline:none; margin-bottom:16px; }}
+.login-box input:focus {{ border-color:rgba(0,220,120,.3); }}
 .login-box .btn {{ width:100%; justify-content:center; }}
 </style>
 </head>
 <body>
+<div class="bg-grid"></div>
+<div class="bg-glow"></div>
 <div class="header">
     <div class="header-left">
         <div class="logo"><img src="https://upload.wikimedia.org/wikipedia/commons/b/b2/Roblox_Icon_2022.png" class="roblox-icon" alt="Roblox"><span class="lua">Lua</span> <span class="is">is</span> <span class="game">game</span></div>
