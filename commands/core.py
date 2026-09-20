@@ -1688,6 +1688,26 @@ def _mc_is_forge(server_dir):
         return True
     return False
 
+def _mc_detect_ver(server_dir):
+    libs_dir = os.path.join(server_dir, "libraries", "net", "minecraftforge", "forge")
+    if os.path.isdir(libs_dir):
+        for d in os.listdir(libs_dir):
+            parts = d.split("-")
+            if len(parts) >= 2:
+                return parts[0]
+    return None
+
+def _mc_get_java(server_dir):
+    try:
+        from minecraft_setup import _mc_ver_to_java, _find_java
+        mc_ver = _mc_detect_ver(server_dir)
+        if mc_ver:
+            java_ver = _mc_ver_to_java(mc_ver)
+            return _find_java(java_ver)
+    except Exception:
+        pass
+    return "java"
+
 def _mc_find_forge_args(server_dir):
     forge_dir = os.path.join(server_dir, "libraries", "net", "minecraftforge", "forge")
     if not os.path.isdir(forge_dir):
@@ -1758,6 +1778,7 @@ async def mc_api_start(request):
             buf.append(f"[{time.strftime('%H:%M:%S')}] Still no server.jar after install.")
             return web.json_response({"error": "No server jar after install"}, status=500)
     mem = os.environ.get("MC_MEMORY", "2G")
+    java = _mc_get_java(server_dir)
     if is_forge:
         run_bat = os.path.join(server_dir, "run.bat")
         run_sh = os.path.join(server_dir, "run.sh")
@@ -1784,7 +1805,7 @@ async def mc_api_start(request):
             )
         elif forge_args:
             proc = await asyncio.create_subprocess_exec(
-                "java", f"-Xmx{mem}", f"-Xms{mem}", f"@{forge_args}", "nogui",
+                java, f"-Xmx{mem}", f"-Xms{mem}", f"@{forge_args}", "nogui",
                 cwd=server_dir,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
@@ -1792,7 +1813,7 @@ async def mc_api_start(request):
             )
         elif jar:
             proc = await asyncio.create_subprocess_exec(
-                "java", f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui",
+                java, f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui",
                 cwd=server_dir,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
@@ -1802,7 +1823,7 @@ async def mc_api_start(request):
             return web.json_response({"error": "No Forge launch method found"}, status=500)
     else:
         proc = await asyncio.create_subprocess_exec(
-            "java", f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui",
+            java, f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui",
             cwd=server_dir,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,

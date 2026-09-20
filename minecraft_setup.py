@@ -3,9 +3,65 @@ import subprocess
 import urllib.request
 import json
 import shutil
+import glob
 
 BASE_DIR = os.environ.get("BOT_BASE_DIR", os.path.dirname(os.path.abspath(__file__)))
 MC_DIR = os.path.join(os.path.dirname(BASE_DIR), "minecraft")
+
+
+def _mc_ver_to_java(mc_ver):
+    try:
+        major = int(mc_ver.split(".")[1])
+    except Exception:
+        return 21
+    if major <= 16:
+        return 8
+    elif major <= 17:
+        return 17
+    elif major <= 20:
+        return 17
+    else:
+        return 21
+
+
+def _find_java(java_ver):
+    candidates = []
+    if os.name == "nt":
+        for base in [
+            os.environ.get("JAVA_HOME", ""),
+            r"C:\Program Files\Microsoft",
+            r"C:\Program Files\Eclipse Adoptium",
+            r"C:\Program Files\Java",
+            r"C:\Program Files (x86)\Java",
+        ]:
+            if base and os.path.isdir(base):
+                for d in os.listdir(base):
+                    if f"jdk-{java_ver}" in d.lower() or f"jdk{java_ver}" in d.lower():
+                        p = os.path.join(base, d, "bin", "java.exe")
+                        if os.path.exists(p):
+                            candidates.append(p)
+        for p in glob.glob(r"C:\Program Files\Microsoft\jdk-*\bin\java.exe"):
+            if f"-{java_ver}." in p.lower() or f"-{java_ver}-" in p.lower():
+                candidates.append(p)
+        for p in glob.glob(r"C:\Program Files\Eclipse Adoptium\jdk-*\bin\java.exe"):
+            if f"-{java_ver}." in p.lower() or f"-{java_ver}-" in p.lower():
+                candidates.append(p)
+    else:
+        for pattern in [f"/usr/lib/jvm/java-{java_ver}-*/bin/java", f"/usr/lib/jvm/java-{java_ver}-openjdk*/bin/java"]:
+            candidates.extend(glob.glob(pattern))
+    if candidates:
+        print(f"[MINECRAFT] Found Java {java_ver}: {candidates[0]}")
+        return candidates[0]
+    try:
+        result = subprocess.run(["java", "-version"], capture_output=True, text=True, timeout=5)
+        version_str = result.stderr + result.stdout
+        if f"version \"{java_ver}" in version_str or f"version '{java_ver}" in version_str:
+            print(f"[MINECRAFT] Default java is Java {java_ver}")
+            return "java"
+    except Exception:
+        pass
+    print(f"[MINECRAFT] Java {java_ver} not found, falling back to default java")
+    return "java"
 
 
 def _is_server_folder(path):
@@ -104,6 +160,9 @@ def _install_fabric_server(server_dir):
     installer_ver = "0.11.2"
     print(f"[MINECRAFT] MC {mc_ver}, Loader {loader_ver}, Installer {installer_ver}")
 
+    java_ver = _mc_ver_to_java(mc_ver)
+    java = _find_java(java_ver)
+
     installer_url = f"https://maven.fabricmc.net/net/fabricmc/fabric-installer/{installer_ver}/fabric-installer-{installer_ver}.jar"
     installer_path = os.path.join(server_dir, "fabric-installer.jar")
     if not _download_file(installer_url, installer_path):
@@ -111,7 +170,7 @@ def _install_fabric_server(server_dir):
         return False, None
 
     try:
-        cmd = ["java", "-jar", installer_path, "server", "-mcversion", mc_ver, "-dir", server_dir]
+        cmd = [java, "-jar", installer_path, "server", "-mcversion", mc_ver, "-dir", server_dir]
         if loader_ver:
             cmd.extend(["-loader", loader_ver])
         result = subprocess.run(
@@ -150,6 +209,9 @@ def _install_forge_server(server_dir):
         return False, None
     print(f"[MINECRAFT] MC {mc_ver}, Forge {forge_ver}")
 
+    java_ver = _mc_ver_to_java(mc_ver)
+    java = _find_java(java_ver)
+
     installer_url = f"https://maven.minecraftforge.net/net/minecraftforge/forge/{mc_ver}-{forge_ver}/forge-{mc_ver}-{forge_ver}-installer.jar"
     installer_path = os.path.join(server_dir, f"forge-{mc_ver}-{forge_ver}-installer.jar")
     if not _download_file(installer_url, installer_path):
@@ -158,7 +220,7 @@ def _install_forge_server(server_dir):
 
     try:
         result = subprocess.run(
-            ["java", "-jar", installer_path, "--installServer"],
+            [java, "-jar", installer_path, "--installServer"],
             cwd=server_dir,
             capture_output=True, text=True, timeout=600
         )
@@ -277,9 +339,38 @@ def _is_forge_server(server_dir):
     return False
 
 
+def _detect_mc_ver(server_dir):
+    libs_dir = os.path.join(server_dir, "libraries", "net", "minecraftforge", "forge")
+    if os.path.isdir(libs_dir):
+        for d in os.listdir(libs_dir):
+            parts = d.split("-")
+            if len(parts) >= 2:
+                return parts[0]
+    libs_dir2 = os.path.join(server_dir, "libraries", "net", "fabricmc")
+    if os.path.isdir(libs_dir2):
+        for d in os.listdir(libs_dir2):
+            if d.startswith("fabric-loader-"):
+                pass
+    versions_json = os.path.join(server_dir, "versions")
+    if os.path.isdir(versions_json):
+        for f in os.listdir(versions_json):
+            if f.endswith(".json"):
+                return f.replace(".json", "")
+    return None
+
+
+def _get_java_for_server(server_dir):
+    mc_ver = _detect_mc_ver(server_dir)
+    if mc_ver:
+        java_ver = _mc_ver_to_java(mc_ver)
+        return _find_java(java_ver), mc_ver
+    return "java", None
+
+
 def start_mc_server(server_dir):
     forge = _is_forge_server(server_dir)
     mem = os.environ.get("MC_MEMORY", "2G")
+    java, mc_ver = _get_java_for_server(server_dir)
 
     if forge:
         if os.name == "nt" and os.path.exists(os.path.join(server_dir, "run.bat")):
@@ -321,13 +412,13 @@ def start_mc_server(server_dir):
             if win_args:
                 print(f"[MINECRAFT] Starting Forge via args.txt with {mem}...")
                 return subprocess.Popen(
-                    ["java", f"-Xmx{mem}", f"-Xms{mem}", f"@{win_args}", "nogui"],
+                    [java, f"-Xmx{mem}", f"-Xms{mem}", f"@{win_args}", "nogui"],
                     cwd=server_dir,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
                 )
             print(f"[MINECRAFT] Starting Forge jar {os.path.basename(jar)} with {mem}...")
             return subprocess.Popen(
-                ["java", f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui"],
+                [java, f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui"],
                 cwd=server_dir,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             )
@@ -351,7 +442,7 @@ def start_mc_server(server_dir):
 
     print(f"[MINECRAFT] Starting {os.path.basename(server_dir)} with {mem}...")
     return subprocess.Popen(
-        ["java", f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui"],
+        [java, f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui"],
         cwd=server_dir,
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     )
