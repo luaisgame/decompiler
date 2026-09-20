@@ -1673,7 +1673,29 @@ def _mc_get_servers():
 def _mc_find_jar(server_dir):
     for f in os.listdir(server_dir):
         if f.endswith(".jar") and "installer" not in f.lower():
+            if "forge" in f.lower() or "fabric" in f.lower() or "server" in f.lower():
+                return os.path.join(server_dir, f)
+    for f in os.listdir(server_dir):
+        if f.endswith(".jar") and "installer" not in f.lower():
             return os.path.join(server_dir, f)
+    return None
+
+def _mc_is_forge(server_dir):
+    if os.path.exists(os.path.join(server_dir, "run.bat")) or os.path.exists(os.path.join(server_dir, "run.sh")):
+        return True
+    libs = os.path.join(server_dir, "libraries", "net", "minecraftforge")
+    if os.path.isdir(libs):
+        return True
+    return False
+
+def _mc_find_forge_args(server_dir):
+    forge_dir = os.path.join(server_dir, "libraries", "net", "minecraftforge", "forge")
+    if not os.path.isdir(forge_dir):
+        return None
+    for root, dirs, files in os.walk(forge_dir):
+        for f in files:
+            if f == "win_args.txt":
+                return os.path.join(root, f)
     return None
 
 async def _mc_read_output(name, proc):
@@ -1716,7 +1738,8 @@ async def mc_api_start(request):
     if name in mc_processes and mc_processes[name] is not None and mc_processes[name].returncode is None:
         return web.json_response({"error": "Already running"}, status=400)
     jar = _mc_find_jar(server_dir)
-    if not jar:
+    is_forge = _mc_is_forge(server_dir)
+    if not jar and not is_forge:
         buf = mc_console_buffers.setdefault(name, [])
         buf.append(f"[{time.strftime('%H:%M:%S')}] No server.jar found, installing {loader_type.title()} server...")
         try:
@@ -1730,17 +1753,61 @@ async def mc_api_start(request):
             buf.append(f"[{time.strftime('%H:%M:%S')}] Setup error: {e}")
             return web.json_response({"error": str(e)}, status=500)
         jar = _mc_find_jar(server_dir)
-        if not jar:
+        is_forge = _mc_is_forge(server_dir)
+        if not jar and not is_forge:
             buf.append(f"[{time.strftime('%H:%M:%S')}] Still no server.jar after install.")
             return web.json_response({"error": "No server jar after install"}, status=500)
     mem = os.environ.get("MC_MEMORY", "2G")
-    proc = await asyncio.create_subprocess_exec(
-        "java", f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui",
-        cwd=server_dir,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
+    if is_forge:
+        run_bat = os.path.join(server_dir, "run.bat")
+        run_sh = os.path.join(server_dir, "run.sh")
+        forge_args = _mc_find_forge_args(server_dir)
+        if os.name == "nt" and os.path.exists(run_bat):
+            env = {**os.environ, "JAVA_FLAGS": f"-Xmx{mem} -Xms{mem}"}
+            proc = await asyncio.create_subprocess_exec(
+                "cmd", "/c", "run.bat",
+                cwd=server_dir,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+            )
+        elif os.path.exists(run_sh):
+            env = {**os.environ, "JAVA_FLAGS": f"-Xmx{mem} -Xms{mem}"}
+            proc = await asyncio.create_subprocess_exec(
+                "bash", "run.sh",
+                cwd=server_dir,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+            )
+        elif forge_args:
+            proc = await asyncio.create_subprocess_exec(
+                "java", f"-Xmx{mem}", f"-Xms{mem}", f"@{forge_args}", "nogui",
+                cwd=server_dir,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        elif jar:
+            proc = await asyncio.create_subprocess_exec(
+                "java", f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui",
+                cwd=server_dir,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        else:
+            return web.json_response({"error": "No Forge launch method found"}, status=500)
+    else:
+        proc = await asyncio.create_subprocess_exec(
+            "java", f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui",
+            cwd=server_dir,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
     mc_processes[name] = proc
     mc_console_buffers.setdefault(name, [])
     asyncio.create_task(_mc_read_output(name, proc))

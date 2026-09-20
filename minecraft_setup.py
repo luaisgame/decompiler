@@ -172,6 +172,19 @@ def _install_forge_server(server_dir):
         print(f"[MINECRAFT] Forge installer failed: {e}")
         return False, None
 
+    run_bat = os.path.join(server_dir, "run.bat")
+    run_sh = os.path.join(server_dir, "run.sh")
+    if os.name == "nt" and os.path.exists(run_bat):
+        print(f"[MINECRAFT] Forge run.bat found.")
+    elif os.path.exists(run_sh):
+        print(f"[MINECRAFT] Forge run.sh found.")
+    else:
+        print("[MINECRAFT] No run script found after Forge install. Looking for args.txt...")
+        for root, dirs, files in os.walk(server_dir):
+            for f in files:
+                if f == "win_args.txt" or f == "unix_args.txt":
+                    print(f"[MINECRAFT] Found args file: {os.path.join(root, f)}")
+
     eula_path = os.path.join(server_dir, "eula.txt")
     if not os.path.exists(eula_path):
         with open(eula_path, "w") as f:
@@ -255,11 +268,76 @@ def start_playit():
     return None
 
 
+def _is_forge_server(server_dir):
+    if os.path.exists(os.path.join(server_dir, "run.bat")) or os.path.exists(os.path.join(server_dir, "run.sh")):
+        return True
+    libs = os.path.join(server_dir, "libraries", "net", "minecraftforge")
+    if os.path.isdir(libs):
+        return True
+    return False
+
+
 def start_mc_server(server_dir):
+    forge = _is_forge_server(server_dir)
+    mem = os.environ.get("MC_MEMORY", "2G")
+
+    if forge:
+        if os.name == "nt" and os.path.exists(os.path.join(server_dir, "run.bat")):
+            print(f"[MINECRAFT] Starting Forge server via run.bat with {mem}...")
+            return subprocess.Popen(
+                ["cmd", "/c", "run.bat"],
+                cwd=server_dir,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                env={**os.environ, "JAVA_FLAGS": f"-Xmx{mem} -Xms{mem}"}
+            )
+        elif os.path.exists(os.path.join(server_dir, "run.sh")):
+            print(f"[MINECRAFT] Starting Forge server via run.sh with {mem}...")
+            return subprocess.Popen(
+                ["bash", "run.sh"],
+                cwd=server_dir,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                env={**os.environ, "JAVA_FLAGS": f"-Xmx{mem} -Xms{mem}"}
+            )
+        jar = None
+        for f in os.listdir(server_dir):
+            if f.endswith(".jar") and "universal" in f.lower():
+                jar = os.path.join(server_dir, f)
+                break
+        if not jar:
+            for f in os.listdir(server_dir):
+                if f.endswith(".jar") and "installer" not in f.lower():
+                    jar = os.path.join(server_dir, f)
+                    break
+        if jar:
+            args_file = os.path.join(server_dir, "libraries", "net", "minecraftforge", "forge")
+            win_args = None
+            for root, dirs, files in os.walk(args_file):
+                for f in files:
+                    if f == "win_args.txt":
+                        win_args = os.path.join(root, f)
+                        break
+                if win_args:
+                    break
+            if win_args:
+                print(f"[MINECRAFT] Starting Forge via args.txt with {mem}...")
+                return subprocess.Popen(
+                    ["java", f"-Xmx{mem}", f"-Xms{mem}", f"@{win_args}", "nogui"],
+                    cwd=server_dir,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                )
+            print(f"[MINECRAFT] Starting Forge jar {os.path.basename(jar)} with {mem}...")
+            return subprocess.Popen(
+                ["java", f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui"],
+                cwd=server_dir,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            )
+        print(f"[MINECRAFT] No Forge jar or run script found in {server_dir}")
+        return None
+
     jar = None
     for f in os.listdir(server_dir):
-        if f.endswith(".jar") and ("installer" not in f.lower()):
-            if "forge" in f.lower() or "fabric" in f.lower() or "server" in f.lower():
+        if f.endswith(".jar") and ("fabric" in f.lower() or "server" in f.lower()):
+            if "installer" not in f.lower():
                 jar = os.path.join(server_dir, f)
                 break
     if not jar:
@@ -271,7 +349,6 @@ def start_mc_server(server_dir):
         print(f"[MINECRAFT] No server jar found in {server_dir}")
         return None
 
-    mem = os.environ.get("MC_MEMORY", "2G")
     print(f"[MINECRAFT] Starting {os.path.basename(server_dir)} with {mem}...")
     return subprocess.Popen(
         ["java", f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui"],
