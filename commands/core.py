@@ -1785,6 +1785,71 @@ async def mc_api_console(request):
     buf = mc_console_buffers.get(name, [])
     return web.json_response({"lines": buf[-200:]})
 
+
+async def mc_api_mods(request):
+    name = request.query.get("name", "")
+    server_dir = os.path.join(MC_DIR, name)
+    mods_dir = os.path.join(server_dir, "mods")
+    if not os.path.isdir(mods_dir):
+        return web.json_response({"mods": []})
+    mods = []
+    for f in sorted(os.listdir(mods_dir)):
+        if f.endswith(".jar"):
+            fp = os.path.join(mods_dir, f)
+            mods.append({"name": f, "size": os.path.getsize(fp)})
+    return web.json_response({"mods": mods})
+
+
+async def mc_api_upload_mod(request):
+    if not _get_user_info(request):
+        return web.json_response({"error": "Not logged in"}, status=401)
+    reader = await request.multipart()
+    field = await reader.next()
+    if not field or field.name != "file":
+        return web.json_response({"error": "No file"}, status=400)
+    server_name = None
+    while True:
+        part = await reader.next()
+        if not part:
+            break
+        if part.name == "server":
+            server_name = (await part.read()).decode()
+    if not server_name:
+        return web.json_response({"error": "No server name"}, status=400)
+    filename = field.filename
+    if not filename or not filename.endswith(".jar"):
+        return web.json_response({"error": "Only .jar files allowed"}, status=400)
+    server_dir = os.path.join(MC_DIR, server_name)
+    mods_dir = os.path.join(server_dir, "mods")
+    os.makedirs(mods_dir, exist_ok=True)
+    dest = os.path.join(mods_dir, filename)
+    with open(dest, "wb") as f:
+        while True:
+            chunk = await field.read_chunk(8192)
+            if not chunk:
+                break
+            f.write(chunk)
+    buf = mc_console_buffers.setdefault(server_name, [])
+    buf.append(f"[{time.strftime('%H:%M:%S')}] Mod installed: {filename}")
+    return web.json_response({"ok": True, "name": filename})
+
+
+async def mc_api_delete_mod(request):
+    if not _get_user_info(request):
+        return web.json_response({"error": "Not logged in"}, status=401)
+    data = await request.json()
+    name = data.get("name", "")
+    mod = data.get("mod", "")
+    if not name or not mod:
+        return web.json_response({"error": "Missing params"}, status=400)
+    mod_path = os.path.join(MC_DIR, name, "mods", mod)
+    if not os.path.isfile(mod_path):
+        return web.json_response({"error": "Mod not found"}, status=404)
+    os.remove(mod_path)
+    buf = mc_console_buffers.setdefault(name, [])
+    buf.append(f"[{time.strftime('%H:%M:%S')}] Mod removed: {mod}")
+    return web.json_response({"ok": True})
+
 async def mc_ws_console(request):
     name = request.match_info.get("name", "")
     ws = web.WebSocketResponse()
@@ -1910,6 +1975,36 @@ body{
 .console-header .actions .start:hover{background:rgba(34,197,94,.08);border-color:rgba(34,197,94,.4)}
 .console-header .actions .stop{border-color:rgba(239,68,68,.25);color:#ef4444}
 .console-header .actions .stop:hover{background:rgba(239,68,68,.08);border-color:rgba(239,68,68,.4)}
+.console-header .actions .mods{border-color:rgba(88,101,242,.25);color:#5865f2}
+.console-header .actions .mods:hover{background:rgba(88,101,242,.08);border-color:rgba(88,101,242,.4)}
+.console-header .actions .mods.active{background:rgba(88,101,242,.1);border-color:rgba(88,101,242,.4)}
+.mods-panel{
+  border-bottom:1px solid rgba(88,101,242,.08);background:rgba(13,13,20,.9);
+  padding:12px 20px;flex-shrink:0;max-height:200px;overflow-y:auto;
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)
+}
+.mods-panel .mods-title{font-size:12px;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between}
+.mods-panel .mods-title label{
+  padding:4px 10px;border-radius:6px;border:1px solid rgba(88,101,242,.25);
+  background:rgba(88,101,242,.05);color:#5865f2;font-size:11px;cursor:pointer;
+  font-family:inherit;transition:all .2s;font-weight:500;text-transform:none;letter-spacing:0
+}
+.mods-panel .mods-title label:hover{background:rgba(88,101,242,.1);border-color:rgba(88,101,242,.4)}
+.mods-panel .mod-item{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:6px 10px;border-radius:6px;margin-bottom:2px;
+  transition:background .15s;border:1px solid transparent
+}
+.mods-panel .mod-item:hover{background:rgba(255,255,255,.03);border-color:rgba(255,255,255,.04)}
+.mods-panel .mod-item .mod-name{font-size:12px;color:rgba(255,255,255,.7)}
+.mods-panel .mod-item .mod-size{font-size:11px;color:rgba(255,255,255,.25);margin-left:8px}
+.mods-panel .mod-item .mod-del{
+  padding:2px 8px;border-radius:4px;border:1px solid rgba(239,68,68,.2);
+  background:transparent;color:rgba(239,68,68,.5);font-size:10px;cursor:pointer;
+  font-family:inherit;transition:all .2s
+}
+.mods-panel .mod-item .mod-del:hover{background:rgba(239,68,68,.1);color:#ef4444;border-color:rgba(239,68,68,.4)}
+.mods-panel .no-mods{font-size:12px;color:rgba(255,255,255,.2);padding:8px 0}
 .console-output{
   flex:1;overflow-y:auto;padding:12px 20px;font-size:12.5px;line-height:1.7;
   color:rgba(255,255,255,.65);white-space:pre-wrap;word-break:break-all;
@@ -2010,11 +2105,12 @@ function createServer(){
 function selectServer(name){
   activeServer=name;
   autoScroll=true;
+  modsVisible=false;
   loadServers();
   connectWS(name);
   fetch('/api/mc/console?name='+encodeURIComponent(name)).then(function(r){return r.json()}).then(function(d){
     var wrap=document.getElementById('consoleWrap');
-    wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button></div></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
+    wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
     var out=document.getElementById('consoleOutput');
     out.addEventListener('scroll',function(){
       var atBottom=out.scrollHeight-out.scrollTop-out.clientHeight<50;
@@ -2023,6 +2119,44 @@ function selectServer(name){
     (d.lines||[]).forEach(function(line){appendLine(out,line,false)});
     out.scrollTop=out.scrollHeight;
     document.getElementById('cmdInput').focus();
+    if(userInfo)loadMods();
+  });
+}
+var modsVisible=false;
+function toggleMods(){
+  modsVisible=!modsVisible;
+  var panel=document.getElementById('modsPanel');
+  var btn=document.getElementById('modsBtn');
+  if(!panel)return;
+  if(modsVisible){panel.style.display='';btn.classList.add('active');loadMods()}
+  else{panel.style.display='none';btn.classList.remove('active')}
+}
+function loadMods(){
+  if(!activeServer)return;
+  fetch('/api/mc/mods?name='+encodeURIComponent(activeServer)).then(function(r){return r.json()}).then(function(d){
+    var panel=document.getElementById('modsPanel');if(!panel)return;
+    var mods=d.mods||[];
+    var h='<div class="mods-title">Installed Mods ('+mods.length+')<label>Upload Mod<input type="file" accept=".jar" style="display:none" onchange="uploadMod(this)"></label></div>';
+    if(mods.length===0){h+='<div class="no-mods">No mods installed</div>'}
+    else{mods.forEach(function(m){
+      h+='<div class="mod-item"><span class="mod-name">'+m.name+'<span class="mod-size">'+formatSize(m.size)+'</span></span><button class="mod-del" onclick="deleteMod(\''+m.name.replace(/'/g,"\\'")+'\')">Remove</button></div>'
+    })}
+    panel.innerHTML=h;
+  });
+}
+function formatSize(b){if(b>1048576)return(b/1048576).toFixed(1)+'MB';return(b/1024).toFixed(0)+'KB'}
+function uploadMod(input){
+  var file=input.files[0];if(!file)return;
+  var fd=new FormData();fd.append('file',file);fd.append('server',activeServer);
+  fetch('/api/mc/upload-mod',{method:'POST',body:fd}).then(function(r){return r.json()}).then(function(d){
+    if(d.error){alert(d.error);return}loadMods();
+    var out=document.getElementById('consoleOutput');if(out)appendLine(out,'['+new Date().toTimeString().slice(0,8)+'] Mod installed: '+d.name,false);
+  });
+}
+function deleteMod(mod){
+  if(!confirm('Remove '+mod+'?'))return;
+  fetch('/api/mc/delete-mod',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:activeServer,mod:mod})}).then(function(r){return r.json()}).then(function(d){
+    if(d.error){alert(d.error);return}loadMods();
   });
 }
 function appendLine(out,line,isWs){
@@ -2096,6 +2230,9 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_post("/api/mc/stop", mc_api_stop)
     app.router.add_post("/api/mc/command", mc_api_command)
     app.router.add_get("/api/mc/console", mc_api_console)
+    app.router.add_get("/api/mc/mods", mc_api_mods)
+    app.router.add_post("/api/mc/upload-mod", mc_api_upload_mod)
+    app.router.add_post("/api/mc/delete-mod", mc_api_delete_mod)
     app.router.add_get("/ws/mc/{name}", mc_ws_console)
     app.router.add_get("/{filename}", handle_download)
     runner = web.AppRunner(app)
