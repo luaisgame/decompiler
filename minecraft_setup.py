@@ -367,6 +367,27 @@ def _get_java_for_server(server_dir):
     return "java", None
 
 
+FORGE_JVM_ARGS = [
+    "--add-opens", "java.base/java.lang=ALL-UNNAMED",
+    "--add-opens", "java.base/java.lang.invoke=ALL-UNNAMED",
+    "--add-opens", "java.base/java.util=ALL-UNNAMED",
+    "--add-opens", "java.base/java.nio=ALL-UNNAMED",
+    "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",
+    "--add-opens", "java.base/java.io=ALL-UNNAMED",
+    "--add-opens", "java.base/sun.security.ssl=ALL-UNNAMED",
+    "--add-opens", "java.base/sun.security.util=ALL-UNNAMED",
+    "--add-opens", "java.base/java.net=ALL-UNNAMED",
+]
+
+
+def _find_user_jvm_args(server_dir):
+    for name in ["user_jvm_args.txt", ".javaargs"]:
+        p = os.path.join(server_dir, name)
+        if os.path.exists(p):
+            return p
+    return None
+
+
 def start_mc_server(server_dir):
     forge = _is_forge_server(server_dir)
     mem = os.environ.get("MC_MEMORY", "2G")
@@ -379,7 +400,7 @@ def start_mc_server(server_dir):
                 ["cmd", "/c", "run.bat"],
                 cwd=server_dir,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                env={**os.environ, "JAVA_FLAGS": f"-Xmx{mem} -Xms{mem}"}
+                env={**os.environ, "JAVA_FLAGS": f"-Xmx{mem} -Xms{mem} {' '.join(FORGE_JVM_ARGS)}"}
             )
         elif os.path.exists(os.path.join(server_dir, "run.sh")):
             print(f"[MINECRAFT] Starting Forge server via run.sh with {mem}...")
@@ -387,7 +408,7 @@ def start_mc_server(server_dir):
                 ["bash", "run.sh"],
                 cwd=server_dir,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                env={**os.environ, "JAVA_FLAGS": f"-Xmx{mem} -Xms{mem}"}
+                env={**os.environ, "JAVA_FLAGS": f"-Xmx{mem} -Xms{mem} {' '.join(FORGE_JVM_ARGS)}"}
             )
         jar = None
         for f in os.listdir(server_dir):
@@ -410,15 +431,22 @@ def start_mc_server(server_dir):
                 if win_args:
                     break
             if win_args:
+                user_args = _find_user_jvm_args(server_dir)
+                extra = []
+                if user_args:
+                    with open(user_args, "r") as uf:
+                        extra = [l.strip() for l in uf.readlines() if l.strip() and not l.strip().startswith("#")]
+                else:
+                    extra = FORGE_JVM_ARGS
                 print(f"[MINECRAFT] Starting Forge via args.txt with {mem}...")
                 return subprocess.Popen(
-                    [java, f"-Xmx{mem}", f"-Xms{mem}", f"@{win_args}", "nogui"],
+                    [java, f"-Xmx{mem}", f"-Xms{mem}"] + extra + [f"@{win_args}", "nogui"],
                     cwd=server_dir,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
                 )
             print(f"[MINECRAFT] Starting Forge jar {os.path.basename(jar)} with {mem}...")
             return subprocess.Popen(
-                [java, f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui"],
+                [java, f"-Xmx{mem}", f"-Xms{mem}"] + FORGE_JVM_ARGS + ["-jar", jar, "nogui"],
                 cwd=server_dir,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             )

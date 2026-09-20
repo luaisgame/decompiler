@@ -1708,6 +1708,25 @@ def _mc_get_java(server_dir):
         pass
     return "java"
 
+FORGE_JVM_ARGS = [
+    "--add-opens", "java.base/java.lang=ALL-UNNAMED",
+    "--add-opens", "java.base/java.lang.invoke=ALL-UNNAMED",
+    "--add-opens", "java.base/java.util=ALL-UNNAMED",
+    "--add-opens", "java.base/java.nio=ALL-UNNAMED",
+    "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",
+    "--add-opens", "java.base/java.io=ALL-UNNAMED",
+    "--add-opens", "java.base/sun.security.ssl=ALL-UNNAMED",
+    "--add-opens", "java.base/sun.security.util=ALL-UNNAMED",
+    "--add-opens", "java.base/java.net=ALL-UNNAMED",
+]
+
+def _mc_find_user_jvm_args(server_dir):
+    for name in ["user_jvm_args.txt", ".javaargs"]:
+        p = os.path.join(server_dir, name)
+        if os.path.exists(p):
+            return p
+    return None
+
 def _mc_find_forge_args(server_dir):
     forge_dir = os.path.join(server_dir, "libraries", "net", "minecraftforge", "forge")
     if not os.path.isdir(forge_dir):
@@ -1779,12 +1798,14 @@ async def mc_api_start(request):
             return web.json_response({"error": "No server jar after install"}, status=500)
     mem = os.environ.get("MC_MEMORY", "2G")
     java = _mc_get_java(server_dir)
+    forge_jvm_args_str = " ".join(FORGE_JVM_ARGS)
     if is_forge:
         run_bat = os.path.join(server_dir, "run.bat")
         run_sh = os.path.join(server_dir, "run.sh")
         forge_args = _mc_find_forge_args(server_dir)
+        user_jvm = _mc_find_user_jvm_args(server_dir)
         if os.name == "nt" and os.path.exists(run_bat):
-            env = {**os.environ, "JAVA_FLAGS": f"-Xmx{mem} -Xms{mem}"}
+            env = {**os.environ, "JAVA_FLAGS": f"-Xmx{mem} -Xms{mem} {forge_jvm_args_str}"}
             proc = await asyncio.create_subprocess_exec(
                 "cmd", "/c", "run.bat",
                 cwd=server_dir,
@@ -1794,7 +1815,7 @@ async def mc_api_start(request):
                 env=env,
             )
         elif os.path.exists(run_sh):
-            env = {**os.environ, "JAVA_FLAGS": f"-Xmx{mem} -Xms{mem}"}
+            env = {**os.environ, "JAVA_FLAGS": f"-Xmx{mem} -Xms{mem} {forge_jvm_args_str}"}
             proc = await asyncio.create_subprocess_exec(
                 "bash", "run.sh",
                 cwd=server_dir,
@@ -1804,8 +1825,14 @@ async def mc_api_start(request):
                 env=env,
             )
         elif forge_args:
+            extra_args = []
+            if user_jvm:
+                with open(user_jvm, "r") as uf:
+                    extra_args = [l.strip() for l in uf.readlines() if l.strip() and not l.strip().startswith("#")]
+            else:
+                extra_args = FORGE_JVM_ARGS
             proc = await asyncio.create_subprocess_exec(
-                java, f"-Xmx{mem}", f"-Xms{mem}", f"@{forge_args}", "nogui",
+                java, f"-Xmx{mem}", f"-Xms{mem}", *extra_args, f"@{forge_args}", "nogui",
                 cwd=server_dir,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
@@ -1813,7 +1840,7 @@ async def mc_api_start(request):
             )
         elif jar:
             proc = await asyncio.create_subprocess_exec(
-                java, f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui",
+                java, f"-Xmx{mem}", f"-Xms{mem}", *FORGE_JVM_ARGS, "-jar", jar, "nogui",
                 cwd=server_dir,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
