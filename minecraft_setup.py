@@ -11,6 +11,21 @@ MC_DIR = os.path.join(os.path.dirname(BASE_DIR), "minecraft")
 
 def _mc_ver_to_java(mc_ver):
     try:
+        manifest_url = "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json"
+        with urllib.request.urlopen(manifest_url, timeout=15) as resp:
+            manifest = json.loads(resp.read())
+        version_entry = next((v for v in manifest["versions"] if v["id"] == mc_ver), None)
+        if version_entry:
+            with urllib.request.urlopen(version_entry["url"], timeout=15) as resp:
+                version_meta = json.loads(resp.read())
+            java_info = version_meta.get("javaVersion", {})
+            major_version = java_info.get("majorVersion")
+            if major_version:
+                print(f"[MINECRAFT] Mojang says MC {mc_ver} needs Java {major_version}")
+                return major_version
+    except Exception as e:
+        print(f"[MINECRAFT] Failed to query Mojang for Java version: {e}")
+    try:
         major = int(mc_ver.split(".")[1])
     except Exception:
         return 21
