@@ -2234,7 +2234,7 @@ function checkAuth(){
   return true;
 }
 function loadServers(){
-  fetch('/api/mc/servers').then(function(r){return r.json()}).then(function(d){
+  fetch('/api/mc/servers',{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
     var el=document.getElementById('serverList');if(!el)return;el.innerHTML='';
     (d.servers||[]).forEach(function(s){
       var item=document.createElement('div');
@@ -2262,7 +2262,7 @@ function selectServer(name){
   modsVisible=false;
   loadServers();
   connectWS(name);
-  fetch('/api/mc/console?name='+encodeURIComponent(name)).then(function(r){return r.json()}).then(function(d){
+  fetch('/api/mc/console?name='+encodeURIComponent(name),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
     var wrap=document.getElementById('consoleWrap');
     wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
     var out=document.getElementById('consoleOutput');
@@ -2287,7 +2287,7 @@ function toggleMods(){
 }
 function loadMods(){
   if(!activeServer)return;
-  fetch('/api/mc/mods?name='+encodeURIComponent(activeServer)).then(function(r){return r.json()}).then(function(d){
+  fetch('/api/mc/mods?name='+encodeURIComponent(activeServer),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
     var panel=document.getElementById('modsPanel');if(!panel)return;
     var mods=d.mods||[];
     var h='<div class="mods-title">Installed Mods ('+mods.length+')<label>Upload Mod<input type="file" accept=".jar" style="display:none" onchange="uploadMod(this)"></label></div>';
