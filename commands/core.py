@@ -1821,63 +1821,146 @@ MC_PAGE_HTML = r'''<!DOCTYPE html>
 <title>MC Console</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#0a0a0f;color:#e0e0e0;font-family:'Consolas','Courier New',monospace;height:100vh;display:flex;flex-direction:column;overflow:hidden}
-.topbar{display:flex;align-items:center;justify-content:space-between;padding:10px 20px;background:#0d0d14;border-bottom:1px solid rgba(255,255,255,.06);flex-shrink:0}
+body{
+  background:#050508;color:#e0e0e0;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+  height:100vh;display:flex;flex-direction:column;overflow:hidden;position:relative
+}
+.bg-grid{
+  position:fixed;top:0;left:0;width:100%;height:100%;z-index:0;pointer-events:none;
+  background-image:
+    linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px);
+  background-size:60px 60px;
+}
+.bg-glow{
+  position:fixed;width:600px;height:600px;border-radius:50%;
+  background:radial-gradient(circle,rgba(0,200,120,.06),transparent 70%);
+  top:50%;left:50%;transform:translate(-50%,-50%);z-index:0;pointer-events:none;
+  animation:pulse 6s ease-in-out infinite alternate
+}
+@keyframes pulse{
+  0%{opacity:.6;transform:translate(-50%,-50%) scale(1)}
+  100%{opacity:1;transform:translate(-50%,-50%) scale(1.15)}
+}
+.topbar{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 20px;background:rgba(13,13,20,.8);
+  border-bottom:1px solid rgba(0,220,120,.1);flex-shrink:0;position:relative;z-index:10;
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)
+}
 .topbar .logo{font-size:18px;font-weight:700;color:#fff}
-.topbar .logo span{color:#00dc78}
+.topbar .logo .lua{color:#00dc78}
 .topbar .user{display:flex;align-items:center;gap:10px;font-size:13px;color:rgba(255,255,255,.5)}
-.topbar .user img{width:28px;height:28px;border-radius:50%}
+.topbar .user img{width:28px;height:28px;border-radius:50%;border:1.5px solid rgba(0,220,120,.2)}
 .topbar .user .name{color:#fff;font-weight:600}
-.main{display:flex;flex:1;overflow:hidden}
-.sidebar{width:220px;background:#0d0d14;border-right:1px solid rgba(255,255,255,.06);display:flex;flex-direction:column;flex-shrink:0}
-.sidebar .title{padding:14px 16px 10px;font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:rgba(255,255,255,.3);font-weight:600}
+.main{display:flex;flex:1;overflow:hidden;position:relative;z-index:1}
+.sidebar{
+  width:220px;background:rgba(13,13,20,.8);
+  border-right:1px solid rgba(0,220,120,.08);display:flex;flex-direction:column;flex-shrink:0;
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)
+}
+.sidebar .title{padding:14px 16px 10px;font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:rgba(0,220,120,.4);font-weight:600}
 .server-list{flex:1;overflow-y:auto;padding:0 8px}
-.server-item{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:8px;cursor:pointer;transition:background .15s;margin-bottom:2px}
-.server-item:hover{background:rgba(255,255,255,.04)}
-.server-item.active{background:rgba(0,220,120,.08);border:1px solid rgba(0,220,120,.15)}
-.server-item .name{font-size:13px;font-weight:500}
+.server-item{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 12px;border-radius:8px;cursor:pointer;transition:all .15s;margin-bottom:2px;
+  border:1px solid transparent
+}
+.server-item:hover{background:rgba(255,255,255,.03);border-color:rgba(255,255,255,.04)}
+.server-item.active{background:rgba(0,220,120,.06);border-color:rgba(0,220,120,.15)}
+.server-item .name{font-size:13px;font-weight:500;color:rgba(255,255,255,.8)}
+.server-item.active .name{color:#fff}
 .server-item .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 .server-item .dot.on{background:#22c55e;box-shadow:0 0 6px rgba(34,197,94,.5)}
-.server-item .dot.off{background:#ef4444}
+.server-item .dot.off{background:rgba(255,255,255,.15)}
+.sidebar-bottom{padding:8px}
+.sidebar-bottom input{
+  width:100%;padding:8px 10px;border-radius:8px;
+  border:1px solid rgba(255,255,255,.06);background:rgba(255,255,255,.03);
+  color:#fff;font-size:12px;font-family:inherit;outline:none;margin-bottom:6px;
+  transition:border-color .2s
+}
+.sidebar-bottom input:focus{border-color:rgba(0,220,120,.3)}
+.sidebar-bottom input::placeholder{color:rgba(255,255,255,.2)}
+.sidebar-bottom button{
+  width:100%;padding:8px;border-radius:8px;
+  border:1px solid rgba(0,220,120,.2);background:rgba(0,220,120,.04);
+  color:rgba(0,220,120,.8);font-size:12px;font-family:inherit;cursor:pointer;
+  transition:all .2s;font-weight:500
+}
+.sidebar-bottom button:hover{background:rgba(0,220,120,.08);border-color:rgba(0,220,120,.35);color:#00dc78}
 .console-wrap{flex:1;display:flex;flex-direction:column;overflow:hidden}
-.console-header{display:flex;align-items:center;justify-content:space-between;padding:10px 20px;background:#0d0d14;border-bottom:1px solid rgba(255,255,255,.06);flex-shrink:0}
+.console-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 20px;background:rgba(13,13,20,.8);
+  border-bottom:1px solid rgba(0,220,120,.08);flex-shrink:0;
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)
+}
 .console-header .server-name{font-size:15px;font-weight:600;color:#fff}
 .console-header .actions{display:flex;gap:8px}
-.console-header .actions button{padding:6px 14px;border-radius:6px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);color:rgba(255,255,255,.6);font-size:12px;cursor:pointer;font-family:inherit;transition:all .2s}
-.console-header .actions button:hover{background:rgba(255,255,255,.06);color:#fff}
-.console-header .actions .start{border-color:rgba(34,197,94,.3);color:#22c55e}
-.console-header .actions .start:hover{background:rgba(34,197,94,.1)}
-.console-header .actions .stop{border-color:rgba(239,68,68,.3);color:#ef4444}
-.console-header .actions .stop:hover{background:rgba(239,68,68,.1)}
-.console-output{flex:1;overflow-y:auto;padding:12px 20px;font-size:12.5px;line-height:1.7;color:rgba(255,255,255,.7);white-space:pre-wrap;word-break:break-all}
-.console-output .ts{color:rgba(255,255,255,.25);margin-right:6px}
-.console-input-wrap{display:flex;align-items:center;padding:10px 20px;background:#0d0d14;border-top:1px solid rgba(255,255,255,.06);flex-shrink:0}
+.console-header .actions button{
+  padding:6px 14px;border-radius:8px;border:1px solid rgba(255,255,255,.06);
+  background:rgba(255,255,255,.02);color:rgba(255,255,255,.5);font-size:12px;
+  cursor:pointer;font-family:inherit;transition:all .2s;font-weight:500
+}
+.console-header .actions button:hover{background:rgba(255,255,255,.05);color:#fff}
+.console-header .actions .start{border-color:rgba(34,197,94,.25);color:#22c55e}
+.console-header .actions .start:hover{background:rgba(34,197,94,.08);border-color:rgba(34,197,94,.4)}
+.console-header .actions .stop{border-color:rgba(239,68,68,.25);color:#ef4444}
+.console-header .actions .stop:hover{background:rgba(239,68,68,.08);border-color:rgba(239,68,68,.4)}
+.console-output{
+  flex:1;overflow-y:auto;padding:12px 20px;font-size:12.5px;line-height:1.7;
+  color:rgba(255,255,255,.65);white-space:pre-wrap;word-break:break-all;
+  font-family:'Consolas','Courier New',monospace;background:rgba(5,5,8,.5)
+}
+.console-output .ts{color:rgba(0,220,120,.35);margin-right:6px}
+.console-output .err{color:rgba(239,68,68,.7)}
+.console-input-wrap{
+  display:flex;align-items:center;padding:10px 20px;
+  background:rgba(13,13,20,.8);
+  border-top:1px solid rgba(0,220,120,.08);flex-shrink:0;
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)
+}
 .console-input-wrap .prompt{color:#00dc78;font-weight:700;margin-right:8px;font-size:13px}
-.console-input-wrap input{flex:1;background:transparent;border:none;color:#fff;font-size:13px;font-family:inherit;outline:none}
-.console-input-wrap input::placeholder{color:rgba(255,255,255,.2)}
-.no-servers{display:flex;align-items:center;justify-content:center;flex:1;color:rgba(255,255,255,.2);font-size:14px}
+.console-input-wrap input{
+  flex:1;background:transparent;border:none;color:#fff;font-size:13px;
+  font-family:'Consolas','Courier New',monospace;outline:none
+}
+.console-input-wrap input::placeholder{color:rgba(255,255,255,.15)}
+.no-servers{display:flex;align-items:center;justify-content:center;flex:1;color:rgba(255,255,255,.15);font-size:14px}
 ::-webkit-scrollbar{width:6px}
 ::-webkit-scrollbar-track{background:transparent}
-::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:3px}
+::-webkit-scrollbar-thumb{background:rgba(255,255,255,.06);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.1)}
+@media(max-width:480px){
+  .sidebar{width:160px}
+  .sidebar .title{font-size:10px}
+  .server-item .name{font-size:12px}
+}
 </style>
 </head>
 <body>
+<div class="bg-grid"></div>
+<div class="bg-glow"></div>
 <div class="topbar">
-  <div class="logo">MC <span>Console</span></div>
+  <div class="logo"><span class="lua">MC</span> Console</div>
   <div class="user" id="userInfo"></div>
 </div>
 <div class="main">
-    <div class="sidebar">
+  <div class="sidebar">
     <div class="title">Servers</div>
     <div class="server-list" id="serverList"></div>
-    <div style="padding:8px"><input type="text" id="newServerName" placeholder="New server name..." style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.04);color:#fff;font-size:12px;font-family:inherit;outline:none;margin-bottom:6px" onkeydown="if(event.key==='Enter')createServer()"><button onclick="createServer()" style="width:100%;padding:8px;border-radius:6px;border:1px solid rgba(0,220,120,.3);background:rgba(0,220,120,.05);color:#00dc78;font-size:12px;font-family:inherit;cursor:pointer">+ Create Server</button></div>
+    <div class="sidebar-bottom">
+      <input type="text" id="newServerName" placeholder="New server name..." onkeydown="if(event.key==='Enter')createServer()">
+      <button onclick="createServer()">+ Create Server</button>
+    </div>
   </div>
   <div class="console-wrap" id="consoleWrap">
     <div class="no-servers" id="noSelect">Select a server</div>
   </div>
 </div>
 <script>
-var userInfo=null,activeServer=null,ws=null;
+var userInfo=null,activeServer=null,ws=null,autoScroll=true;
 function parseCookie(){var c=document.cookie.split(';').map(function(s){return s.trim()});for(var i=0;i<c.length;i++){if(c[i].indexOf('user_info=')===0){try{return JSON.parse(decodeURIComponent(c[i].substring(10)))}catch(e){}}}return null}
 function checkAuth(){
   var hash=window.location.hash;
@@ -1894,7 +1977,7 @@ function checkAuth(){
   }
   userInfo=parseCookie();
   if(!userInfo){
-    document.getElementById('consoleWrap').innerHTML='<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;gap:16px"><div style="font-size:18px;color:rgba(255,255,255,.5)">Login to access servers</div><a href="/api/auth/login" style="padding:12px 24px;border-radius:10px;border:1.5px solid rgba(88,101,242,.5);background:rgba(88,101,242,.08);color:#5865f2;font-size:14px;font-weight:600;text-decoration:none;font-family:inherit;transition:all .3s">Login with Discord</a></div>';
+    document.getElementById('consoleWrap').innerHTML='<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;gap:16px"><div style="font-size:18px;color:rgba(255,255,255,.4)">Login to access servers</div><a href="/api/auth/login" style="padding:12px 24px;border-radius:12px;border:1.5px solid rgba(88,101,242,.4);background:transparent;color:rgba(88,101,242,.8);font-size:14px;font-weight:600;text-decoration:none;font-family:inherit;transition:all .3s;display:flex;align-items:center;gap:8px"><svg width="18" height="14" viewBox="0 0 71 55" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M60.1 4.9A58.5 58.5 0 0 0 45.4.2a.2.2 0 0 0-.2.1 40.8 40.8 0 0 0-1.8 3.7 54 54 0 0 0-16.2 0 26.5 26.5 0 0 0-1.8-3.7.2.2 0 0 0-.2-.1A58.4 58.4 0 0 0 10.9 4.9a.2.2 0 0 0-.1.1C1.6 18.4-.5 31.7.5 44.8a.2.2 0 0 0 .1.1 58.7 58.7 0 0 0 17.7 9 .2.2 0 0 0 .2-.1 42 42 0 0 0 3.6-5.9.2.2 0 0 0-.1-.3 38.7 38.7 0 0 1-5.5-2.6.2.2 0 0 1 0-.4c.4-.3.7-.6 1.1-.9a.2.2 0 0 1 .2 0c11.5 5.3 24 5.3 35.4 0a.2.2 0 0 1 .2 0l1.1.9a.2.2 0 0 1 0 .4c-1.8 1-3.6 1.9-5.6 2.6a.2.2 0 0 0-.1.3 47.2 47.2 0 0 0 3.7 5.9.2.2 0 0 0 .2.1 58.5 58.5 0 0 0 17.7-9 .2.2 0 0 0 .1-.1c1.2-15-2-28.3-8.5-39.8a.2.2 0 0 0-.1-.1ZM23.7 36.3c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1 6.5 3.2 6.4 7.1-2.8 7.1-6.4 7.1Zm23.6 0c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1 6.5 3.2 6.4 7.1-2.8 7.1-6.4 7.1Z" fill="white"/></svg>Login with Discord</a></div>';
     return false;
   }
   document.getElementById('userInfo').innerHTML='<img src="https://cdn.discordapp.com/avatars/'+userInfo.id+'/'+userInfo.avatar+'.png" onerror="this.style.display=\'none\'"><span class="name">'+userInfo.username+'</span>';
@@ -1902,7 +1985,7 @@ function checkAuth(){
 }
 function loadServers(){
   fetch('/api/mc/servers').then(function(r){return r.json()}).then(function(d){
-    var el=document.getElementById('serverList');el.innerHTML='';
+    var el=document.getElementById('serverList');if(!el)return;el.innerHTML='';
     (d.servers||[]).forEach(function(s){
       var item=document.createElement('div');
       item.className='server-item'+(activeServer===s.name?' active':'');
@@ -1923,24 +2006,30 @@ function createServer(){
 }
 function selectServer(name){
   activeServer=name;
+  autoScroll=true;
   loadServers();
   connectWS(name);
   fetch('/api/mc/console?name='+encodeURIComponent(name)).then(function(r){return r.json()}).then(function(d){
     var wrap=document.getElementById('consoleWrap');
-    wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button></div></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">&gt;</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
+    wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button></div></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
     var out=document.getElementById('consoleOutput');
-    (d.lines||[]).forEach(function(line){appendLine(out,line)});
+    out.addEventListener('scroll',function(){
+      var atBottom=out.scrollHeight-out.scrollTop-out.clientHeight<50;
+      autoScroll=atBottom;
+    });
+    (d.lines||[]).forEach(function(line){appendLine(out,line,false)});
     out.scrollTop=out.scrollHeight;
     document.getElementById('cmdInput').focus();
   });
 }
-function appendLine(out,line){
+function appendLine(out,line,isWs){
   var div=document.createElement('div');
   var tsMatch=line.match(/^\[(\d{2}:\d{2}:\d{2})\]/);
   if(tsMatch){div.innerHTML='<span class="ts">'+tsMatch[1]+'</span>'+escapeHtml(line.substring(10))}
   else{div.textContent=line}
+  if(line.indexOf('[ERROR]')!==-1||line.indexOf('[WARN]')!==-1){div.className='err'}
   out.appendChild(div);
-  out.scrollTop=out.scrollHeight;
+  if(autoScroll||!isWs){out.scrollTop=out.scrollHeight}
 }
 function escapeHtml(t){var d=document.createElement('div');d.textContent=t;return d.innerHTML}
 function connectWS(name){
@@ -1952,7 +2041,7 @@ function connectWS(name){
       var d=JSON.parse(ev.data);
       if(d.type==='output'){
         var out=document.getElementById('consoleOutput');
-        if(out)appendLine(out,d.line);
+        if(out)appendLine(out,d.line,true);
       }
     }catch(e){}
   };
