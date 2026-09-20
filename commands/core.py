@@ -1148,16 +1148,45 @@ def _track_ip(ip):
         json.dump(entries, f, indent=2)
 
 async def handle_discord_auth(request):
-    origin = f"{request.scheme}://{request.host}"
     resp = web.Response(status=302)
+    origin = f"{request.scheme}://{request.host}"
+    redirect = origin + "/api/auth/callback"
     resp.headers["Location"] = (
         f"https://discord.com/api/oauth2/authorize"
         f"?client_id={DISCORD_CLIENT_ID}"
-        f"&redirect_uri={origin}"
+        f"&redirect_uri={redirect}"
         f"&response_type=token"
         f"&scope=identify"
     )
     return resp
+
+
+DISCORD_CALLBACK_PAGE = r'''<!DOCTYPE html>
+<html><head><title>Logging in...</title></head><body>
+<script>
+(function(){
+  var hash=window.location.hash;
+  if(hash&&hash.indexOf('access_token')!==-1){
+    var params=new URLSearchParams(hash.substring(1));
+    var token=params.get('access_token');
+    if(token){
+      fetch('/api/auth/verify?token='+encodeURIComponent(token))
+        .then(function(r){return r.json()})
+        .then(function(d){
+          if(d&&d.id){document.cookie='user_info='+encodeURIComponent(JSON.stringify(d))+';path=/;max-age='+(86400*30)}
+          window.location.hash='';window.location='/mc';
+        }).catch(function(){window.location='/mc'});
+      return;
+    }
+  }
+  window.location='/mc';
+})();
+</script>
+<p style="color:white;background:#0a0a0f;text-align:center;padding:40px;font-family:sans-serif">Logging in...</p>
+</body></html>'''
+
+async def handle_discord_callback(request):
+    return web.Response(text=DISCORD_CALLBACK_PAGE, content_type="text/html")
 
 
 async def handle_discord_verify(request):
@@ -1925,6 +1954,7 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_get("/games.json", handle_games_json)
     app.router.add_get("/api/auth/login", handle_discord_auth)
     app.router.add_get("/api/auth/verify", handle_discord_verify)
+    app.router.add_get("/api/auth/callback", handle_discord_callback)
     app.router.add_get("/api/admin", handle_admin_data)
     app.router.add_get("/api/logs", handle_logs)
     app.router.add_post("/api/ban", handle_ban)
