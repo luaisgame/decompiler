@@ -1736,6 +1736,8 @@ async def mc_api_start(request):
     return web.json_response({"ok": True, "pid": proc.pid})
 
 async def mc_api_create(request):
+    if not _get_user_info(request):
+        return web.json_response({"error": "Not logged in"}, status=401)
     data = await request.json()
     name = data.get("name", "").strip()
     if not name or not all(c.isalnum() or c in "-_" for c in name):
@@ -1950,7 +1952,7 @@ body{
   <div class="sidebar">
     <div class="title">Servers</div>
     <div class="server-list" id="serverList"></div>
-    <div class="sidebar-bottom">
+    <div class="sidebar-bottom" id="createServer" style="display:none">
       <input type="text" id="newServerName" placeholder="New server name..." onkeydown="if(event.key==='Enter')createServer()">
       <button onclick="createServer()">+ Create Server</button>
     </div>
@@ -1981,6 +1983,7 @@ function checkAuth(){
     return false;
   }
   document.getElementById('userInfo').innerHTML='<img src="https://cdn.discordapp.com/avatars/'+userInfo.id+'/'+userInfo.avatar+'.png" onerror="this.style.display=\'none\'"><span class="name">'+userInfo.username+'</span>';
+  var createEl=document.getElementById('createServer');if(createEl)createEl.style.display='';
   return true;
 }
 function loadServers(){
