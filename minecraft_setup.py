@@ -39,6 +39,38 @@ def _get_latest_fabric():
         return None, None
 
 
+def _get_latest_forge():
+    try:
+        promo_url = "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json"
+        with urllib.request.urlopen(promo_url, timeout=15) as resp:
+            data = json.loads(resp.read())
+        promos = data.get("promos", {})
+        recommended = promos.get("latest")
+        if not recommended:
+            for v in reversed(list(promos.keys())):
+                if "recommended" in promos.get(v, ""):
+                    recommended = v
+                    break
+            else:
+                recommended = next(iter(reversed(list(promos.keys()))), None)
+        if not recommended:
+            return None, None
+        mc_ver = recommended
+        forge_ver = promos.get(recommended, "")
+        if not forge_ver:
+            parts = recommended.split("-", 1)
+            if len(parts) == 2:
+                mc_ver, forge_ver = parts[0], parts[1]
+        else:
+            if "-" in recommended:
+                parts = recommended.split("-", 1)
+                mc_ver, forge_ver = parts[0], parts[1]
+        return mc_ver, forge_ver
+    except Exception as e:
+        print(f"[MINECRAFT] Failed to get Forge versions: {e}")
+        return None, None
+
+
 def _download_file(url, dest):
     try:
         urllib.request.urlretrieve(url, dest)
@@ -110,6 +142,50 @@ def _install_fabric_server(server_dir):
     return True, mc_ver
 
 
+def _install_forge_server(server_dir):
+    print(f"[MINECRAFT] Installing Forge server in {server_dir}...")
+    mc_ver, forge_ver = _get_latest_forge()
+    if not mc_ver or not forge_ver:
+        print("[MINECRAFT] Could not determine latest Forge version.")
+        return False, None
+    print(f"[MINECRAFT] MC {mc_ver}, Forge {forge_ver}")
+
+    installer_url = f"https://maven.minecraftforge.net/net/minecraftforge/forge/{mc_ver}-{forge_ver}/forge-{mc_ver}-{forge_ver}-installer.jar"
+    installer_path = os.path.join(server_dir, f"forge-{mc_ver}-{forge_ver}-installer.jar")
+    if not _download_file(installer_url, installer_path):
+        print("[MINECRAFT] Could not download Forge installer.")
+        return False, None
+
+    try:
+        result = subprocess.run(
+            ["java", "-jar", installer_path, "--installServer"],
+            cwd=server_dir,
+            capture_output=True, text=True, timeout=600
+        )
+        print(f"[MINECRAFT] Installer output: {result.stdout}")
+        if result.stderr:
+            print(f"[MINECRAFT] Installer stderr: {result.stderr}")
+        if result.returncode != 0:
+            print(f"[MINECRAFT] Forge installer error: {result.stderr}")
+            return False, None
+    except Exception as e:
+        print(f"[MINECRAFT] Forge installer failed: {e}")
+        return False, None
+
+    eula_path = os.path.join(server_dir, "eula.txt")
+    if not os.path.exists(eula_path):
+        with open(eula_path, "w") as f:
+            f.write("eula=true\n")
+
+    props_path = os.path.join(server_dir, "server.properties")
+    if not os.path.exists(props_path):
+        with open(props_path, "w") as f:
+            f.write("online-mode=true\nserver-port=25565\n")
+
+    print("[MINECRAFT] Forge server installed.")
+    return True, mc_ver
+
+
 def _install_viaversion(server_dir, mc_ver):
     mods_dir = os.path.join(server_dir, "mods")
     os.makedirs(mods_dir, exist_ok=True)
@@ -133,7 +209,7 @@ def _install_viaversion(server_dir, mc_ver):
     return False
 
 
-def setup_server(server_dir):
+def setup_server(server_dir, loader_type="fabric"):
     if _is_server_folder(server_dir):
         print(f"[MINECRAFT] Server already set up: {os.path.basename(server_dir)}")
         return True
@@ -146,10 +222,14 @@ def setup_server(server_dir):
         elif os.path.isdir(item_path):
             shutil.rmtree(item_path)
 
-    ok, mc_ver = _install_fabric_server(server_dir)
+    if loader_type == "forge":
+        ok, mc_ver = _install_forge_server(server_dir)
+    else:
+        ok, mc_ver = _install_fabric_server(server_dir)
     if not ok:
         return False
-    _install_viaversion(server_dir, mc_ver)
+    if loader_type == "fabric":
+        _install_viaversion(server_dir, mc_ver)
     return True
 
 
@@ -178,8 +258,13 @@ def start_playit():
 def start_mc_server(server_dir):
     jar = None
     for f in os.listdir(server_dir):
-        if f.endswith(".jar") and ("fabric" in f.lower() or "server" in f.lower()):
-            if "installer" not in f.lower():
+        if f.endswith(".jar") and ("installer" not in f.lower()):
+            if "forge" in f.lower() or "fabric" in f.lower() or "server" in f.lower():
+                jar = os.path.join(server_dir, f)
+                break
+    if not jar:
+        for f in os.listdir(server_dir):
+            if f.endswith(".jar") and "installer" not in f.lower():
                 jar = os.path.join(server_dir, f)
                 break
     if not jar:

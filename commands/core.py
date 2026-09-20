@@ -1709,6 +1709,7 @@ async def mc_api_servers(request):
 async def mc_api_start(request):
     data = await request.json()
     name = data.get("name", "")
+    loader_type = data.get("loader", "fabric")
     server_dir = os.path.join(MC_DIR, name)
     if not os.path.isdir(server_dir):
         return web.json_response({"error": "Server folder not found"}, status=404)
@@ -1717,14 +1718,14 @@ async def mc_api_start(request):
     jar = _mc_find_jar(server_dir)
     if not jar:
         buf = mc_console_buffers.setdefault(name, [])
-        buf.append(f"[{time.strftime('%H:%M:%S')}] No server.jar found, installing Fabric server...")
+        buf.append(f"[{time.strftime('%H:%M:%S')}] No server.jar found, installing {loader_type.title()} server...")
         try:
             from minecraft_setup import setup_server
-            ok = await asyncio.to_thread(setup_server, server_dir)
+            ok = await asyncio.to_thread(setup_server, server_dir, loader_type)
             if not ok:
-                buf.append(f"[{time.strftime('%H:%M:%S')}] Failed to install Fabric server.")
-                return web.json_response({"error": "Fabric install failed"}, status=500)
-            buf.append(f"[{time.strftime('%H:%M:%S')}] Fabric installed successfully.")
+                buf.append(f"[{time.strftime('%H:%M:%S')}] Failed to install {loader_type.title()} server.")
+                return web.json_response({"error": f"{loader_type.title()} install failed"}, status=500)
+            buf.append(f"[{time.strftime('%H:%M:%S')}] {loader_type.title()} installed successfully.")
         except Exception as e:
             buf.append(f"[{time.strftime('%H:%M:%S')}] Setup error: {e}")
             return web.json_response({"error": str(e)}, status=500)
@@ -1966,6 +1967,14 @@ body{
   transition:all .2s;font-weight:500
 }
 .sidebar-bottom button:hover{background:rgba(0,220,120,.08);border-color:rgba(0,220,120,.35);color:#00dc78}
+.sidebar-bottom select{
+  width:100%;padding:7px 10px;border-radius:8px;
+  border:1px solid rgba(255,255,255,.06);background:rgba(255,255,255,.03);
+  color:#fff;font-size:12px;font-family:inherit;outline:none;margin-bottom:6px;
+  transition:border-color .2s;cursor:pointer;appearance:auto
+}
+.sidebar-bottom select:focus{border-color:rgba(0,220,120,.3)}
+.sidebar-bottom select option{background:#0d0d14;color:#fff}
 .console-wrap{flex:1;display:flex;flex-direction:column;overflow:hidden}
 .console-header{
   display:flex;align-items:center;justify-content:space-between;
@@ -2059,6 +2068,7 @@ body{
     <div class="server-list" id="serverList"></div>
     <div class="sidebar-bottom" id="createServer" style="display:none">
       <input type="text" id="newServerName" placeholder="New server name..." onkeydown="if(event.key==='Enter')createServer()">
+      <select id="loaderSelect"><option value="fabric">Fabric</option><option value="forge">Forge</option></select>
       <button onclick="createServer()">+ Create Server</button>
     </div>
   </div>
@@ -2204,7 +2214,9 @@ function sendCmd(){
 }
 function startServer(){
   if(!activeServer)return;
-  fetch('/api/mc/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:activeServer})}).then(function(r){return r.json()}).then(function(){setTimeout(function(){selectServer(activeServer);loadServers()},1000)});
+  var sel=document.getElementById('loaderSelect');
+  var loader=sel?sel.value:'fabric';
+  fetch('/api/mc/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:activeServer,loader:loader})}).then(function(r){return r.json()}).then(function(){setTimeout(function(){selectServer(activeServer);loadServers()},1000)});
 }
 function stopServer(){
   if(!activeServer)return;
