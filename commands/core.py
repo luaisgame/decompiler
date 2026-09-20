@@ -1148,52 +1148,35 @@ def _track_ip(ip):
         json.dump(entries, f, indent=2)
 
 async def handle_discord_auth(request):
-    state = uuid.uuid4().hex
+    origin = f"{request.scheme}://{request.host}"
     resp = web.Response(status=302)
     resp.headers["Location"] = (
         f"https://discord.com/api/oauth2/authorize"
         f"?client_id={DISCORD_CLIENT_ID}"
-        f"&redirect_uri={DISCORD_REDIRECT_URI}"
-        f"&response_type=code"
+        f"&redirect_uri={origin}"
+        f"&response_type=token"
         f"&scope=identify"
-        f"&state={state}"
     )
-    resp.set_cookie("oauth_state", state, max_age=600, samesite="Lax")
     return resp
 
-async def handle_discord_callback(request):
-    code = request.query.get("code")
-    if not code:
-        return web.Response(text="No code provided", status=400)
+
+async def handle_discord_verify(request):
+    token = request.query.get("token", "")
+    if not token:
+        return web.json_response({"error": "no token"}, status=400)
     async with aiohttp.ClientSession() as session:
-        token_resp = await session.post(
-            "https://discord.com/api/oauth2/token",
-            data={
-                "client_id": DISCORD_CLIENT_ID,
-                "client_secret": DISCORD_CLIENT_SECRET,
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": DISCORD_REDIRECT_URI,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        token_data = await token_resp.json()
-        access_token = token_data.get("access_token")
-        if not access_token:
-            return web.Response(text="Failed to get token", status=400)
         user_resp = await session.get(
             "https://discord.com/api/users/@me",
-            headers={"Authorization": f"Bearer {access_token}"},
+            headers={"Authorization": f"Bearer {token}"},
         )
+        if user_resp.status != 200:
+            return web.json_response({"error": "invalid token"}, status=401)
         user_data = await user_resp.json()
-    user_id = user_data.get("id", "")
-    username = user_data.get("username", "")
-    avatar = user_data.get("avatar", "")
-    resp = web.Response(status=302)
-    resp.headers["Location"] = "/"
-    user_info = json.dumps({"id": user_id, "username": username, "avatar": avatar})
-    resp.set_cookie("user_info", user_info, max_age=86400 * 30, samesite="Lax")
-    return resp
+    return web.json_response({
+        "id": user_data.get("id", ""),
+        "username": user_data.get("username", ""),
+        "avatar": user_data.get("avatar", ""),
+    })
 
 def _get_user_info(request):
     raw = request.cookies.get("user_info", "")
@@ -1476,6 +1459,27 @@ body {{ background:#0a0e14; color:#c9d1d9; font-family:'Inter','SF Pro Display',
     Created by: <strong>iispeaklua</strong> (Crimson) &bull; <a href="https://discord.gg/robloxdecompiler">Discord</a>
 </div>
 <script>
+(function() {{
+    var hash = window.location.hash;
+    if (hash && hash.indexOf("access_token") !== -1) {{
+        var params = new URLSearchParams(hash.substring(1));
+        var token = params.get("access_token");
+        if (token) {{
+            fetch("/api/auth/verify?token=" + encodeURIComponent(token))
+                .then(function(r) {{ return r.json(); }})
+                .then(function(data) {{
+                    if (data && data.id) {{
+                        document.cookie = "user_info=" + encodeURIComponent(JSON.stringify(data)) + ";path=/;max-age=" + (86400*30);
+                    }}
+                    window.location.hash = "";
+                    window.location.reload();
+                }})
+                .catch(function() {{
+                    window.location.hash = "";
+                }});
+        }}
+    }}
+}})();
 document.addEventListener("click", function(ev) {{
     var btn = ev.target.closest(".copy-btn");
     if (btn) {{
@@ -1587,7 +1591,7 @@ document.addEventListener("click", function(ev) {{
 function buildGameCards(data) {{
     var h = "";
     data.forEach(function(e) {{
-        h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="'+(e.icon_url||'/api/thumb?placeId='+e.place_id)+'" alt="thumb" onerror="this.parentElement.removeChild(this)"><div class="game-info"><a class="game-title" href="https://www.roblox.com/games/'+e.place_id+'" target="_blank">'+(e.game_name||'Unknown')+'</a><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><div class="game-buttons"><a class="download-btn" href="/'+e.filename+'" download>Download</a><button class="copy-btn" data-url="https://storage.luaisgame.com/'+e.filename+'">Copy Link</button></div></div></div></div>';
+        h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="'+(e.icon_url||'')+'" alt="thumb" onerror="this.parentElement.removeChild(this)"><div class="game-info"><a class="game-title" href="https://www.roblox.com/games/'+e.place_id+'" target="_blank">'+(e.game_name||'Unknown')+'</a><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><div class="game-buttons"><a class="download-btn" href="/'+e.filename+'" download>Download</a><button class="copy-btn" data-url="https://storage.luaisgame.com/'+e.filename+'">Copy Link</button></div></div></div></div>';
     }});
     return h;
 }}
@@ -1615,9 +1619,8 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app = web.Application()
     app.router.add_post("/decompile", handle_post)
     app.router.add_get("/games.json", handle_games_json)
-    app.router.add_get("/api/thumb", handle_thumbnail)
     app.router.add_get("/api/auth/login", handle_discord_auth)
-    app.router.add_get("/api/auth/callback", handle_discord_callback)
+    app.router.add_get("/api/auth/verify", handle_discord_verify)
     app.router.add_get("/api/admin", handle_admin_data)
     app.router.add_get("/api/logs", handle_logs)
     app.router.add_post("/api/ban", handle_ban)
