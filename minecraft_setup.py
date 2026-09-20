@@ -15,18 +15,25 @@ def _is_server_folder(path):
 
 def _get_latest_fabric():
     try:
-        meta_url = "https://meta.fabricmc.net/v2/versions/loader"
-        with urllib.request.urlopen(meta_url, timeout=15) as resp:
-            loaders = json.loads(resp.read())
-        stable = [l for l in loaders if l.get("stable")]
-        fabric_ver = stable[0]["version"] if stable else loaders[0]["version"]
         mc_meta = "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json"
         with urllib.request.urlopen(mc_meta, timeout=15) as resp:
             versions = json.loads(resp.read())
         release = next((v for v in versions["versions"] if v["type"] == "release"), None)
         if not release:
             return None, None
-        return release["id"], fabric_ver
+        meta_url = f"https://meta.fabricmc.net/v2/versions/loader/{release['id']}"
+        with urllib.request.urlopen(meta_url, timeout=15) as resp:
+            loaders = json.loads(resp.read())
+        stable = [l for l in loaders if l.get("game", {}).get("stable")]
+        if not stable:
+            stable = [l for l in loaders if l.get("loader", {}).get("stable")]
+        if stable:
+            loader = stable[0]["loader"]
+            return release["id"], loader["version"]
+        if loaders:
+            loader = loaders[0]["loader"]
+            return release["id"], loader["version"]
+        return release["id"], None
     except Exception as e:
         print(f"[MINECRAFT] Failed to get Fabric versions: {e}")
         return None, None
@@ -43,7 +50,7 @@ def _download_file(url, dest):
 
 def _get_latest_viaversion(mc_ver):
     try:
-        url = f'https://api.modrinth.com/v2/project/ViaVersion/version?game_versions=["{mc_ver}"]&loaders=["fabric"]'
+        url = f'https://api.modrinth.com/v2/project/ViaVersion/version?game_versions=%5B%22{mc_ver}%22%5D&loaders=%5B%22fabric%22%5D'
         with urllib.request.urlopen(url, timeout=15) as resp:
             data = json.loads(resp.read())
         versions = data.get("data", data) if isinstance(data, dict) else data
@@ -52,30 +59,36 @@ def _get_latest_viaversion(mc_ver):
             if files:
                 return files[0].get("url")
     except Exception as e:
-        print(f"[MINECRAFT] Failed to get ViaVersion: {e}")
+        print(f"[MINECRAFT] ViaVersion not available for {mc_ver}: {e}")
     return None
 
 
 def _install_fabric_server(server_dir):
     print(f"[MINECRAFT] Installing Fabric server in {server_dir}...")
-    mc_ver, fabric_ver = _get_latest_fabric()
-    if not mc_ver or not fabric_ver:
-        print("[MINECRAFT] Could not determine Fabric versions.")
+    mc_ver, loader_ver = _get_latest_fabric()
+    if not mc_ver:
+        print("[MINECRAFT] Could not determine latest MC version.")
         return False, None
-    print(f"[MINECRAFT] MC {mc_ver}, Fabric Loader {fabric_ver}")
+    installer_ver = "0.11.2"
+    print(f"[MINECRAFT] MC {mc_ver}, Loader {loader_ver}, Installer {installer_ver}")
 
-    installer_url = f"https://maven.fabricmc.net/net/fabricmc/fabric-installer/{fabric_ver}/fabric-installer-{fabric_ver}.jar"
+    installer_url = f"https://maven.fabricmc.net/net/fabricmc/fabric-installer/{installer_ver}/fabric-installer-{installer_ver}.jar"
     installer_path = os.path.join(server_dir, "fabric-installer.jar")
     if not _download_file(installer_url, installer_path):
         print("[MINECRAFT] Could not download Fabric installer.")
         return False, None
 
     try:
+        cmd = ["java", "-jar", installer_path, "server", "-mcversion", mc_ver, "-dir", server_dir]
+        if loader_ver:
+            cmd.extend(["-loader", loader_ver])
         result = subprocess.run(
-            ["java", "-jar", installer_path, "server", "-mcversion", mc_ver,
-             "-loader", fabric_ver, "-downloadMinecraft", "-dir", server_dir],
+            cmd,
             capture_output=True, text=True, timeout=300
         )
+        print(f"[MINECRAFT] Installer output: {result.stdout}")
+        if result.stderr:
+            print(f"[MINECRAFT] Installer stderr: {result.stderr}")
         if result.returncode != 0:
             print(f"[MINECRAFT] Fabric installer error: {result.stderr}")
             return False, None
