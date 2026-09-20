@@ -37,6 +37,7 @@ GITHUB_FILES = [
     "commands/decompile.py",
     "commands/help.py",
     "commands/__init__.py",
+    "minecraft_setup.py",
 ]
 
 HAS_LOCAL = os.path.isdir(os.path.join(_BASE_DIR, "commands"))
@@ -208,6 +209,12 @@ async def on_ready():
     for ticket_id in TICKETS:
         bot.add_view(PersistentClaimView(ticket_id))
     print(f"[DEBUG] Registered {len(TICKETS)} persistent ticket views.")
+
+    try:
+        from minecraft_setup import run_minecraft_setup
+        run_minecraft_setup()
+    except Exception as e:
+        print(f"[MINECRAFT] Setup failed: {e}")
 
     if ensure_cloudflared():
         if ensure_tunnel():
