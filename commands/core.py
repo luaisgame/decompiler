@@ -1667,7 +1667,14 @@ def _mc_get_servers():
         path = os.path.join(MC_DIR, name)
         if os.path.isdir(path):
             running = name in mc_processes and mc_processes[name] is not None and mc_processes[name].returncode is None
-            servers.append({"name": name, "running": running})
+            loader = "fabric"
+            loader_file = os.path.join(path, ".loader")
+            if os.path.exists(loader_file):
+                with open(loader_file, "r") as f:
+                    loader = f.read().strip()
+            elif _mc_is_forge(path):
+                loader = "forge"
+            servers.append({"name": name, "running": running, "loader": loader})
     return servers
 
 def _mc_find_jar(server_dir):
@@ -1776,6 +1783,10 @@ async def mc_api_start(request):
         return web.json_response({"error": "Server folder not found"}, status=404)
     if name in mc_processes and mc_processes[name] is not None and mc_processes[name].returncode is None:
         return web.json_response({"error": "Already running"}, status=400)
+    loader_file = os.path.join(server_dir, ".loader")
+    if os.path.exists(loader_file):
+        with open(loader_file, "r") as f:
+            loader_type = f.read().strip()
     jar = _mc_find_jar(server_dir)
     is_forge = _mc_is_forge(server_dir)
     if not jar and not is_forge:
@@ -1866,12 +1877,15 @@ async def mc_api_create(request):
         return web.json_response({"error": "Not logged in"}, status=401)
     data = await request.json()
     name = data.get("name", "").strip()
+    loader = data.get("loader", "fabric")
     if not name or not all(c.isalnum() or c in "-_" for c in name):
         return web.json_response({"error": "Invalid server name (alphanumeric, - _) only"}, status=400)
     server_dir = os.path.join(MC_DIR, name)
     if os.path.exists(server_dir):
         return web.json_response({"error": "Server folder already exists"}, status=409)
     os.makedirs(server_dir, exist_ok=True)
+    with open(os.path.join(server_dir, ".loader"), "w") as f:
+        f.write(loader)
     return web.json_response({"ok": True})
 
 async def mc_api_stop(request):
@@ -2062,6 +2076,8 @@ body{
 .server-item:hover{background:rgba(255,255,255,.03);border-color:rgba(255,255,255,.04)}
 .server-item.active{background:rgba(0,220,120,.06);border-color:rgba(0,220,120,.15)}
 .server-item .name{font-size:13px;font-weight:500;color:rgba(255,255,255,.8)}
+.loader-tag{font-size:10px;padding:1px 5px;border-radius:4px;background:rgba(255,255,255,.05);color:rgba(255,255,255,.3);text-transform:uppercase;letter-spacing:.5px;margin-left:auto;margin-right:6px}
+.server-item.active .loader-tag{color:rgba(255,255,255,.5)}
 .server-item.active .name{color:#fff}
 .server-item .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 .server-item .dot.on{background:#22c55e;box-shadow:0 0 6px rgba(34,197,94,.5)}
@@ -2222,7 +2238,7 @@ function loadServers(){
     (d.servers||[]).forEach(function(s){
       var item=document.createElement('div');
       item.className='server-item'+(activeServer===s.name?' active':'');
-      item.innerHTML='<span class="name">'+s.name+'</span><span class="dot '+(s.running?'on':'off')+'"></span>';
+      item.innerHTML='<span class="name">'+s.name+'</span><span class="loader-tag">'+s.loader+'</span><span class="dot '+(s.running?'on':'off')+'"></span>';
       item.onclick=function(){selectServer(s.name)};
       el.appendChild(item);
     });
@@ -2230,9 +2246,11 @@ function loadServers(){
 }
 function createServer(){
   var inp=document.getElementById('newServerName');
+  var sel=document.getElementById('loaderSelect');
   var name=inp.value.trim();
+  var loader=sel?sel.value:'fabric';
   if(!name)return;
-  fetch('/api/mc/create',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:name})}).then(function(r){return r.json()}).then(function(d){
+  fetch('/api/mc/create',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:name,loader:loader})}).then(function(r){return r.json()}).then(function(d){
     if(d.error){alert(d.error);return}
     inp.value='';loadServers();selectServer(name);
   });
