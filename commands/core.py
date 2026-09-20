@@ -1615,6 +1615,310 @@ if (document.getElementById("adminPanel")) {{ setInterval(loadAdmin, 3000); }}
 </html>'''
     return web.Response(text=html, content_type="text/html")
 
+
+MC_DIR = os.path.join(os.path.dirname(BASE_DIR), "minecraft")
+mc_processes = {}
+mc_console_buffers = {}
+mc_ws_clients = {}
+
+def _mc_get_servers():
+    if not os.path.isdir(MC_DIR):
+        return []
+    servers = []
+    for name in sorted(os.listdir(MC_DIR)):
+        path = os.path.join(MC_DIR, name)
+        if os.path.isdir(path):
+            running = name in mc_processes and mc_processes[name] is not None and mc_processes[name].returncode is None
+            servers.append({"name": name, "running": running})
+    return servers
+
+def _mc_find_jar(server_dir):
+    for f in os.listdir(server_dir):
+        if f.endswith(".jar") and "installer" not in f.lower():
+            return os.path.join(server_dir, f)
+    return None
+
+async def _mc_read_output(name, proc):
+    buf = mc_console_buffers.setdefault(name, [])
+    ws_list = mc_ws_clients.setdefault(name, [])
+    try:
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            text = line.decode("utf-8", errors="replace").rstrip("\n\r")
+            ts = time.strftime("%H:%M:%S")
+            entry = f"[{ts}] {text}"
+            buf.append(entry)
+            if len(buf) > 500:
+                buf[:] = buf[-500:]
+            dead = []
+            for ws in ws_list:
+                try:
+                    await ws.send_json({"type": "output", "line": entry})
+                except Exception:
+                    dead.append(ws)
+            for ws in dead:
+                ws_list.remove(ws)
+    except Exception:
+        pass
+    if name in mc_processes:
+        mc_processes[name] = None
+
+async def mc_api_servers(request):
+    return web.json_response({"servers": _mc_get_servers()})
+
+async def mc_api_start(request):
+    data = await request.json()
+    name = data.get("name", "")
+    server_dir = os.path.join(MC_DIR, name)
+    if not os.path.isdir(server_dir):
+        return web.json_response({"error": "Server folder not found"}, status=404)
+    if name in mc_processes and mc_processes[name] is not None and mc_processes[name].returncode is None:
+        return web.json_response({"error": "Already running"}, status=400)
+    jar = _mc_find_jar(server_dir)
+    if not jar:
+        return web.json_response({"error": "No server jar found"}, status=404)
+    mem = os.environ.get("MC_MEMORY", "2G")
+    proc = await asyncio.create_subprocess_exec(
+        "java", f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui",
+        cwd=server_dir,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    mc_processes[name] = proc
+    mc_console_buffers.setdefault(name, [])
+    asyncio.create_task(_mc_read_output(name, proc))
+    return web.json_response({"ok": True, "pid": proc.pid})
+
+async def mc_api_stop(request):
+    data = await request.json()
+    name = data.get("name", "")
+    proc = mc_processes.get(name)
+    if not proc or proc.returncode is not None:
+        return web.json_response({"error": "Not running"}, status=400)
+    try:
+        proc.stdin.write(b"stop\n")
+        await proc.stdin.drain()
+    except Exception:
+        proc.kill()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=15)
+    except asyncio.TimeoutError:
+        proc.kill()
+    mc_processes[name] = None
+    return web.json_response({"ok": True})
+
+async def mc_api_command(request):
+    data = await request.json()
+    name = data.get("name", "")
+    cmd = data.get("command", "")
+    proc = mc_processes.get(name)
+    if not proc or proc.returncode is not None:
+        return web.json_response({"error": "Server not running"}, status=400)
+    try:
+        proc.stdin.write((cmd + "\n").encode("utf-8"))
+        await proc.stdin.drain()
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+    return web.json_response({"ok": True})
+
+async def mc_api_console(request):
+    name = request.query.get("name", "")
+    buf = mc_console_buffers.get(name, [])
+    return web.json_response({"lines": buf[-200:]})
+
+async def mc_ws_console(request):
+    name = request.match_info.get("name", "")
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    ws_list = mc_ws_clients.setdefault(name, [])
+    ws_list.append(ws)
+    buf = mc_console_buffers.get(name, [])
+    for line in buf[-100:]:
+        try:
+            await ws.send_json({"type": "output", "line": line})
+        except Exception:
+            break
+    try:
+        async for msg in ws:
+            if msg.type == web.WSMsgType.TEXT:
+                try:
+                    d = json.loads(msg.data)
+                    if d.get("type") == "command":
+                        proc = mc_processes.get(name)
+                        if proc and proc.returncode is None and proc.stdin:
+                            proc.stdin.write((d.get("command", "") + "\n").encode("utf-8"))
+                            await proc.stdin.drain()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    if ws in ws_list:
+        ws_list.remove(ws)
+    return ws
+
+MC_PAGE_HTML = r'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MC Console</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0f;color:#e0e0e0;font-family:'Consolas','Courier New',monospace;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:10px 20px;background:#0d0d14;border-bottom:1px solid rgba(255,255,255,.06);flex-shrink:0}
+.topbar .logo{font-size:18px;font-weight:700;color:#fff}
+.topbar .logo span{color:#00dc78}
+.topbar .user{display:flex;align-items:center;gap:10px;font-size:13px;color:rgba(255,255,255,.5)}
+.topbar .user img{width:28px;height:28px;border-radius:50%}
+.topbar .user .name{color:#fff;font-weight:600}
+.main{display:flex;flex:1;overflow:hidden}
+.sidebar{width:220px;background:#0d0d14;border-right:1px solid rgba(255,255,255,.06);display:flex;flex-direction:column;flex-shrink:0}
+.sidebar .title{padding:14px 16px 10px;font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:rgba(255,255,255,.3);font-weight:600}
+.server-list{flex:1;overflow-y:auto;padding:0 8px}
+.server-item{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:8px;cursor:pointer;transition:background .15s;margin-bottom:2px}
+.server-item:hover{background:rgba(255,255,255,.04)}
+.server-item.active{background:rgba(0,220,120,.08);border:1px solid rgba(0,220,120,.15)}
+.server-item .name{font-size:13px;font-weight:500}
+.server-item .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.server-item .dot.on{background:#22c55e;box-shadow:0 0 6px rgba(34,197,94,.5)}
+.server-item .dot.off{background:#ef4444}
+.console-wrap{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.console-header{display:flex;align-items:center;justify-content:space-between;padding:10px 20px;background:#0d0d14;border-bottom:1px solid rgba(255,255,255,.06);flex-shrink:0}
+.console-header .server-name{font-size:15px;font-weight:600;color:#fff}
+.console-header .actions{display:flex;gap:8px}
+.console-header .actions button{padding:6px 14px;border-radius:6px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);color:rgba(255,255,255,.6);font-size:12px;cursor:pointer;font-family:inherit;transition:all .2s}
+.console-header .actions button:hover{background:rgba(255,255,255,.06);color:#fff}
+.console-header .actions .start{border-color:rgba(34,197,94,.3);color:#22c55e}
+.console-header .actions .start:hover{background:rgba(34,197,94,.1)}
+.console-header .actions .stop{border-color:rgba(239,68,68,.3);color:#ef4444}
+.console-header .actions .stop:hover{background:rgba(239,68,68,.1)}
+.console-output{flex:1;overflow-y:auto;padding:12px 20px;font-size:12.5px;line-height:1.7;color:rgba(255,255,255,.7);white-space:pre-wrap;word-break:break-all}
+.console-output .ts{color:rgba(255,255,255,.25);margin-right:6px}
+.console-input-wrap{display:flex;align-items:center;padding:10px 20px;background:#0d0d14;border-top:1px solid rgba(255,255,255,.06);flex-shrink:0}
+.console-input-wrap .prompt{color:#00dc78;font-weight:700;margin-right:8px;font-size:13px}
+.console-input-wrap input{flex:1;background:transparent;border:none;color:#fff;font-size:13px;font-family:inherit;outline:none}
+.console-input-wrap input::placeholder{color:rgba(255,255,255,.2)}
+.no-servers{display:flex;align-items:center;justify-content:center;flex:1;color:rgba(255,255,255,.2);font-size:14px}
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:3px}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="logo">MC <span>Console</span></div>
+  <div class="user" id="userInfo"></div>
+</div>
+<div class="main">
+  <div class="sidebar">
+    <div class="title">Servers</div>
+    <div class="server-list" id="serverList"></div>
+  </div>
+  <div class="console-wrap" id="consoleWrap">
+    <div class="no-servers" id="noSelect">Select a server</div>
+  </div>
+</div>
+<script>
+var userInfo=null,activeServer=null,ws=null;
+function parseCookie(){var c=document.cookie.split(';').map(function(s){return s.trim()});for(var i=0;i<c.length;i++){if(c[i].indexOf('user_info=')===0){try{return JSON.parse(decodeURIComponent(c[i].substring(10)))}catch(e){}}}return null}
+function checkAuth(){
+  var hash=window.location.hash;
+  if(hash&&hash.indexOf('access_token')!==-1){
+    var params=new URLSearchParams(hash.substring(1));
+    var token=params.get('access_token');
+    if(token){
+      fetch('/api/auth/verify?token='+encodeURIComponent(token)).then(function(r){return r.json()}).then(function(d){
+        if(d&&d.id){document.cookie='user_info='+encodeURIComponent(JSON.stringify(d))+';path=/;max-age='+(86400*30)}
+        window.location.hash='';window.location.reload();
+      }).catch(function(){window.location.hash='';});
+      return false;
+    }
+  }
+  userInfo=parseCookie();
+  if(!userInfo){window.location.href='/';return false}
+  document.getElementById('userInfo').innerHTML='<img src="https://cdn.discordapp.com/avatars/'+userInfo.id+'/'+userInfo.avatar+'.png" onerror="this.style.display=\'none\'"><span class="name">'+userInfo.username+'</span>';
+  return true;
+}
+function loadServers(){
+  fetch('/api/mc/servers').then(function(r){return r.json()}).then(function(d){
+    var el=document.getElementById('serverList');el.innerHTML='';
+    (d.servers||[]).forEach(function(s){
+      var item=document.createElement('div');
+      item.className='server-item'+(activeServer===s.name?' active':'');
+      item.innerHTML='<span class="name">'+s.name+'</span><span class="dot '+(s.running?'on':'off')+'"></span>';
+      item.onclick=function(){selectServer(s.name)};
+      el.appendChild(item);
+    });
+  });
+}
+function selectServer(name){
+  activeServer=name;
+  loadServers();
+  connectWS(name);
+  fetch('/api/mc/console?name='+encodeURIComponent(name)).then(function(r){return r.json()}).then(function(d){
+    var wrap=document.getElementById('consoleWrap');
+    wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button></div></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">&gt;</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
+    var out=document.getElementById('consoleOutput');
+    (d.lines||[]).forEach(function(line){appendLine(out,line)});
+    out.scrollTop=out.scrollHeight;
+    document.getElementById('cmdInput').focus();
+  });
+}
+function appendLine(out,line){
+  var div=document.createElement('div');
+  var tsMatch=line.match(/^\[(\d{2}:\d{2}:\d{2})\]/);
+  if(tsMatch){div.innerHTML='<span class="ts">'+tsMatch[1]+'</span>'+escapeHtml(line.substring(10))}
+  else{div.textContent=line}
+  out.appendChild(div);
+  out.scrollTop=out.scrollHeight;
+}
+function escapeHtml(t){var d=document.createElement('div');d.textContent=t;return d.innerHTML}
+function connectWS(name){
+  if(ws){ws.close();ws=null}
+  var proto=location.protocol==='https:'?'wss:':'ws:';
+  ws=new WebSocket(proto+'//'+location.host+'/ws/mc/'+encodeURIComponent(name));
+  ws.onmessage=function(ev){
+    try{
+      var d=JSON.parse(ev.data);
+      if(d.type==='output'){
+        var out=document.getElementById('consoleOutput');
+        if(out)appendLine(out,d.line);
+      }
+    }catch(e){}
+  };
+  ws.onclose=function(){setTimeout(function(){if(activeServer===name)connectWS(name)},3000)};
+}
+function sendCmd(){
+  var inp=document.getElementById('cmdInput');
+  if(!inp||!ws)return;
+  var cmd=inp.value.trim();
+  if(!cmd)return;
+  ws.send(JSON.stringify({type:'command',command:cmd}));
+  inp.value='';
+}
+function startServer(){
+  if(!activeServer)return;
+  fetch('/api/mc/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:activeServer})}).then(function(r){return r.json()}).then(function(){setTimeout(function(){selectServer(activeServer);loadServers()},1000)});
+}
+function stopServer(){
+  if(!activeServer)return;
+  fetch('/api/mc/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:activeServer})}).then(function(r){return r.json()}).then(function(){setTimeout(function(){selectServer(activeServer);loadServers()},1000)});
+}
+if(checkAuth()){
+  loadServers();
+  setInterval(loadServers,5000);
+}
+</script>
+</body>
+</html>'''
+
+async def handle_mc_page(request):
+    return web.Response(text=MC_PAGE_HTML, content_type="text/html")
+
+
 async def start_local_server(host="127.0.0.1", port=5000):
     app = web.Application()
     app.router.add_post("/decompile", handle_post)
@@ -1625,6 +1929,13 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_get("/api/logs", handle_logs)
     app.router.add_post("/api/ban", handle_ban)
     app.router.add_get("/", handle_index)
+    app.router.add_get("/mc", handle_mc_page)
+    app.router.add_get("/api/mc/servers", mc_api_servers)
+    app.router.add_post("/api/mc/start", mc_api_start)
+    app.router.add_post("/api/mc/stop", mc_api_stop)
+    app.router.add_post("/api/mc/command", mc_api_command)
+    app.router.add_get("/api/mc/console", mc_api_console)
+    app.router.add_get("/ws/mc/{name}", mc_ws_console)
     app.router.add_get("/{filename}", handle_download)
     runner = web.AppRunner(app)
     await runner.setup()
