@@ -16,6 +16,7 @@ import discord
 import requests
 import psutil
 import boto3
+from mss import mss as mss_lib
 
 from botocore.config import Config
 from discord.ext import commands
@@ -313,7 +314,7 @@ MAX_LIMIT = 200 * ONE_MB
 API_BASE = os.getenv("API_BASE", "https://luaisgame.com/api/owner")
 OWNER_KEY = os.getenv("OWNER_KEY", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID", "0"))
+BOT_OWNER_ID = int(os.environ.get("BOT_OWNER_ID", "1293889121374179328"))
 ORACLE_KEY = os.getenv("ORACLE_KEY", "")
 
 async def user_has_role(user: discord.User | discord.Member, role_ids: dict) -> bool:
@@ -834,7 +835,12 @@ async def reset_bot_presence():
     )
     await bot.change_presence(status=discord.Status.online, activity=activity)
 
+_place_info_cache = {}
+
 async def get_place_info(place_id: str, cookie: str = None) -> dict:
+    place_id = str(place_id).strip()
+    if place_id in _place_info_cache:
+        return _place_info_cache[place_id]
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
@@ -852,15 +858,23 @@ async def get_place_info(place_id: str, cookie: str = None) -> dict:
                         await asyncio.sleep(retry_after)
                         continue
                     if resp.status in (403, 404):
-                        return {"error": True, "reason": "Place is banned, content-deleted, or moderated by Roblox."}
+                        result = {"error": True, "reason": "Place is banned, content-deleted, or moderated by Roblox."}
+                        _place_info_cache[place_id] = result
+                        return result
                     if resp.status != 200:
-                        return {"error": True, "reason": f"Roblox API returned status code {resp.status}."}
+                        result = {"error": True, "reason": f"Roblox API returned status code {resp.status}."}
+                        _place_info_cache[place_id] = result
+                        return result
                     data = await resp.json()
                     if not isinstance(data, dict):
-                        return {"error": True, "reason": "Invalid response from universe resolution API."}
+                        result = {"error": True, "reason": "Invalid response from universe resolution API."}
+                        _place_info_cache[place_id] = result
+                        return result
                     universe_id = data.get("universeId")
                 if not universe_id:
-                    return {"error": True, "reason": "Universe ID not found for this place."}
+                    result = {"error": True, "reason": "Universe ID not found for this place."}
+                    _place_info_cache[place_id] = result
+                    return result
 
                 game_name = f"Place {place_id}"
                 details_url = f"https://games.roblox.com/v1/games?universeIds={universe_id}"
@@ -877,7 +891,9 @@ async def get_place_info(place_id: str, cookie: str = None) -> dict:
                             if games and isinstance(games, list):
                                 game = games[0] or {}
                                 if game.get("isArchived", False):
-                                    return {"error": True, "reason": "Game has been archived or deleted."}
+                                    result = {"error": True, "reason": "Game has been archived or deleted."}
+                                    _place_info_cache[place_id] = result
+                                    return result
                                 game_name = game.get("name", game_name)
 
                 icon_url = None
@@ -926,15 +942,19 @@ async def get_place_info(place_id: str, cookie: str = None) -> dict:
                                         "icon_url": icon_url
                                     }
 
-                return {
-                    "error": False,
-                    "name": game_name,
-                    "icon_url": icon_url
-                }
+                result = {"name": game_name, "icon_url": icon_url}
+                _place_info_cache[place_id] = result
+                return result
         except Exception as e:
-            print(f"[DEBUG] Error fetching Roblox place info: {e}")
-            return {"error": True, "reason": f"Exception occurred: {str(e)}"}
-    return {"error": True, "reason": "Roblox API rate limited. Please try again in a few seconds."}
+            print(f"[DEBUG] get_place_info error: {e}")
+            if attempt == 2:
+                result = {"error": True, "reason": f"Connection error: {str(e)}"}
+                _place_info_cache[place_id] = result
+                return result
+            await asyncio.sleep(1)
+    result = {"error": True, "reason": "Failed to get place info."}
+    _place_info_cache[place_id] = result
+    return result
 
 async def get_current_user_id() -> int | None:
     try:
@@ -1173,12 +1193,12 @@ DISCORD_CALLBACK_PAGE = r'''<!DOCTYPE html>
         .then(function(r){return r.json()})
         .then(function(d){
           if(d&&d.id){document.cookie='user_info='+encodeURIComponent(JSON.stringify(d))+';path=/;max-age='+(86400*30)}
-          window.location.hash='';window.location.href='/mc';
-        }).catch(function(){window.location.href='/mc'});
+          window.location.hash='';window.location.href='/';
+        }).catch(function(){window.location.href='/'});
       return;
     }
   }
-  window.location.href='/mc';
+  window.location.href='/';
 })();
 </script>
 <p style="color:white;background:#0a0a0f;text-align:center;padding:40px;font-family:sans-serif">Logging in...</p>
@@ -1773,9 +1793,13 @@ async def _mc_read_output(name, proc):
         mc_processes[name] = None
 
 async def mc_api_servers(request):
+    if not _is_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
     return web.json_response({"servers": _mc_get_servers()})
 
 async def mc_api_start(request):
+    if not _is_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
     name = data.get("name", "")
     loader_type = data.get("loader", "fabric")
@@ -1890,6 +1914,8 @@ async def mc_api_create(request):
     return web.json_response({"ok": True})
 
 async def mc_api_stop(request):
+    if not _is_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
     name = data.get("name", "")
     proc = mc_processes.get(name)
@@ -1908,6 +1934,8 @@ async def mc_api_stop(request):
     return web.json_response({"ok": True})
 
 async def mc_api_command(request):
+    if not _is_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
     name = data.get("name", "")
     cmd = data.get("command", "")
@@ -1922,12 +1950,16 @@ async def mc_api_command(request):
     return web.json_response({"ok": True})
 
 async def mc_api_console(request):
+    if not _is_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
     name = request.query.get("name", "")
     buf = mc_console_buffers.get(name, [])
     return web.json_response({"lines": buf[-200:]})
 
 
 async def mc_api_mods(request):
+    if not _is_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
     name = request.query.get("name", "")
     server_dir = os.path.join(MC_DIR, name)
     mods_dir = os.path.join(server_dir, "mods")
@@ -1993,6 +2025,8 @@ async def mc_api_delete_mod(request):
 
 async def mc_ws_console(request):
     name = request.match_info.get("name", "")
+    if not _is_admin(request):
+        return web.Response(status=401)
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     ws_list = mc_ws_clients.setdefault(name, [])
@@ -2083,6 +2117,12 @@ body{
 .server-item .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 .server-item .dot.on{background:#22c55e;box-shadow:0 0 6px rgba(34,197,94,.5)}
 .server-item .dot.off{background:rgba(255,255,255,.15)}
+.toggle{position:relative;display:inline-block;width:40px;height:22px;flex-shrink:0}
+.toggle input{opacity:0;width:0;height:0}
+.toggle-slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:rgba(255,255,255,.1);border-radius:22px;transition:.3s}
+.toggle-slider:before{position:absolute;content:"";height:16px;width:16px;left:3px;bottom:3px;background-color:#8b949e;border-radius:50%;transition:.3s}
+.toggle input:checked+.toggle-slider{background-color:rgba(0,220,120,.3)}
+.toggle input:checked+.toggle-slider:before{transform:translateX(18px);background-color:#00dc78}
 .sidebar-bottom{padding:8px}
 .sidebar-bottom input{
   width:100%;padding:8px 10px;border-radius:8px;
@@ -2123,6 +2163,8 @@ body{
 }
 .console-header .actions button:hover{background:rgba(255,255,255,.05);color:#fff}
 .console-header .actions .start{border-color:rgba(34,197,94,.25);color:#22c55e}
+.console-header .actions .props{border-color:rgba(0,220,120,.25);color:#00dc78}
+.console-header .actions .props:hover{background:rgba(0,220,120,.08);border-color:rgba(0,220,120,.35);color:#00dc78}
 .console-header .actions .start:hover{background:rgba(34,197,94,.08);border-color:rgba(34,197,94,.4)}
 .console-header .actions .stop{border-color:rgba(239,68,68,.25);color:#ef4444}
 .console-header .actions .stop:hover{background:rgba(239,68,68,.08);border-color:rgba(239,68,68,.4)}
@@ -2277,7 +2319,7 @@ function selectServer(name){
       document.getElementById('cmdInput').focus();
       return;
     }
-    wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
+    wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button><button class="props" onclick="openProps()">Properties</button></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
     out=document.getElementById('consoleOutput');
     out.dataset.server=name;
     out.addEventListener('scroll',function(){
@@ -2376,13 +2418,117 @@ if(checkAuth()){
   loadServers();
   setInterval(loadServers,5000);
 }
+function openProps(){
+  if(!activeServer)return;
+  fetch('/api/mc/properties?name='+encodeURIComponent(activeServer),{credentials:'include'})
+    .then(r=>r.json()).then(d=>{
+      if(d.properties){
+        buildPropsEditor(d.properties);
+        document.getElementById('propsPanel').style.display='block';
+      }
+    });
+}
+function buildPropsEditor(props){
+  var html='<h3 style="color:#00dc78;margin-bottom:12px">Server Properties</h3>';
+  for(var k in props){
+    var p=props[k];
+    if(p.type==='bool'){
+      html+='<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:rgba(13,17,23,.6);border-radius:8px;margin-bottom:6px;border:1px solid rgba(0,220,120,.1)">';
+      html+='<span style="color:#c9d1d9;font-size:13px">'+k+'</span>';
+      html+='<label class="toggle"><input type="checkbox" '+(p.value==='true'?'checked':'')+' onchange="setProp(\''+k+'\',this.checked)"><span class="toggle-slider"></span></label>';
+      html+='</div>';
+    } else if(p.type==='number'){
+      html+='<div style="margin-bottom:6px"><label style="color:#8b949e;font-size:12px">'+k+'</label>';
+      html+='<input type="number" value="'+p.value+'" style="width:100%;background:#0d1117;border:1px solid rgba(255,255,255,.06);color:#c9d1d9;padding:6px 10px;border-radius:6px;font-size:13px;margin-top:4px;outline:none" onchange="setProp(\''+k+'\',this.value)" oninput="this.value=this.value.replace(/[^0-9\-.]/g,\'\')"></div>';
+    } else {
+      html+='<div style="margin-bottom:6px"><label style="color:#8b949e;font-size:12px">'+k+'</label>';
+      html+='<input type="text" value="'+p.value+'" style="width:100%;background:#0d1117;border:1px solid rgba(255,255,255,.06);color:#c9d1d9;padding:6px 10px;border-radius:6px;font-size:13px;margin-top:4px;outline:none" onchange="setProp(\''+k+'\',this.value)"></div>';
+    }
+  }
+  html+='<button onclick="saveProps()" style="margin-top:12px;width:100%;background:#00dc78;color:#050508;padding:10px;border:none;border-radius:8px;font-weight:600;cursor:pointer">Save Properties</button>';
+  document.getElementById('propsContent').innerHTML=html;
+}
+function setProp(k,v){
+  if(typeof v==='boolean'){
+    propsCache[k].value=v?'true':'false';
+  } else {
+    propsCache[k].value=v;
+  }
+}
+var propsCache={};
+function saveProps(){
+  if(!activeServer)return;
+  fetch('/api/mc/properties',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer,properties:propsCache})})
+    .then(r=>r.json()).then(d=>{if(d.ok)alert('Saved!')});
+}
 </script>
+<div id="propsPanel" style="display:none;position:fixed;top:0;right:0;width:360px;height:100vh;background:rgba(5,5,8,.95);border-left:1px solid rgba(0,220,120,.15);z-index:200;overflow-y:auto;padding:20px;backdrop-filter:blur(12px)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+    <h2 style="color:#fff;font-size:16px">Server Properties</h2>
+    <button onclick="document.getElementById('propsPanel').style.display='none'" style="background:none;border:none;color:#8b949e;font-size:20px;cursor:pointer">X</button>
+  </div>
+  <div id="propsContent"></div>
+</div>
 </body>
 </html>'''
 
 async def handle_mc_page(request):
     return web.Response(text=MC_PAGE_HTML, content_type="text/html")
 
+
+def _parse_properties(server_dir):
+    props_path = os.path.join(server_dir, "server.properties")
+    props = {}
+    if os.path.exists(props_path):
+        with open(props_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip()
+                    if v.lower() in ("true", "false"):
+                        props[k] = {"value": v, "type": "bool"}
+                    else:
+                        try:
+                            int(v)
+                            props[k] = {"value": v, "type": "number"}
+                        except ValueError:
+                            try:
+                                float(v)
+                                props[k] = {"value": v, "type": "number"}
+                            except ValueError:
+                                props[k] = {"value": v, "type": "string"}
+    return props
+
+def _save_properties(server_dir, props):
+    props_path = os.path.join(server_dir, "server.properties")
+    with open(props_path, "w") as f:
+        for k, v in props.items():
+            f.write(f"{k}={v['value']}\n")
+
+async def mc_api_properties(request):
+    if not _is_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    name = request.query.get("name", "")
+    server_dir = os.path.join(MC_DIR, name)
+    props_path = os.path.join(server_dir, "server.properties")
+    if not os.path.exists(props_path):
+        return web.json_response({"error": "server.properties not found"}, status=404)
+    props = _parse_properties(server_dir)
+    return web.json_response({"properties": props})
+
+async def mc_api_set_properties(request):
+    if not _is_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    data = await request.json()
+    name = data.get("name", "")
+    server_dir = os.path.join(MC_DIR, name)
+    props = data.get("properties", {})
+    _save_properties(server_dir, props)
+    return web.json_response({"ok": True})
 
 async def start_local_server(host="127.0.0.1", port=5000):
     app = web.Application()
@@ -2406,6 +2552,8 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_post("/api/mc/upload-mod", mc_api_upload_mod)
     app.router.add_post("/api/mc/delete-mod", mc_api_delete_mod)
     app.router.add_get("/ws/mc/{name}", mc_ws_console)
+    app.router.add_get("/api/mc/properties", mc_api_properties)
+    app.router.add_post("/api/mc/properties", mc_api_set_properties)
     app.router.add_get("/{filename}", handle_download)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -3015,3 +3163,104 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
         is_decompiling = running_jobs > 0
         current_active_data = None
         await reset_bot_presence()
+
+EVENT_GUILD_ID = 1540376749400137808
+EVENT_CHANNEL_ID = 1545977764077903942
+_screen_share_task = None
+_mss = None
+
+async def screenshare_auto_join():
+    global _screen_share_task, _mss
+    while True:
+        await asyncio.sleep(30)
+        try:
+            guild = bot.get_guild(EVENT_GUILD_ID)
+            if not guild:
+                continue
+            channel = guild.get_channel(EVENT_CHANNEL_ID)
+            if not channel:
+                continue
+            voice_state = guild.me.voice
+            if voice_state and voice_state.channel and voice_state.channel.id == channel.id:
+                if not guild.me.guild_permissions.speak:
+                    try:
+                        await channel.permission_synced
+                        await channel.edit(slowmode_delay=0)
+                    except Exception:
+                        pass
+                continue
+            if voice_state and voice_state.channel:
+                try:
+                    await voice_state.channel.disconnect()
+                except Exception:
+                    pass
+            try:
+                vc = await channel.connect()
+                print(f"[SCREENSHARE] Joined voice channel {channel.name}")
+            except Exception as e:
+                print(f"[SCREENSHARE] Failed to join: {e}")
+                continue
+            if not guild.me.guild_permissions.speak:
+                try:
+                    await channel.edit(slowmode_delay=0)
+                    await vc.edit(speak=True, deafen=False)
+                    print(f"[SCREENSHARE] Requested speak permission")
+                except Exception as e:
+                    print(f"[SCREENSHARE] Failed to request speak: {e}")
+                    continue
+            _screen_share_task = asyncio.create_task(screenshare_loop(vc))
+        except Exception as e:
+            print(f"[SCREENSHARE] Auto-join error: {e}")
+            await asyncio.sleep(10)
+
+async def screenshare_loop(vc):
+    global _mss
+    try:
+        _mss = mss_lib()
+        monitor = _mss.monitors[1]
+        while True:
+            try:
+                if not vc or not vc.is_connected():
+                    print("[SCREENSHARE] Voice client disconnected, stopping.")
+                    break
+                img = _mss.grab(monitor)
+                img_bytes = bytes(img.rgb)
+                import wave
+                import struct
+                width = monitor["width"]
+                height = monitor["height"]
+                frame_size = width * height * 3
+                data = bytearray()
+                for y in range(0, height, 2):
+                    for x in range(0, width, 2):
+                        idx = (y * width + x) * 3
+                        r = img_bytes[idx]
+                        g = img_bytes[idx + 1]
+                        b = img_bytes[idx + 2]
+                        gray = int(0.299 * r + 0.587 * g + 0.114 * b)
+                        data.extend(struct.pack('<h', gray - 128))
+                if data:
+                    try:
+                        import numpy as np
+                        audio_data = np.array(list(data), dtype=np.int16).tobytes()
+                        await vc.send(audio_data)
+                    except Exception:
+                        pass
+                await asyncio.sleep(1/60)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"[SCREENSHARE] Frame error: {e}")
+                await asyncio.sleep(0.1)
+    except Exception as e:
+        print(f"[SCREENSHARE] Loop error: {e}")
+    finally:
+        if _mss:
+            _mss.close()
+        print("[SCREENSHARE] Stopped.")
+
+async def start_screenshare_on_ready():
+    await bot.wait_until_ready()
+    asyncio.create_task(screenshare_auto_join())
+
+bot.loop.create_task(start_screenshare_on_ready())
