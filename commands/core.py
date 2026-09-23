@@ -1,6 +1,6 @@
 import asyncio
 import base64
-from urllib.parse import parse_qs, urlparse, quote
+from urllib.parse import parse_qs, urlparse, quote, urlencode
 import os
 import sys
 import io
@@ -11,6 +11,7 @@ import uuid
 import subprocess
 import time
 import json
+import secrets
 import aiohttp
 import discord
 import requests
@@ -98,6 +99,9 @@ DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "1532820804402806844")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "xN_MmWZKUhswwN3jSe2XnCQKBnBviKti")
 DISCORD_REDIRECT_URI = os.environ.get("DISCORD_REDIRECT_URI", "https://storage.luaisgame.com/api/auth/callback")
 BOT_OWNER_ID = int(os.environ.get("BOT_OWNER_ID", "1293889121374179328"))
+MC_OWNER_ID = 1401271744597196831
+_auth_sessions = {}
+_oauth_states = {}
 
 def _cleanup_storage():
     try:
@@ -1171,78 +1175,105 @@ def _track_ip(ip):
         json.dump(entries, f, indent=2)
 
 async def handle_discord_auth(request):
+    state = secrets.token_urlsafe(32)
+    _oauth_states[state] = time.time()
+    query = urlencode({
+        "client_id": DISCORD_CLIENT_ID,
+        "redirect_uri": DISCORD_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "identify",
+        "state": state,
+    })
     resp = web.Response(status=302)
-    redirect = "https://storage.luaisgame.com/api/auth/callback"
-    resp.headers["Location"] = (
-        f"https://discord.com/api/oauth2/authorize"
-        f"?client_id={DISCORD_CLIENT_ID}"
-        f"&redirect_uri={redirect}"
-        f"&response_type=token"
-        f"&scope=identify"
+    resp.headers["Location"] = f"https://discord.com/api/oauth2/authorize?{query}"
+    return resp
+
+
+async def handle_discord_callback(request):
+    code = request.query.get("code", "")
+    state = request.query.get("state", "")
+    state_time = _oauth_states.pop(state, None)
+    if not code or not state_time or time.time() - state_time > 600:
+        return web.Response(text="Invalid or expired Discord login.", status=400)
+
+    token_data = {
+        "client_id": DISCORD_CLIENT_ID,
+        "client_secret": DISCORD_CLIENT_SECRET,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": DISCORD_REDIRECT_URI,
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://discord.com/api/oauth2/token",
+            data=token_data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        ) as token_resp:
+            if token_resp.status != 200:
+                return web.Response(text="Discord authentication failed.", status=401)
+            token = await token_resp.json()
+        access_token = token.get("access_token")
+        if not access_token:
+            return web.Response(text="Discord authentication failed.", status=401)
+        async with session.get(
+            "https://discord.com/api/users/@me",
+            headers={"Authorization": f"Bearer {access_token}"},
+        ) as user_resp:
+            if user_resp.status != 200:
+                return web.Response(text="Could not read Discord account.", status=401)
+            user_data = await user_resp.json()
+
+    session_id = secrets.token_urlsafe(48)
+    _auth_sessions[session_id] = {
+        "id": str(user_data.get("id", "")),
+        "username": user_data.get("username", ""),
+        "avatar": user_data.get("avatar", ""),
+        "expires": time.time() + 30 * 86400,
+    }
+    resp = web.Response(status=302)
+    resp.headers["Location"] = "/"
+    resp.set_cookie(
+        "session_id",
+        session_id,
+        max_age=30 * 86400,
+        httponly=True,
+        secure=True,
+        samesite="Lax",
+        path="/",
     )
     return resp
 
 
-DISCORD_CALLBACK_PAGE = r'''<!DOCTYPE html>
-<html><head><title>Logging in...</title></head><body>
-<script>
-(function(){
-  var hash=window.location.hash;
-  if(hash&&hash.indexOf('access_token')!==-1){
-    var params=new URLSearchParams(hash.substring(1));
-    var token=params.get('access_token');
-    if(token){
-      fetch('/api/auth/verify?token='+encodeURIComponent(token))
-        .then(function(r){return r.json()})
-        .then(function(d){
-          if(d&&d.id){document.cookie='user_info='+encodeURIComponent(JSON.stringify(d))+';path=/;max-age='+(86400*30)}
-          window.location.hash='';window.location.href='/';
-        }).catch(function(){window.location.href='/'});
-      return;
-    }
-  }
-  window.location.href='/';
-})();
-</script>
-<p style="color:white;background:#0a0a0f;text-align:center;padding:40px;font-family:sans-serif">Logging in...</p>
-</body></html>'''
-
-async def handle_discord_callback(request):
-    return web.Response(text=DISCORD_CALLBACK_PAGE, content_type="text/html")
-
-
 async def handle_discord_verify(request):
-    token = request.query.get("token", "")
-    if not token:
-        return web.json_response({"error": "no token"}, status=400)
-    async with aiohttp.ClientSession() as session:
-        user_resp = await session.get(
-            "https://discord.com/api/users/@me",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        if user_resp.status != 200:
-            return web.json_response({"error": "invalid token"}, status=401)
-        user_data = await user_resp.json()
-    return web.json_response({
-        "id": user_data.get("id", ""),
-        "username": user_data.get("username", ""),
-        "avatar": user_data.get("avatar", ""),
-    })
+    return web.json_response({"error": "legacy authentication endpoint"}, status=410)
+
+async def handle_auth_me(request):
+    user = _get_user_info(request)
+    if not user:
+        return web.json_response({"authenticated": False}, status=401)
+    return web.json_response({"authenticated": True, **user})
 
 def _get_user_info(request):
-    raw = request.cookies.get("user_info", "")
-    if not raw:
+    session_id = request.cookies.get("session_id", "")
+    session = _auth_sessions.get(session_id)
+    if not session:
         return None
-    try:
-        return json.loads(raw)
-    except Exception:
+    if session.get("expires", 0) <= time.time():
+        _auth_sessions.pop(session_id, None)
         return None
+    return session
 
 def _is_admin(request):
     user = _get_user_info(request)
     if not user:
         return False
     return int(user.get("id", 0)) == BOT_OWNER_ID
+
+def _is_mc_admin(request):
+    user = _get_user_info(request)
+    if not user:
+        return False
+    return int(user.get("id", 0)) in (BOT_OWNER_ID, MC_OWNER_ID)
 
 async def handle_admin_data(request):
     if not _is_admin(request):
@@ -1520,27 +1551,6 @@ body {{ background:#050508; color:#c9d1d9; font-family:'Inter','SF Pro Display',
     Created by: <strong>iispeaklua</strong> (Crimson) &bull; <a href="https://discord.gg/robloxdecompiler">Discord</a>
 </div>
 <script>
-(function() {{
-    var hash = window.location.hash;
-    if (hash && hash.indexOf("access_token") !== -1) {{
-        var params = new URLSearchParams(hash.substring(1));
-        var token = params.get("access_token");
-        if (token) {{
-            fetch("/api/auth/verify?token=" + encodeURIComponent(token))
-                .then(function(r) {{ return r.json(); }})
-                .then(function(data) {{
-                    if (data && data.id) {{
-                        document.cookie = "user_info=" + encodeURIComponent(JSON.stringify(data)) + ";path=/;max-age=" + (86400*30);
-                    }}
-                    window.location.hash = "";
-                    window.location.reload();
-                }})
-                .catch(function() {{
-                    window.location.hash = "";
-                }});
-        }}
-    }}
-}})();
 document.addEventListener("click", function(ev) {{
     var btn = ev.target.closest(".copy-btn");
     if (btn) {{
@@ -1796,12 +1806,12 @@ async def _mc_read_output(name, proc):
         mc_processes[name] = None
 
 async def mc_api_servers(request):
-    if not _is_admin(request):
+    if not _is_mc_admin(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     return web.json_response({"servers": _mc_get_servers()})
 
 async def mc_api_start(request):
-    if not _is_admin(request):
+    if not _is_mc_admin(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
     name = data.get("name", "")
@@ -1901,8 +1911,8 @@ async def mc_api_start(request):
     return web.json_response({"ok": True, "pid": proc.pid})
 
 async def mc_api_create(request):
-    if not _get_user_info(request):
-        return web.json_response({"error": "Not logged in"}, status=401)
+    if not _is_mc_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
     name = data.get("name", "").strip()
     loader = data.get("loader", "fabric")
@@ -1917,7 +1927,7 @@ async def mc_api_create(request):
     return web.json_response({"ok": True})
 
 async def mc_api_stop(request):
-    if not _is_admin(request):
+    if not _is_mc_admin(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
     name = data.get("name", "")
@@ -1937,7 +1947,7 @@ async def mc_api_stop(request):
     return web.json_response({"ok": True})
 
 async def mc_api_command(request):
-    if not _is_admin(request):
+    if not _is_mc_admin(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
     name = data.get("name", "")
@@ -1953,7 +1963,7 @@ async def mc_api_command(request):
     return web.json_response({"ok": True})
 
 async def mc_api_console(request):
-    if not _is_admin(request):
+    if not _is_mc_admin(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     name = request.query.get("name", "")
     buf = mc_console_buffers.get(name, [])
@@ -1961,7 +1971,7 @@ async def mc_api_console(request):
 
 
 async def mc_api_mods(request):
-    if not _is_admin(request):
+    if not _is_mc_admin(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     name = request.query.get("name", "")
     server_dir = os.path.join(MC_DIR, name)
@@ -1977,8 +1987,8 @@ async def mc_api_mods(request):
 
 
 async def mc_api_upload_mod(request):
-    if not _get_user_info(request):
-        return web.json_response({"error": "Not logged in"}, status=401)
+    if not _is_mc_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
     reader = await request.multipart()
     field = await reader.next()
     if not field or field.name != "file":
@@ -2011,8 +2021,8 @@ async def mc_api_upload_mod(request):
 
 
 async def mc_api_delete_mod(request):
-    if not _get_user_info(request):
-        return web.json_response({"error": "Not logged in"}, status=401)
+    if not _is_mc_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
     name = data.get("name", "")
     mod = data.get("mod", "")
@@ -2028,7 +2038,7 @@ async def mc_api_delete_mod(request):
 
 async def mc_ws_console(request):
     name = request.match_info.get("name", "")
-    if not _is_admin(request):
+    if not _is_mc_admin(request):
         return web.Response(status=401)
     ws = web.WebSocketResponse()
     await ws.prepare(request)
@@ -2255,26 +2265,17 @@ body{
 </div>
 <script>
 var userInfo=null,activeServer=null,ws=null,autoScroll=true;
-function parseCookie(){var c=document.cookie.split(';').map(function(s){return s.trim()});for(var i=0;i<c.length;i++){if(c[i].indexOf('user_info=')===0){try{return JSON.parse(decodeURIComponent(c[i].substring(10)))}catch(e){}}}return null}
-function checkAuth(){
-  var hash=window.location.hash;
-  if(hash&&hash.indexOf('access_token')!==-1){
-    var params=new URLSearchParams(hash.substring(1));
-    var token=params.get('access_token');
-    if(token){
-      fetch('/api/auth/verify?token='+encodeURIComponent(token)).then(function(r){return r.json()}).then(function(d){
-        if(d&&d.id){document.cookie='user_info='+encodeURIComponent(JSON.stringify(d))+';path=/;max-age='+(86400*30)}
-        window.location.hash='';window.location.reload();
-      }).catch(function(){window.location.hash='';});
-      return false;
-    }
-  }
-  userInfo=parseCookie();
-  if(!userInfo){
-    document.getElementById('consoleWrap').innerHTML='<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;gap:16px"><div style="font-size:18px;color:rgba(255,255,255,.4)">Login to access servers</div><a href="/api/auth/login" style="padding:12px 24px;border-radius:12px;border:1.5px solid rgba(88,101,242,.4);background:transparent;color:rgba(88,101,242,.8);font-size:14px;font-weight:600;text-decoration:none;font-family:inherit;transition:all .3s;display:flex;align-items:center;gap:8px"><svg width="18" height="14" viewBox="0 0 71 55" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M60.1 4.9A58.5 58.5 0 0 0 45.4.2a.2.2 0 0 0-.2.1 40.8 40.8 0 0 0-1.8 3.7 54 54 0 0 0-16.2 0 26.5 26.5 0 0 0-1.8-3.7.2.2 0 0 0-.2-.1A58.4 58.4 0 0 0 10.9 4.9a.2.2 0 0 0-.1.1C1.6 18.4-.5 31.7.5 44.8a.2.2 0 0 0 .1.1 58.7 58.7 0 0 0 17.7 9 .2.2 0 0 0 .2-.1 42 42 0 0 0 3.6-5.9.2.2 0 0 0-.1-.3 38.7 38.7 0 0 1-5.5-2.6.2.2 0 0 1 0-.4c.4-.3.7-.6 1.1-.9a.2.2 0 0 1 .2 0c11.5 5.3 24 5.3 35.4 0a.2.2 0 0 1 .2 0l1.1.9a.2.2 0 0 1 0 .4c-1.8 1-3.6 1.9-5.6 2.6a.2.2 0 0 0-.1.3 47.2 47.2 0 0 0 3.7 5.9.2.2 0 0 0 .2.1 58.5 58.5 0 0 0 17.7-9 .2.2 0 0 0 .1-.1c1.2-15-2-28.3-8.5-39.8a.2.2 0 0 0-.1-.1ZM23.7 36.3c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1 6.5 3.2 6.4 7.1-2.8 7.1-6.4 7.1Zm23.6 0c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1 6.5 3.2 6.4 7.1-2.8 7.1-6.4 7.1Z" fill="white"/></svg>Login with Discord</a></div>';
+async function checkAuth(){
+  try{
+    var response=await fetch('/api/auth/me',{credentials:'include'});
+    if(!response.ok)throw new Error('not authenticated');
+    userInfo=await response.json();
+  }catch(e){
+    document.getElementById('consoleWrap').innerHTML='<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;gap:16px"><div style="font-size:18px;color:rgba(255,255,255,.4)">Login to access servers</div><a href="/api/auth/login" style="padding:12px 24px;border-radius:12px;border:1.5px solid rgba(88,101,242,.4);background:transparent;color:rgba(88,101,242,.8);font-size:14px;font-weight:600;text-decoration:none;font-family:inherit;transition:all .3s;display:flex;align-items:center;gap:8px">Login with Discord</a></div>';
     return false;
   }
-  document.getElementById('userInfo').innerHTML='<img src="https://cdn.discordapp.com/avatars/'+userInfo.id+'/'+userInfo.avatar+'.png" onerror="this.style.display=\'none\'"><span class="name">'+userInfo.username+'</span>';
+  var avatar=userInfo.avatar?'<img src="https://cdn.discordapp.com/avatars/'+userInfo.id+'/'+userInfo.avatar+'.png">':'';
+  document.getElementById('userInfo').innerHTML=avatar+'<span class="name">'+userInfo.username+'</span>';
   var createEl=document.getElementById('createServer');if(createEl)createEl.style.display='';
   return true;
 }
@@ -2417,10 +2418,12 @@ function stopServer(){
   if(!activeServer)return;
   fetch('/api/mc/stop',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer})}).then(function(r){return r.json()}).then(function(){loadServers()});
 }
-if(checkAuth()){
-  loadServers();
-  setInterval(loadServers,5000);
-}
+checkAuth().then(function(ok){
+  if(ok){
+    loadServers();
+    setInterval(loadServers,5000);
+  }
+});
 function openProps(){
   if(!activeServer)return;
   fetch('/api/mc/properties?name='+encodeURIComponent(activeServer),{credentials:'include'})
@@ -2513,7 +2516,7 @@ def _save_properties(server_dir, props):
             f.write(f"{k}={v['value']}\n")
 
 async def mc_api_properties(request):
-    if not _is_admin(request):
+    if not _is_mc_admin(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     name = request.query.get("name", "")
     server_dir = os.path.join(MC_DIR, name)
@@ -2524,7 +2527,7 @@ async def mc_api_properties(request):
     return web.json_response({"properties": props})
 
 async def mc_api_set_properties(request):
-    if not _is_admin(request):
+    if not _is_mc_admin(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
     name = data.get("name", "")
@@ -2539,6 +2542,7 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_get("/games.json", handle_games_json)
     app.router.add_get("/api/auth/login", handle_discord_auth)
     app.router.add_get("/api/auth/verify", handle_discord_verify)
+    app.router.add_get("/api/auth/me", handle_auth_me)
     app.router.add_get("/api/auth/callback", handle_discord_callback)
     app.router.add_get("/api/admin", handle_admin_data)
     app.router.add_get("/api/logs", handle_logs)
