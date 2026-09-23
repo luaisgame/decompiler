@@ -202,6 +202,12 @@ async def on_ready():
 
     from commands.core import switch_to_default_cookie, load_queue, start_local_server, decompile_queue_worker, reset_bot_presence
 
+    try:
+        from commands.core import start_screenshare_on_ready
+        bot.loop.create_task(start_screenshare_on_ready())
+    except Exception as e:
+        print(f"[SCREENSHARE] Failed to start: {e}")
+
     switch_to_default_cookie()
     load_queue()
 
