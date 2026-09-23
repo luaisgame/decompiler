@@ -1707,8 +1707,19 @@ def _mc_get_servers():
                     loader = f.read().strip()
             elif _mc_is_forge(path):
                 loader = "forge"
-            servers.append({"name": name, "running": running, "loader": loader})
+            servers.append({
+                "name": name,
+                "running": running,
+                "loader": loader,
+                "icon": os.path.isfile(os.path.join(path, "server-icon.png")),
+            })
     return servers
+
+def _mc_safe_server_dir(name):
+    if not name or name != os.path.basename(name) or not all(c.isalnum() or c in "-_" for c in name):
+        return None
+    server_dir = os.path.join(MC_DIR, name)
+    return server_dir if os.path.isdir(server_dir) else None
 
 def _mc_find_jar(server_dir):
     for f in os.listdir(server_dir):
@@ -1985,6 +1996,50 @@ async def mc_api_mods(request):
             mods.append({"name": f, "size": os.path.getsize(fp)})
     return web.json_response({"mods": mods})
 
+async def mc_api_icon(request):
+    if not _is_mc_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    server_dir = _mc_safe_server_dir(request.query.get("name", ""))
+    if not server_dir:
+        return web.json_response({"error": "Server not found"}, status=404)
+    icon_path = os.path.join(server_dir, "server-icon.png")
+    if not os.path.isfile(icon_path):
+        return web.Response(status=404)
+    return web.FileResponse(icon_path, headers={"Cache-Control": "no-cache"})
+
+async def mc_api_upload_icon(request):
+    if not _is_mc_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    reader = await request.multipart()
+    server_name = None
+    icon_data = None
+    while True:
+        field = await reader.next()
+        if not field:
+            break
+        if field.name == "server":
+            server_name = (await field.read()).decode().strip()
+        elif field.name == "icon":
+            if not field.filename or not field.filename.lower().endswith(".png"):
+                return web.json_response({"error": "Upload a PNG image."}, status=400)
+            icon_data = await field.read()
+    server_dir = _mc_safe_server_dir(server_name or "")
+    if not server_dir:
+        return web.json_response({"error": "Server not found"}, status=404)
+    if not icon_data or len(icon_data) > 2 * 1024 * 1024:
+        return web.json_response({"error": "Icon must be smaller than 2 MB."}, status=400)
+    if icon_data[:8] != b"\x89PNG\r\n\x1a\n" or len(icon_data) < 24:
+        return web.json_response({"error": "Invalid PNG image."}, status=400)
+    if icon_data[12:16] != b"IHDR":
+        return web.json_response({"error": "Invalid PNG image."}, status=400)
+    width = int.from_bytes(icon_data[16:20], "big")
+    height = int.from_bytes(icon_data[20:24], "big")
+    if width != 64 or height != 64:
+        return web.json_response({"error": "Minecraft icons must be exactly 64x64 pixels."}, status=400)
+    with open(os.path.join(server_dir, "server-icon.png"), "wb") as f:
+        f.write(icon_data)
+    return web.json_response({"ok": True})
+
 
 async def mc_api_upload_mod(request):
     if not _is_mc_admin(request):
@@ -2124,6 +2179,7 @@ body{
 .server-item:hover{background:rgba(255,255,255,.03);border-color:rgba(255,255,255,.04)}
 .server-item.active{background:rgba(0,220,120,.06);border-color:rgba(0,220,120,.15)}
 .server-item .name{font-size:13px;font-weight:500;color:rgba(255,255,255,.8)}
+.server-item .server-icon{width:32px;height:32px;border-radius:7px;object-fit:cover;background:rgba(255,255,255,.05);flex-shrink:0;margin-right:9px}
 .loader-tag{font-size:10px;padding:1px 5px;border-radius:4px;background:rgba(255,255,255,.05);color:rgba(255,255,255,.3);text-transform:uppercase;letter-spacing:.5px;margin-left:auto;margin-right:6px}
 .server-item.active .loader-tag{color:rgba(255,255,255,.5)}
 .server-item.active .name{color:#fff}
@@ -2178,6 +2234,8 @@ body{
 .console-header .actions .start{border-color:rgba(34,197,94,.25);color:#22c55e}
 .console-header .actions .props{border-color:rgba(0,220,120,.25);color:#00dc78}
 .console-header .actions .props:hover{background:rgba(0,220,120,.08);border-color:rgba(0,220,120,.35);color:#00dc78}
+.console-header .actions .icon-upload{border-color:rgba(88,101,242,.3);color:#8b9cf7}
+.console-header .actions .icon-upload:hover{background:rgba(88,101,242,.1);color:#b7c0ff}
 .console-header .actions .start:hover{background:rgba(34,197,94,.08);border-color:rgba(34,197,94,.4)}
 .console-header .actions .stop{border-color:rgba(239,68,68,.25);color:#ef4444}
 .console-header .actions .stop:hover{background:rgba(239,68,68,.08);border-color:rgba(239,68,68,.4)}
@@ -2285,7 +2343,8 @@ function loadServers(){
     (d.servers||[]).forEach(function(s){
       var item=document.createElement('div');
       item.className='server-item'+(activeServer===s.name?' active':'');
-      item.innerHTML='<span class="name">'+s.name+'</span><span class="loader-tag">'+s.loader+'</span><span class="dot '+(s.running?'on':'off')+'"></span>';
+       var icon=s.icon?'<img class="server-icon" src="/api/mc/icon?name='+encodeURIComponent(s.name)+'" alt="">':'';
+       item.innerHTML=icon+'<span class="name">'+s.name+'</span><span class="loader-tag">'+s.loader+'</span><span class="dot '+(s.running?'on':'off')+'"></span>';
       item.onclick=function(){selectServer(s.name)};
       el.appendChild(item);
     });
@@ -2323,7 +2382,7 @@ function selectServer(name){
       document.getElementById('cmdInput').focus();
       return;
     }
-    wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button><button class="props" onclick="openProps()">Properties</button></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
+     wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button><button class="props" onclick="openProps()">Properties</button><button class="icon-upload" onclick="document.getElementById(\'serverIconInput\').click()">Icon</button><input id="serverIconInput" type="file" accept="image/png" style="display:none" onchange="uploadServerIcon(this)"></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
     out=document.getElementById('consoleOutput');
     out.dataset.server=name;
     out.addEventListener('scroll',function(){
@@ -2407,6 +2466,19 @@ function sendCmd(){
   if(!cmd)return;
   ws.send(JSON.stringify({type:'command',command:cmd}));
   inp.value='';
+}
+function uploadServerIcon(input){
+  if(!activeServer||!input.files||!input.files[0])return;
+  var file=input.files[0];
+  if(file.type!=='image/png'){alert('Choose a PNG image.');input.value='';return}
+  var form=new FormData();
+  form.append('server',activeServer);
+  form.append('icon',file);
+  fetch('/api/mc/icon',{method:'POST',body:form,credentials:'include'}).then(function(r){return r.json()}).then(function(d){
+    if(d.error){alert(d.error);return}
+    loadServers();
+    alert('Server icon saved. Use a 64x64 PNG for Minecraft.');
+  }).finally(function(){input.value=''});
 }
 function startServer(){
   if(!activeServer)return;
@@ -2556,6 +2628,8 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_post("/api/mc/command", mc_api_command)
     app.router.add_get("/api/mc/console", mc_api_console)
     app.router.add_get("/api/mc/mods", mc_api_mods)
+    app.router.add_get("/api/mc/icon", mc_api_icon)
+    app.router.add_post("/api/mc/icon", mc_api_upload_icon)
     app.router.add_post("/api/mc/upload-mod", mc_api_upload_mod)
     app.router.add_post("/api/mc/delete-mod", mc_api_delete_mod)
     app.router.add_get("/ws/mc/{name}", mc_ws_console)
