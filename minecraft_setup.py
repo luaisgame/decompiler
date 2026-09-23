@@ -11,10 +11,22 @@ MC_DIR = os.path.join(os.path.dirname(BASE_DIR), "minecraft")
 
 def _mc_ver_to_java(mc_ver):
     try:
-        release_major = int(mc_ver.split(".", 1)[0])
+        parts = [int(part) for part in mc_ver.split(".")]
+        release_major = parts[0]
         if release_major >= 26:
             print(f"[MINECRAFT] MC {mc_ver} compatibility rule selects Java 26")
             return 26
+        if release_major == 1:
+            minor = parts[1]
+            patch = parts[2] if len(parts) > 2 else 0
+            if minor > 20 or (minor == 20 and patch >= 5):
+                print(f"[MINECRAFT] MC {mc_ver} compatibility rule selects Java 21")
+                return 21
+            if minor >= 17:
+                print(f"[MINECRAFT] MC {mc_ver} compatibility rule selects Java 17")
+                return 17
+            print(f"[MINECRAFT] MC {mc_ver} compatibility rule selects Java 8")
+            return 8
         print(f"[MINECRAFT] MC {mc_ver} compatibility rule selects Java 17")
         return 17
     except Exception as e:
