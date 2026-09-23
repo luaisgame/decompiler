@@ -16,7 +16,10 @@ import discord
 import requests
 import psutil
 import boto3
-from mss import mss as mss_lib
+try:
+    from mss import mss as mss_lib
+except ImportError:
+    mss_lib = None
 
 from botocore.config import Config
 from discord.ext import commands
@@ -3170,6 +3173,9 @@ _screen_share_task = None
 _mss = None
 
 async def screenshare_auto_join():
+    if mss_lib is None:
+        print("[SCREENSHARE] mss not installed, skipping.")
+        return
     global _screen_share_task, _mss
     while True:
         await asyncio.sleep(30)
@@ -3215,6 +3221,9 @@ async def screenshare_auto_join():
 
 async def screenshare_loop(vc):
     global _mss
+    if mss_lib is None:
+        print("[SCREENSHARE] mss not installed, screenshare disabled.")
+        return
     try:
         _mss = mss_lib()
         monitor = _mss.monitors[1]
