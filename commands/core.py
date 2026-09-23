@@ -2596,6 +2596,7 @@ function openProps(){
     });
 }
 function buildPropsEditor(props){
+  propsCache=JSON.parse(JSON.stringify(props||{}));
   var html='<h3 style="color:#00dc78;margin-bottom:12px">Server Properties</h3>';
   for(var k in props){
     var p=props[k];
