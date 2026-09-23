@@ -3271,5 +3271,3 @@ async def screenshare_loop(vc):
 async def start_screenshare_on_ready():
     await bot.wait_until_ready()
     asyncio.create_task(screenshare_auto_join())
-
-bot.loop.create_task(start_screenshare_on_ready())
