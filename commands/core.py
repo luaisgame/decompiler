@@ -11,6 +11,7 @@ import uuid
 import subprocess
 import time
 import json
+import re
 import secrets
 import aiohttp
 import discord
@@ -1751,18 +1752,44 @@ def _mc_detect_ver(server_dir):
             parts = d.split("-")
             if len(parts) >= 2:
                 return parts[0]
+    versions_dir = os.path.join(server_dir, "versions")
+    if os.path.isdir(versions_dir):
+        versions = [
+            name for name in os.listdir(versions_dir)
+            if os.path.isdir(os.path.join(versions_dir, name)) and re.match(r"^\d+\.\d+(?:\.\d+)?$", name)
+        ]
+        if versions:
+            return sorted(versions, key=lambda value: tuple(int(part) for part in value.split(".")), reverse=True)[0]
+    server_libs = os.path.join(server_dir, "libraries", "net", "minecraft", "server")
+    if os.path.isdir(server_libs):
+        versions = [
+            name for name in os.listdir(server_libs)
+            if os.path.isdir(os.path.join(server_libs, name)) and re.match(r"^\d+\.\d+(?:\.\d+)?$", name)
+        ]
+        if versions:
+            return sorted(versions, key=lambda value: tuple(int(part) for part in value.split(".")), reverse=True)[0]
+    launcher_props = os.path.join(server_dir, "fabric-server-launcher.properties")
+    if os.path.exists(launcher_props):
+        with open(launcher_props, "r") as f:
+            for line in f:
+                if line.startswith("serverJar="):
+                    match = re.search(r"(\d+\.\d+(?:\.\d+)?)", line)
+                    if match:
+                        return match.group(1)
     return None
 
 def _mc_get_java(server_dir):
-    if _mc_is_forge(server_dir):
-        try:
-            from minecraft_setup import _mc_ver_to_java, _find_java
-            mc_ver = _mc_detect_ver(server_dir)
-            if mc_ver:
-                java_ver = _mc_ver_to_java(mc_ver)
-                return _find_java(java_ver)
-        except Exception:
-            pass
+    try:
+        from minecraft_setup import _mc_ver_to_java, _find_java
+        mc_ver = _mc_detect_ver(server_dir)
+        if mc_ver:
+            java_ver = _mc_ver_to_java(mc_ver)
+            java = _find_java(java_ver)
+            print(f"[MINECRAFT] MC {mc_ver} requires Java {java_ver}; using {java}")
+            return java
+        print(f"[MINECRAFT] Could not detect Minecraft version in {server_dir}; using default Java")
+    except Exception as e:
+        print(f"[MINECRAFT] Java compatibility check failed: {e}")
     return "java"
 
 FORGE_JVM_ARGS = [

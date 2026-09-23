@@ -26,7 +26,10 @@ def _mc_ver_to_java(mc_ver):
     except Exception as e:
         print(f"[MINECRAFT] Failed to query Mojang for Java version: {e}")
     try:
-        major = int(mc_ver.split(".")[1])
+        parts = mc_ver.split(".")
+        if int(parts[0]) >= 26:
+            return 25
+        major = int(parts[1])
     except Exception:
         return 21
     if major <= 16:
