@@ -1713,10 +1713,16 @@ def _mc_get_servers():
                     loader = f.read().strip()
             elif _mc_is_forge(path):
                 loader = "forge"
+            version = "auto"
+            version_file = os.path.join(path, ".mc_version")
+            if os.path.exists(version_file):
+                with open(version_file, "r") as f:
+                    version = f.read().strip() or "auto"
             servers.append({
                 "name": name,
                 "running": running,
                 "loader": loader,
+                "version": version,
                 "icon": os.path.isfile(os.path.join(path, "server-icon.png")),
             })
     return servers
@@ -1726,6 +1732,104 @@ def _mc_safe_server_dir(name):
         return None
     server_dir = os.path.join(MC_DIR, name)
     return server_dir if os.path.isdir(server_dir) else None
+
+def _mc_change_server_version(server_dir, loader_type, version):
+    from minecraft_setup import setup_server
+    backup_dir = os.path.join(MC_DIR, f".{os.path.basename(server_dir)}-version-backup-{uuid.uuid4().hex}")
+    preserved = ["world", "mods", "config", "server.properties", "eula.txt", "server-icon.png"]
+    os.makedirs(backup_dir, exist_ok=True)
+    ok = False
+    try:
+        for name in preserved:
+            source = os.path.join(server_dir, name)
+            if os.path.exists(source):
+                shutil.move(source, os.path.join(backup_dir, name))
+        for name in os.listdir(server_dir):
+            path = os.path.join(server_dir, name)
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+        ok = setup_server(server_dir, loader_type, version)
+    finally:
+        for name in preserved:
+            source = os.path.join(backup_dir, name)
+            if os.path.exists(source):
+                destination = os.path.join(server_dir, name)
+                if os.path.exists(destination):
+                    if os.path.isdir(destination):
+                        shutil.rmtree(destination)
+                    else:
+                        os.remove(destination)
+                shutil.move(source, destination)
+        if os.path.exists(backup_dir):
+            shutil.rmtree(backup_dir, ignore_errors=True)
+    if not ok:
+        return False
+    with open(os.path.join(server_dir, ".loader"), "w") as f:
+        f.write(loader_type)
+    with open(os.path.join(server_dir, ".mc_version"), "w") as f:
+        f.write(version)
+    return True
+
+async def mc_api_versions(request):
+    if not _is_mc_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://launchermeta.mojang.com/mc/game/version_manifest_v2.json") as response:
+                if response.status != 200:
+                    return web.json_response({"error": "Could not fetch Minecraft versions"}, status=502)
+                manifest = await response.json()
+        versions = [v["id"] for v in manifest.get("versions", []) if v.get("type") == "release"]
+        return web.json_response({"versions": versions})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=502)
+
+async def mc_api_change_version(request):
+    if not _is_mc_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    data = await request.json()
+    name = data.get("name", "").strip()
+    version = data.get("version", "").strip()
+    server_dir = _mc_safe_server_dir(name)
+    if not server_dir:
+        return web.json_response({"error": "Server not found"}, status=404)
+    if not re.match(r"^\d+\.\d+(?:\.\d+)?$", version):
+        return web.json_response({"error": "Invalid Minecraft version"}, status=400)
+    proc = mc_processes.get(name)
+    if proc and proc.returncode is None:
+        return web.json_response({"error": "Stop the server before changing its version"}, status=409)
+    loader_type = "fabric"
+    loader_file = os.path.join(server_dir, ".loader")
+    if os.path.exists(loader_file):
+        with open(loader_file, "r") as f:
+            loader_type = f.read().strip() or loader_type
+    try:
+        ok = await asyncio.to_thread(_mc_change_server_version, server_dir, loader_type, version)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+    if not ok:
+        return web.json_response({"error": "Could not install the selected version"}, status=500)
+    return web.json_response({"ok": True, "version": version})
+
+async def mc_api_delete_server(request):
+    if not _is_mc_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    data = await request.json()
+    name = data.get("name", "").strip()
+    server_dir = _mc_safe_server_dir(name)
+    if not server_dir:
+        return web.json_response({"error": "Server not found"}, status=404)
+    proc = mc_processes.get(name)
+    if proc and proc.returncode is None:
+        proc.kill()
+        await proc.wait()
+    mc_processes.pop(name, None)
+    mc_console_buffers.pop(name, None)
+    mc_ws_clients.pop(name, None)
+    shutil.rmtree(server_dir)
+    return web.json_response({"ok": True})
 
 def _mc_find_jar(server_dir):
     for f in os.listdir(server_dir):
@@ -1868,6 +1972,11 @@ async def mc_api_start(request):
     if os.path.exists(loader_file):
         with open(loader_file, "r") as f:
             loader_type = f.read().strip()
+    version_file = os.path.join(server_dir, ".mc_version")
+    selected_version = None
+    if os.path.exists(version_file):
+        with open(version_file, "r") as f:
+            selected_version = f.read().strip() or None
     jar = _mc_find_jar(server_dir)
     is_forge = _mc_is_forge(server_dir)
     if not jar and not is_forge:
@@ -1875,7 +1984,7 @@ async def mc_api_start(request):
         buf.append(f"[{time.strftime('%H:%M:%S')}] No server.jar found, installing {loader_type.title()} server...")
         try:
             from minecraft_setup import setup_server
-            ok = await asyncio.to_thread(setup_server, server_dir, loader_type)
+            ok = await asyncio.to_thread(setup_server, server_dir, loader_type, selected_version)
             if not ok:
                 buf.append(f"[{time.strftime('%H:%M:%S')}] Failed to install {loader_type.title()} server.")
                 return web.json_response({"error": f"{loader_type.title()} install failed"}, status=500)
@@ -1959,14 +2068,20 @@ async def mc_api_create(request):
     data = await request.json()
     name = data.get("name", "").strip()
     loader = data.get("loader", "fabric")
+    version = data.get("version", "").strip()
     if not name or not all(c.isalnum() or c in "-_" for c in name):
         return web.json_response({"error": "Invalid server name (alphanumeric, - _) only"}, status=400)
+    if version and not re.match(r"^\d+\.\d+(?:\.\d+)?$", version):
+        return web.json_response({"error": "Invalid Minecraft version"}, status=400)
     server_dir = os.path.join(MC_DIR, name)
     if os.path.exists(server_dir):
         return web.json_response({"error": "Server folder already exists"}, status=409)
     os.makedirs(server_dir, exist_ok=True)
     with open(os.path.join(server_dir, ".loader"), "w") as f:
         f.write(loader)
+    if version:
+        with open(os.path.join(server_dir, ".mc_version"), "w") as f:
+            f.write(version)
     return web.json_response({"ok": True})
 
 async def mc_api_stop(request):
@@ -2289,6 +2404,10 @@ body{
 .console-header .actions .start{border-color:rgba(34,197,94,.25);color:#22c55e}
 .console-header .actions .props{border-color:rgba(0,220,120,.25);color:#00dc78}
 .console-header .actions .props:hover{background:rgba(0,220,120,.08);border-color:rgba(0,220,120,.35);color:#00dc78}
+.console-header .actions .version{border-color:rgba(168,85,247,.3);color:#c084fc}
+.console-header .actions .version:hover{background:rgba(168,85,247,.1);color:#d8b4fe}
+.console-header .actions .delete{border-color:rgba(239,68,68,.3);color:#f87171}
+.console-header .actions .delete:hover{background:rgba(239,68,68,.1);color:#fca5a5}
 .console-header .actions .icon-upload{border-color:rgba(88,101,242,.3);color:#8b9cf7}
 .console-header .actions .icon-upload:hover{background:rgba(88,101,242,.1);color:#b7c0ff}
 .console-header .actions .start:hover{background:rgba(34,197,94,.08);border-color:rgba(34,197,94,.4)}
@@ -2380,6 +2499,7 @@ body{
     <div class="sidebar-bottom" id="createServer" style="display:none">
       <input type="text" id="newServerName" placeholder="New server name..." onkeydown="if(event.key==='Enter')createServer()">
       <select id="loaderSelect"><option value="fabric">Fabric</option><option value="forge">Forge</option></select>
+      <select id="versionSelect"><option value="">Latest version</option></select>
       <button onclick="createServer()">+ Create Server</button>
     </div>
   </div>
@@ -2425,7 +2545,7 @@ function loadServers(){
       var item=document.createElement('div');
       item.className='server-item'+(activeServer===s.name?' active':'');
        var icon=s.icon?'<img class="server-icon" src="/api/mc/icon?name='+encodeURIComponent(s.name)+'" alt="">':'';
-       item.innerHTML=icon+'<span class="name">'+s.name+'</span><span class="loader-tag">'+s.loader+'</span><span class="dot '+(s.running?'on':'off')+'"></span>';
+       item.innerHTML=icon+'<span class="name">'+s.name+'<small style="display:block;color:rgba(255,255,255,.35);font-size:10px">'+(s.version||'auto')+'</small></span><span class="loader-tag">'+s.loader+'</span><span class="dot '+(s.running?'on':'off')+'"></span>';
       item.onclick=function(){selectServer(s.name)};
       el.appendChild(item);
     });
@@ -2434,12 +2554,23 @@ function loadServers(){
 function createServer(){
   var inp=document.getElementById('newServerName');
   var sel=document.getElementById('loaderSelect');
+  var versionSel=document.getElementById('versionSelect');
   var name=inp.value.trim();
   var loader=sel?sel.value:'fabric';
+  var version=versionSel?versionSel.value:'';
   if(!name)return;
-  fetch('/api/mc/create',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:name,loader:loader})}).then(function(r){return r.json()}).then(function(d){
+  fetch('/api/mc/create',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:name,loader:loader,version:version})}).then(function(r){return r.json()}).then(function(d){
     if(d.error){alert(d.error);return}
     inp.value='';loadServers();selectServer(name);
+  });
+}
+function loadVersions(){
+  fetch('/api/mc/versions',{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
+    var select=document.getElementById('versionSelect');if(!select||!d.versions)return;
+    select.innerHTML='';
+    d.versions.forEach(function(version,index){
+      var option=document.createElement('option');option.value=version;option.textContent=version+(index===0?' (latest)':'');select.appendChild(option);
+    });
   });
 }
 var lastLineCount=0;
@@ -2463,7 +2594,7 @@ function selectServer(name){
       document.getElementById('cmdInput').focus();
       return;
     }
-     wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button><button class="props" onclick="openProps()">Properties</button><button class="icon-upload" onclick="document.getElementById(\'serverIconInput\').click()">Icon</button><input id="serverIconInput" type="file" accept="image/*" style="display:none" onchange="openIconCrop(this)"></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
+     wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button><button class="props" onclick="openProps()">Properties</button><button class="version" onclick="changeServerVersion()">Version</button><button class="icon-upload" onclick="document.getElementById(\'serverIconInput\').click()">Icon</button><button class="delete" onclick="deleteServer()">Delete</button><input id="serverIconInput" type="file" accept="image/*" style="display:none" onchange="openIconCrop(this)"></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
     out=document.getElementById('consoleOutput');
     out.dataset.server=name;
     out.addEventListener('scroll',function(){
@@ -2548,6 +2679,27 @@ function sendCmd(){
   ws.send(JSON.stringify({type:'command',command:cmd}));
   inp.value='';
 }
+function changeServerVersion(){
+  if(!activeServer)return;
+  var select=document.getElementById('versionSelect');
+  var version=select?select.value:'';
+  if(!version){alert('Choose a Minecraft version first.');return}
+  if(!confirm('Change '+activeServer+' to Minecraft '+version+'? The server must be stopped.'))return;
+  fetch('/api/mc/version',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer,version:version})}).then(function(r){return r.json()}).then(function(d){
+    if(d.error){alert(d.error);return}
+    loadServers();selectServer(activeServer);alert('Server version changed to '+version+'.');
+  });
+}
+function deleteServer(){
+  if(!activeServer)return;
+  if(!confirm('Delete '+activeServer+' and all of its files? This cannot be undone.'))return;
+  var deleting=activeServer;
+  fetch('/api/mc/delete',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:deleting})}).then(function(r){return r.json()}).then(function(d){
+    if(d.error){alert(d.error);return}
+    if(ws){ws.close();ws=null}activeServer=null;lastWSServer='';loadServers();
+    document.getElementById('consoleWrap').innerHTML='<div class="no-servers" id="noSelect">Select a server</div>';
+  });
+}
 var iconCrop={img:null,fileInput:null,scale:1,left:0,top:0,width:0,height:0,size:0,x:0,y:0,dragging:false,startX:0,startY:0,startCropX:0,startCropY:0};
 function positionIconCrop(){
   var image=document.getElementById('iconCropImage');
@@ -2630,6 +2782,7 @@ function stopServer(){
 }
 checkAuth().then(function(ok){
   if(ok){
+    loadVersions();
     loadServers();
   }
 });
@@ -2759,6 +2912,9 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_post("/api/ban", handle_ban)
     app.router.add_get("/", handle_index)
     app.router.add_get("/mc", handle_mc_page)
+    app.router.add_get("/api/mc/versions", mc_api_versions)
+    app.router.add_post("/api/mc/version", mc_api_change_version)
+    app.router.add_post("/api/mc/delete", mc_api_delete_server)
     app.router.add_get("/api/mc/servers", mc_api_servers)
     app.router.add_post("/api/mc/create", mc_api_create)
     app.router.add_post("/api/mc/start", mc_api_start)

@@ -67,12 +67,15 @@ def _is_server_folder(path):
     return any(os.path.exists(os.path.join(path, f)) for f in indicators)
 
 
-def _get_latest_fabric():
+def _get_latest_fabric(requested_mc_ver=None):
     try:
         mc_meta = "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json"
         with urllib.request.urlopen(mc_meta, timeout=15) as resp:
             versions = json.loads(resp.read())
-        release = next((v for v in versions["versions"] if v["type"] == "release"), None)
+        release = next(
+            (v for v in versions["versions"] if v["id"] == requested_mc_ver),
+            None,
+        ) if requested_mc_ver else next((v for v in versions["versions"] if v["type"] == "release"), None)
         if not release:
             return None, None
         meta_url = f"https://meta.fabricmc.net/v2/versions/loader/{release['id']}"
@@ -93,12 +96,23 @@ def _get_latest_fabric():
         return None, None
 
 
-def _get_latest_forge():
+def _get_latest_forge(requested_mc_ver=None):
     try:
         promo_url = "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json"
         with urllib.request.urlopen(promo_url, timeout=15) as resp:
             data = json.loads(resp.read())
         promos = data.get("promos", {})
+        if requested_mc_ver:
+            mc_ver = requested_mc_ver
+            forge_ver = promos.get(f"{mc_ver}-recommended") or promos.get(f"{mc_ver}-latest")
+            if not forge_ver:
+                for key, value in promos.items():
+                    if key.startswith(f"{mc_ver}-") and ("recommended" in key or "latest" in key):
+                        forge_ver = value
+                        break
+            if forge_ver:
+                return mc_ver, forge_ver
+            return None, None
         recommended = promos.get("latest")
         if not recommended:
             for v in reversed(list(promos.keys())):
@@ -149,9 +163,9 @@ def _get_latest_viaversion(mc_ver):
     return None
 
 
-def _install_fabric_server(server_dir):
+def _install_fabric_server(server_dir, requested_mc_ver=None):
     print(f"[MINECRAFT] Installing Fabric server in {server_dir}...")
-    mc_ver, loader_ver = _get_latest_fabric()
+    mc_ver, loader_ver = _get_latest_fabric(requested_mc_ver)
     if not mc_ver:
         print("[MINECRAFT] Could not determine latest MC version.")
         return False, None
@@ -199,9 +213,9 @@ def _install_fabric_server(server_dir):
     return True, mc_ver
 
 
-def _install_forge_server(server_dir):
+def _install_forge_server(server_dir, requested_mc_ver=None):
     print(f"[MINECRAFT] Installing Forge server in {server_dir}...")
-    mc_ver, forge_ver = _get_latest_forge()
+    mc_ver, forge_ver = _get_latest_forge(requested_mc_ver)
     if not mc_ver or not forge_ver:
         print("[MINECRAFT] Could not determine latest Forge version.")
         return False, None
@@ -282,7 +296,7 @@ def _install_viaversion(server_dir, mc_ver):
     return False
 
 
-def setup_server(server_dir, loader_type="fabric"):
+def setup_server(server_dir, loader_type="fabric", mc_version=None):
     if _is_server_folder(server_dir):
         print(f"[MINECRAFT] Server already set up: {os.path.basename(server_dir)}")
         return True
@@ -296,9 +310,9 @@ def setup_server(server_dir, loader_type="fabric"):
             shutil.rmtree(item_path)
 
     if loader_type == "forge":
-        ok, mc_ver = _install_forge_server(server_dir)
+        ok, mc_ver = _install_forge_server(server_dir, mc_version)
     else:
-        ok, mc_ver = _install_fabric_server(server_dir)
+        ok, mc_ver = _install_fabric_server(server_dir, mc_version)
     if not ok:
         return False
     if loader_type == "fabric":
