@@ -2293,6 +2293,17 @@ body{
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.06);border-radius:3px}
 ::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.1)}
+.icon-crop-modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.78);z-index:300;padding:20px}
+.icon-crop-modal.open{display:flex}
+.icon-crop-card{width:min(420px,100%);background:#0d0d14;border:1px solid rgba(0,220,120,.2);border-radius:16px;padding:20px;box-shadow:0 20px 80px rgba(0,0,0,.6)}
+.icon-crop-card h2{font-size:17px;color:#fff;margin-bottom:6px}
+.icon-crop-card p{font-size:12px;color:rgba(255,255,255,.45);margin-bottom:14px}
+.icon-crop-stage{width:320px;height:320px;max-width:100%;margin:0 auto 16px;position:relative;overflow:hidden;background:#050508;border-radius:10px;touch-action:none}
+.icon-crop-stage img{position:absolute;max-width:none;user-select:none;pointer-events:none}
+.icon-crop-selection{position:absolute;border:2px solid #00dc78;box-shadow:0 0 0 9999px rgba(0,0,0,.55);cursor:move;touch-action:none}
+.icon-crop-actions{display:flex;gap:8px;justify-content:flex-end}
+.icon-crop-actions button{padding:9px 15px;border-radius:8px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:#c9d1d9;cursor:pointer;font-family:inherit;font-weight:600}
+.icon-crop-actions .apply{background:#00dc78;color:#050508;border-color:#00dc78}
 @media(max-width:480px){
   .sidebar{width:160px}
   .sidebar .title{font-size:10px}
@@ -2319,6 +2330,20 @@ body{
   </div>
   <div class="console-wrap" id="consoleWrap">
     <div class="no-servers" id="noSelect">Select a server</div>
+  </div>
+</div>
+<div class="icon-crop-modal" id="iconCropModal">
+  <div class="icon-crop-card">
+    <h2>Crop server icon</h2>
+    <p>Drag the square to choose the part of the image to use. It will be saved as a 64x64 Minecraft icon.</p>
+    <div class="icon-crop-stage" id="iconCropStage">
+      <img id="iconCropImage" alt="Icon preview">
+      <div class="icon-crop-selection" id="iconCropSelection"></div>
+    </div>
+    <div class="icon-crop-actions">
+      <button onclick="closeIconCrop()">Cancel</button>
+      <button class="apply" onclick="applyIconCrop()">Use Crop</button>
+    </div>
   </div>
 </div>
 <script>
@@ -2382,7 +2407,7 @@ function selectServer(name){
       document.getElementById('cmdInput').focus();
       return;
     }
-     wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button><button class="props" onclick="openProps()">Properties</button><button class="icon-upload" onclick="document.getElementById(\'serverIconInput\').click()">Icon</button><input id="serverIconInput" type="file" accept="image/png" style="display:none" onchange="uploadServerIcon(this)"></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
+     wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button><button class="props" onclick="openProps()">Properties</button><button class="icon-upload" onclick="document.getElementById(\'serverIconInput\').click()">Icon</button><input id="serverIconInput" type="file" accept="image/*" style="display:none" onchange="openIconCrop(this)"></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
     out=document.getElementById('consoleOutput');
     out.dataset.server=name;
     out.addEventListener('scroll',function(){
@@ -2467,18 +2492,75 @@ function sendCmd(){
   ws.send(JSON.stringify({type:'command',command:cmd}));
   inp.value='';
 }
-function uploadServerIcon(input){
+var iconCrop={img:null,fileInput:null,scale:1,left:0,top:0,width:0,height:0,size:0,x:0,y:0,dragging:false,startX:0,startY:0,startCropX:0,startCropY:0};
+function positionIconCrop(){
+  var image=document.getElementById('iconCropImage');
+  var selection=document.getElementById('iconCropSelection');
+  image.style.left=iconCrop.left+'px';image.style.top=iconCrop.top+'px';
+  image.style.width=iconCrop.width+'px';image.style.height=iconCrop.height+'px';
+  selection.style.left=iconCrop.x+'px';selection.style.top=iconCrop.y+'px';
+  selection.style.width=iconCrop.size+'px';selection.style.height=iconCrop.size+'px';
+}
+function openIconCrop(input){
   if(!activeServer||!input.files||!input.files[0])return;
   var file=input.files[0];
-  if(file.type!=='image/png'){alert('Choose a PNG image.');input.value='';return}
-  var form=new FormData();
-  form.append('server',activeServer);
-  form.append('icon',file);
-  fetch('/api/mc/icon',{method:'POST',body:form,credentials:'include'}).then(function(r){return r.json()}).then(function(d){
-    if(d.error){alert(d.error);return}
-    loadServers();
-    alert('Server icon saved. Use a 64x64 PNG for Minecraft.');
-  }).finally(function(){input.value=''});
+  if((file.type||'').indexOf('image/')!==0&&!/\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(file.name)){
+    alert('Choose an image file.');input.value='';return;
+  }
+  var url=URL.createObjectURL(file);
+  var image=document.getElementById('iconCropImage');
+  image.onload=function(){
+    var stage=document.getElementById('iconCropStage');
+    var stageSize=stage.clientWidth||320;
+    iconCrop.img=image;iconCrop.fileInput=input;
+    iconCrop.scale=Math.min(stageSize/image.naturalWidth,stageSize/image.naturalHeight);
+    iconCrop.width=image.naturalWidth*iconCrop.scale;
+    iconCrop.height=image.naturalHeight*iconCrop.scale;
+    iconCrop.left=(stageSize-iconCrop.width)/2;
+    iconCrop.top=(stageSize-iconCrop.height)/2;
+    iconCrop.size=Math.min(iconCrop.width,iconCrop.height,stageSize*.68);
+    iconCrop.x=iconCrop.left+(iconCrop.width-iconCrop.size)/2;
+    iconCrop.y=iconCrop.top+(iconCrop.height-iconCrop.size)/2;
+    positionIconCrop();
+    document.getElementById('iconCropModal').classList.add('open');
+    URL.revokeObjectURL(url);
+  };
+  image.src=url;
+  var selection=document.getElementById('iconCropSelection');
+  selection.onpointerdown=function(e){
+    e.preventDefault();iconCrop.dragging=true;iconCrop.startX=e.clientX;iconCrop.startY=e.clientY;
+    iconCrop.startCropX=iconCrop.x;iconCrop.startCropY=iconCrop.y;selection.setPointerCapture(e.pointerId);
+  };
+  selection.onpointermove=function(e){
+    if(!iconCrop.dragging)return;
+    var dx=e.clientX-iconCrop.startX,dy=e.clientY-iconCrop.startY;
+    iconCrop.x=Math.max(iconCrop.left,Math.min(iconCrop.left+iconCrop.width-iconCrop.size,iconCrop.startCropX+dx));
+    iconCrop.y=Math.max(iconCrop.top,Math.min(iconCrop.top+iconCrop.height-iconCrop.size,iconCrop.startCropY+dy));
+    positionIconCrop();
+  };
+  selection.onpointerup=function(){iconCrop.dragging=false};
+}
+function closeIconCrop(){
+  document.getElementById('iconCropModal').classList.remove('open');
+  if(iconCrop.fileInput)iconCrop.fileInput.value='';
+  iconCrop.img=null;
+}
+function applyIconCrop(){
+  if(!iconCrop.img||!activeServer)return;
+  var canvas=document.createElement('canvas');canvas.width=64;canvas.height=64;
+  var ctx=canvas.getContext('2d');
+  var sx=(iconCrop.x-iconCrop.left)/iconCrop.scale;
+  var sy=(iconCrop.y-iconCrop.top)/iconCrop.scale;
+  var sw=iconCrop.size/iconCrop.scale;
+  ctx.drawImage(iconCrop.img,sx,sy,sw,sw,0,0,64,64);
+  canvas.toBlob(function(blob){
+    if(!blob){alert('Could not process image.');return}
+    var form=new FormData();form.append('server',activeServer);form.append('icon',blob,'server-icon.png');
+    fetch('/api/mc/icon',{method:'POST',body:form,credentials:'include'}).then(function(r){return r.json()}).then(function(d){
+      if(d.error){alert(d.error);return}
+      closeIconCrop();loadServers();alert('Server icon saved.');
+    });
+  },'image/png');
 }
 function startServer(){
   if(!activeServer)return;
