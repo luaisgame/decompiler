@@ -1251,7 +1251,8 @@ async def handle_auth_me(request):
     user = _get_user_info(request)
     if not user:
         return web.json_response({"authenticated": False}, status=401)
-    return web.json_response({"authenticated": True, **user})
+    authorized = int(user.get("id", 0)) in (BOT_OWNER_ID, MC_OWNER_ID)
+    return web.json_response({"authenticated": True, "mc_authorized": authorized, **user})
 
 def _get_user_info(request):
     session_id = request.cookies.get("session_id", "")
@@ -1345,6 +1346,7 @@ async def handle_index(request):
     if ip in _get_banned_ips():
         return web.Response(text="Access denied.", status=403)
     admin = _is_admin(request)
+    mc_authorized = _is_mc_admin(request)
     user_info = _get_user_info(request)
     games_json = os.path.join(storage_dir, "games.json")
     entries = []
@@ -1455,6 +1457,8 @@ body {{ background:#050508; color:#c9d1d9; font-family:'Inter','SF Pro Display',
 .btn-secondary:hover {{ background:rgba(255,255,255,.08); }}
 .btn-discord {{ background:rgba(88,101,242,.8); color:#fff; border:1px solid rgba(88,101,242,.3); }}
 .btn-discord:hover {{ background:#5865f2; transform:translateY(-1px); }}
+.btn-minecraft {{ background:rgba(0,220,120,.12); color:#00dc78; border:1px solid rgba(0,220,120,.3); }}
+.btn-minecraft:hover {{ background:rgba(0,220,120,.22); transform:translateY(-1px); }}
 .container {{ max-width:1200px; margin:30px auto; padding:0 20px; position:relative; z-index:1; }}
 .game-card {{ background:rgba(22,27,34,.6); border:1px solid rgba(0,220,120,.08); border-radius:12px; padding:0; margin-bottom:16px; transition:all 0.3s; overflow:hidden; backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); }}
 .game-card:hover {{ border-color:rgba(0,220,120,.25); transform:translateY(-2px); box-shadow:0 8px 24px rgba(0,0,0,0.3); }}
@@ -1539,6 +1543,7 @@ body {{ background:#050508; color:#c9d1d9; font-family:'Inter','SF Pro Display',
     <div class="header-right">
         <a class="btn btn-primary" href="https://discord.com/api/oauth2/authorize?client_id=1532820804402806844&permissions=8&scope=bot%20applications.commands" target="_blank">Add Bot</a>
         {"<button class='btn btn-secondary' data-action='toggle-console'>Console</button>" if admin else ""}
+        {"<a class='btn btn-minecraft' href='/mc'><svg width='16' height='16' viewBox='0 0 24 24' fill='none' aria-hidden='true'><path d='M4 4h6v6H4V4Zm10 0h6v6h-6V4ZM4 14h6v6H4v-6Zm10 0h6v6h-6v-6ZM10 7h4v3h-4V7Zm0 7h4v3h-4v-3Z' fill='currentColor'/></svg> MC Console</a>" if mc_authorized else ""}
         {"<a class='btn btn-discord' href='/api/auth/login'><svg width='18' height='14' viewBox='0 0 71 55' fill='none' xmlns='http://www.w3.org/2000/svg'><path d='M60.1 4.9A58.5 58.5 0 0 0 45.4.2a.2.2 0 0 0-.2.1 40.8 40.8 0 0 0-1.8 3.7 54 54 0 0 0-16.2 0 26.5 26.5 0 0 0-1.8-3.7.2.2 0 0 0-.2-.1A58.4 58.4 0 0 0 10.9 4.9a.2.2 0 0 0-.1.1C1.6 18.4-.5 31.7.5 44.8a.2.2 0 0 0 .1.1 58.7 58.7 0 0 0 17.7 9 .2.2 0 0 0 .2-.1 42 42 0 0 0 3.6-5.9.2.2 0 0 0-.1-.3 38.7 38.7 0 0 1-5.5-2.6.2.2 0 0 1 0-.4c.4-.3.7-.6 1.1-.9a.2.2 0 0 1 .2 0c11.5 5.3 24 5.3 35.4 0a.2.2 0 0 1 .2 0l1.1.9a.2.2 0 0 1 0 .4c-1.8 1-3.6 1.9-5.6 2.6a.2.2 0 0 0-.1.3 47.2 47.2 0 0 0 3.7 5.9.2.2 0 0 0 .2.1 58.5 58.5 0 0 0 17.7-9 .2.2 0 0 0 .1-.1c1.2-15-2-28.3-8.5-39.8a.2.2 0 0 0-.1-.1ZM23.7 36.3c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1 6.5 3.2 6.4 7.1-2.8 7.1-6.4 7.1Zm23.6 0c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1 6.5 3.2 6.4 7.1-2.8 7.1-6.4 7.1Z' fill='white'/></svg> " + user_info["username"] + "</a>" if user_info else "<a class='btn btn-discord' href='/api/auth/login'><svg width='18' height='14' viewBox='0 0 71 55' fill='none' xmlns='http://www.w3.org/2000/svg'><path d='M60.1 4.9A58.5 58.5 0 0 0 45.4.2a.2.2 0 0 0-.2.1 40.8 40.8 0 0 0-1.8 3.7 54 54 0 0 0-16.2 0 26.5 26.5 0 0 0-1.8-3.7.2.2 0 0 0-.2-.1A58.4 58.4 0 0 0 10.9 4.9a.2.2 0 0 0-.1.1C1.6 18.4-.5 31.7.5 44.8a.2.2 0 0 0 .1.1 58.7 58.7 0 0 0 17.7 9 .2.2 0 0 0 .2-.1 42 42 0 0 0 3.6-5.9.2.2 0 0 0-.1-.3 38.7 38.7 0 0 1-5.5-2.6.2.2 0 0 1 0-.4c.4-.3.7-.6 1.1-.9a.2.2 0 0 1 .2 0c11.5 5.3 24 5.3 35.4 0a.2.2 0 0 1 .2 0l1.1.9a.2.2 0 0 1 0 .4c-1.8 1-3.6 1.9-5.6 2.6a.2.2 0 0 0-.1.3 47.2 47.2 0 0 0 3.7 5.9.2.2 0 0 0 .2.1 58.5 58.5 0 0 0 17.7-9 .2.2 0 0 0 .1-.1c1.2-15-2-28.3-8.5-39.8a.2.2 0 0 0-.1-.1ZM23.7 36.3c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1 6.5 3.2 6.4 7.1-2.8 7.1-6.4 7.1Zm23.6 0c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1 6.5 3.2 6.4 7.1-2.8 7.1-6.4 7.1Z' fill='white'/></svg> Login with Discord</a>"}
     </div>
 </div>
@@ -2163,6 +2168,8 @@ body{
 .topbar .user{display:flex;align-items:center;gap:10px;font-size:13px;color:rgba(255,255,255,.5)}
 .topbar .user img{width:28px;height:28px;border-radius:50%;border:1.5px solid rgba(0,220,120,.2)}
 .topbar .user .name{color:#fff;font-weight:600}
+.topbar .nav-link{padding:7px 10px;border-radius:7px;border:1px solid rgba(0,220,120,.25);color:#00dc78;text-decoration:none;font-size:12px;font-weight:600}
+.topbar .nav-link:hover{background:rgba(0,220,120,.1)}
 .main{display:flex;flex:1;overflow:hidden;position:relative;z-index:1}
 .sidebar{
   width:220px;background:rgba(13,13,20,.8);
@@ -2358,7 +2365,8 @@ async function checkAuth(){
     return false;
   }
   var avatar=userInfo.avatar?'<img src="https://cdn.discordapp.com/avatars/'+userInfo.id+'/'+userInfo.avatar+'.png">':'';
-  document.getElementById('userInfo').innerHTML=avatar+'<span class="name">'+userInfo.username+'</span>';
+  var websiteLink=userInfo.mc_authorized?'<a class="nav-link" href="/">Website</a>':'';
+  document.getElementById('userInfo').innerHTML=avatar+'<span class="name">'+userInfo.username+'</span>'+websiteLink;
   var createEl=document.getElementById('createServer');if(createEl)createEl.style.display='';
   return true;
 }
