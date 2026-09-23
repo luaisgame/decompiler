@@ -2050,31 +2050,52 @@ async def mc_api_upload_mod(request):
     if not _is_mc_admin(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     reader = await request.multipart()
-    field = await reader.next()
-    if not field or field.name != "file":
-        return web.json_response({"error": "No file"}, status=400)
     server_name = None
+    filename = None
+    temp_path = None
+    max_size = 512 * 1024 * 1024
     while True:
         part = await reader.next()
         if not part:
             break
-        if part.name == "server":
+        if part.name == "file":
+            filename = os.path.basename(part.filename or "")
+            if not filename or not filename.lower().endswith(".jar"):
+                return web.json_response({"error": "Only .jar files allowed"}, status=400)
+            os.makedirs(MC_DIR, exist_ok=True)
+            temp_path = os.path.join(MC_DIR, f".mod-upload-{uuid.uuid4().hex}.tmp")
+            total = 0
+            try:
+                with open(temp_path, "wb") as temp_file:
+                    while True:
+                        chunk = await part.read_chunk(1024 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > max_size:
+                            os.remove(temp_path)
+                            return web.json_response({"error": "Mod must be smaller than 512 MB."}, status=400)
+                        temp_file.write(chunk)
+            except Exception:
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
+        elif part.name == "server":
             server_name = (await part.read()).decode()
-    if not server_name:
-        return web.json_response({"error": "No server name"}, status=400)
-    filename = field.filename
-    if not filename or not filename.endswith(".jar"):
-        return web.json_response({"error": "Only .jar files allowed"}, status=400)
-    server_dir = os.path.join(MC_DIR, server_name)
+    server_name = (server_name or "").strip()
+    server_dir = _mc_safe_server_dir(server_name)
+    if not server_dir:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+        return web.json_response({"error": "Server not found"}, status=404)
+    if not filename or not temp_path or not os.path.isfile(temp_path):
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+        return web.json_response({"error": "No mod file"}, status=400)
     mods_dir = os.path.join(server_dir, "mods")
     os.makedirs(mods_dir, exist_ok=True)
     dest = os.path.join(mods_dir, filename)
-    with open(dest, "wb") as f:
-        while True:
-            chunk = await field.read_chunk(8192)
-            if not chunk:
-                break
-            f.write(chunk)
+    os.replace(temp_path, dest)
     buf = mc_console_buffers.setdefault(server_name, [])
     buf.append(f"[{time.strftime('%H:%M:%S')}] Mod installed: {filename}")
     return web.json_response({"ok": True, "name": filename})
