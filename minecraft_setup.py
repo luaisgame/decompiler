@@ -147,6 +147,21 @@ def _download_file(url, dest):
         print(f"[MINECRAFT] Failed to download {url}: {e}")
         return False
 
+def _get_minecraft_server_url(mc_ver):
+    try:
+        manifest_url = "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json"
+        with urllib.request.urlopen(manifest_url, timeout=15) as resp:
+            manifest = json.loads(resp.read())
+        version = next((v for v in manifest.get("versions", []) if v.get("id") == mc_ver), None)
+        if not version:
+            return None
+        with urllib.request.urlopen(version["url"], timeout=15) as resp:
+            metadata = json.loads(resp.read())
+        return metadata.get("downloads", {}).get("server", {}).get("url")
+    except Exception as e:
+        print(f"[MINECRAFT] Failed to find Minecraft {mc_ver} server JAR: {e}")
+        return None
+
 
 def _get_latest_viaversion(mc_ver):
     try:
@@ -198,6 +213,14 @@ def _install_fabric_server(server_dir, requested_mc_ver=None):
     except Exception as e:
         print(f"[MINECRAFT] Fabric installer failed: {e}")
         return False, None
+
+    server_jar = os.path.join(server_dir, "server.jar")
+    if not os.path.exists(server_jar):
+        server_url = _get_minecraft_server_url(mc_ver)
+        if not server_url or not _download_file(server_url, server_jar):
+            print(f"[MINECRAFT] Could not download the official Minecraft {mc_ver} server JAR.")
+            return False, None
+        print(f"[MINECRAFT] Downloaded official Minecraft server JAR for {mc_ver}.")
 
     eula_path = os.path.join(server_dir, "eula.txt")
     if not os.path.exists(eula_path):
@@ -297,17 +320,27 @@ def _install_viaversion(server_dir, mc_ver):
 
 
 def setup_server(server_dir, loader_type="fabric", mc_version=None):
-    if _is_server_folder(server_dir):
+    server_ready = (
+        os.path.exists(os.path.join(server_dir, "server.jar"))
+        or os.path.exists(os.path.join(server_dir, "run.bat"))
+        or os.path.exists(os.path.join(server_dir, "run.sh"))
+    )
+    if _is_server_folder(server_dir) and server_ready:
         print(f"[MINECRAFT] Server already set up: {os.path.basename(server_dir)}")
         return True
 
-    print(f"[MINECRAFT] New server: {os.path.basename(server_dir)} - cleaning...")
-    for item in os.listdir(server_dir):
-        item_path = os.path.join(server_dir, item)
-        if os.path.isfile(item_path):
-            os.remove(item_path)
-        elif os.path.isdir(item_path):
-            shutil.rmtree(item_path)
+    if _is_server_folder(server_dir):
+        print(f"[MINECRAFT] Incomplete server: {os.path.basename(server_dir)} - preserving existing files...")
+    else:
+        print(f"[MINECRAFT] New server: {os.path.basename(server_dir)} - cleaning...")
+        for item in os.listdir(server_dir):
+            if item in (".loader", ".mc_version"):
+                continue
+            item_path = os.path.join(server_dir, item)
+            if os.path.isfile(item_path):
+                os.remove(item_path)
+            elif os.path.isdir(item_path):
+                shutil.rmtree(item_path)
 
     if loader_type == "forge":
         ok, mc_ver = _install_forge_server(server_dir, mc_version)
