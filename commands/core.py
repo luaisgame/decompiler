@@ -2583,7 +2583,6 @@ function stopServer(){
 checkAuth().then(function(ok){
   if(ok){
     loadServers();
-    setInterval(loadServers,5000);
   }
 });
 function openProps(){
