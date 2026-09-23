@@ -12,6 +12,7 @@ import subprocess
 import time
 import json
 import re
+import zipfile
 import secrets
 import aiohttp
 import discord
@@ -1882,14 +1883,44 @@ def _mc_detect_ver(server_dir):
                         return match.group(1)
     return None
 
+def _mc_java_from_jar(server_dir):
+    jar_path = os.path.join(server_dir, "server.jar")
+    if not os.path.isfile(jar_path):
+        return None
+    try:
+        with zipfile.ZipFile(jar_path) as archive:
+            class_data = archive.read("net/minecraft/bundler/Main.class")
+        if len(class_data) < 8 or class_data[:4] != b"\xca\xfe\xba\xbe":
+            return None
+        class_version = int.from_bytes(class_data[6:8], "big")
+        if class_version >= 70:
+            return 26
+        if class_version >= 65:
+            return 21
+        if class_version >= 61:
+            return 17
+        if class_version >= 52:
+            return 8
+    except (KeyError, OSError, zipfile.BadZipFile) as e:
+        print(f"[MINECRAFT] Could not inspect server JAR Java version: {e}")
+    return None
+
 def _mc_get_java(server_dir):
     try:
         from minecraft_setup import _mc_ver_to_java, _find_java
         mc_ver = _mc_detect_ver(server_dir)
         if mc_ver:
             java_ver = _mc_ver_to_java(mc_ver)
+            jar_java = _mc_java_from_jar(server_dir)
+            if jar_java and jar_java > java_ver:
+                java_ver = jar_java
             java = _find_java(java_ver)
             print(f"[MINECRAFT] MC {mc_ver} requires Java {java_ver}; using {java}")
+            return java
+        java_ver = _mc_java_from_jar(server_dir)
+        if java_ver:
+            java = _find_java(java_ver)
+            print(f"[MINECRAFT] Server JAR requires Java {java_ver}; using {java}")
             return java
         print(f"[MINECRAFT] Could not detect Minecraft version in {server_dir}; using default Java")
     except Exception as e:
