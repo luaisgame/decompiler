@@ -19,10 +19,6 @@ import discord
 import requests
 import psutil
 import boto3
-try:
-    from mss import mss as mss_lib
-except ImportError:
-    mss_lib = None
 
 from botocore.config import Config
 from discord.ext import commands
@@ -3572,14 +3568,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
 
 EVENT_GUILD_ID = 1540376749400137808
 EVENT_CHANNEL_ID = 1545977764077903942
-_screen_share_task = None
-_mss = None
-
 async def screenshare_auto_join():
-    if mss_lib is None:
-        print("[SCREENSHARE] mss not installed, skipping.")
-        return
-    global _screen_share_task, _mss
     while True:
         await asyncio.sleep(30)
         try:
@@ -3588,88 +3577,23 @@ async def screenshare_auto_join():
                 continue
             channel = guild.get_channel(EVENT_CHANNEL_ID)
             if not channel:
+                print(f"[SCREENSHARE] Event channel {EVENT_CHANNEL_ID} was not found.")
                 continue
+            permissions = channel.permissions_for(guild.me)
+            if not permissions.connect:
+                print(f"[SCREENSHARE] Missing Connect permission in {channel.name}.")
+                continue
+            if not permissions.speak:
+                print(f"[SCREENSHARE] Missing Speak permission in {channel.name}; grant it manually.")
             voice_state = guild.me.voice
             if voice_state and voice_state.channel and voice_state.channel.id == channel.id:
-                if not guild.me.guild_permissions.speak:
-                    try:
-                        await channel.permission_synced
-                        await channel.edit(slowmode_delay=0)
-                    except Exception:
-                        pass
                 continue
             if voice_state and voice_state.channel:
-                try:
-                    await voice_state.channel.disconnect()
-                except Exception:
-                    pass
-            try:
-                vc = await channel.connect()
-                print(f"[SCREENSHARE] Joined voice channel {channel.name}")
-            except Exception as e:
-                print(f"[SCREENSHARE] Failed to join: {e}")
-                continue
-            if not guild.me.guild_permissions.speak:
-                try:
-                    await channel.edit(slowmode_delay=0)
-                    await vc.edit(speak=True, deafen=False)
-                    print(f"[SCREENSHARE] Requested speak permission")
-                except Exception as e:
-                    print(f"[SCREENSHARE] Failed to request speak: {e}")
-                    continue
-            _screen_share_task = asyncio.create_task(screenshare_loop(vc))
+                await voice_state.channel.disconnect()
+            await channel.connect()
+            print(f"[SCREENSHARE] Joined {channel.name}. Discord bots cannot start Go Live screen sharing.")
         except Exception as e:
-            print(f"[SCREENSHARE] Auto-join error: {e}")
-            await asyncio.sleep(10)
-
-async def screenshare_loop(vc):
-    global _mss
-    if mss_lib is None:
-        print("[SCREENSHARE] mss not installed, screenshare disabled.")
-        return
-    try:
-        _mss = mss_lib()
-        monitor = _mss.monitors[1]
-        while True:
-            try:
-                if not vc or not vc.is_connected():
-                    print("[SCREENSHARE] Voice client disconnected, stopping.")
-                    break
-                img = _mss.grab(monitor)
-                img_bytes = bytes(img.rgb)
-                import wave
-                import struct
-                width = monitor["width"]
-                height = monitor["height"]
-                frame_size = width * height * 3
-                data = bytearray()
-                for y in range(0, height, 2):
-                    for x in range(0, width, 2):
-                        idx = (y * width + x) * 3
-                        r = img_bytes[idx]
-                        g = img_bytes[idx + 1]
-                        b = img_bytes[idx + 2]
-                        gray = int(0.299 * r + 0.587 * g + 0.114 * b)
-                        data.extend(struct.pack('<h', gray - 128))
-                if data:
-                    try:
-                        import numpy as np
-                        audio_data = np.array(list(data), dtype=np.int16).tobytes()
-                        await vc.send(audio_data)
-                    except Exception:
-                        pass
-                await asyncio.sleep(1/60)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                print(f"[SCREENSHARE] Frame error: {e}")
-                await asyncio.sleep(0.1)
-    except Exception as e:
-        print(f"[SCREENSHARE] Loop error: {e}")
-    finally:
-        if _mss:
-            _mss.close()
-        print("[SCREENSHARE] Stopped.")
+            print(f"[SCREENSHARE] Voice join error: {e}")
 
 async def start_screenshare_on_ready():
     await bot.wait_until_ready()
