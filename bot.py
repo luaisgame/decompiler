@@ -25,6 +25,7 @@ load_dotenv(os.path.join(_BASE_DIR, ".env"))
 REPO = "luaisgame/decompiler"
 BRANCH = "main"
 RAW_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
+RAW_VERSION = "6d25f38"
 
 GITHUB_FILES = [
     "commands/core.py",
@@ -50,7 +51,7 @@ if not HAS_LOCAL:
     sys.modules["commands"] = pkg
     for path in GITHUB_FILES:
         try:
-            url = f"{RAW_URL}/{path}"
+            url = f"{RAW_URL}/{path}?v={RAW_VERSION}"
             with urllib.request.urlopen(url, timeout=15) as resp:
                 code = resp.read().decode()
         except Exception as e:
@@ -204,7 +205,7 @@ async def on_ready():
 
     try:
         from commands.core import start_screenshare_on_ready
-        bot.loop.create_task(start_screenshare_on_ready())
+        asyncio.create_task(start_screenshare_on_ready())
     except Exception as e:
         print(f"[SCREENSHARE] Failed to start: {e}")
 
@@ -228,7 +229,7 @@ async def on_ready():
 
     await start_local_server(port=5000)
 
-    bot.loop.create_task(decompile_queue_worker())
+    asyncio.create_task(decompile_queue_worker())
 
     await bot.change_presence(
         status=discord.Status.idle,
@@ -242,7 +243,7 @@ async def on_ready():
         except Exception as e:
             print(f"[DEBUG] Failed to sync slash commands: {e}")
 
-    bot.loop.create_task(sync_commands())
+    asyncio.create_task(sync_commands())
 
 @bot.event
 async def on_command(ctx):
