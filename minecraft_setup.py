@@ -4,9 +4,19 @@ import urllib.request
 import json
 import shutil
 import glob
+import psutil
 
 BASE_DIR = os.environ.get("BOT_BASE_DIR", os.path.dirname(os.path.abspath(__file__)))
 MC_DIR = os.path.join(os.path.dirname(BASE_DIR), "minecraft")
+
+def _mc_memory_limit():
+    configured = os.environ.get("MC_MEMORY", "auto").strip()
+    if configured and configured.lower() != "auto":
+        return configured
+    total_gb = psutil.virtual_memory().total / (1024 ** 3)
+    allocated_gb = max(1, int(total_gb * 0.90))
+    print(f"[MINECRAFT] Automatic memory allocation: {allocated_gb}G of {total_gb:.1f}G")
+    return f"{allocated_gb}G"
 
 
 def _mc_ver_to_java(mc_ver):
@@ -448,7 +458,7 @@ def _find_user_jvm_args(server_dir):
 
 def start_mc_server(server_dir):
     forge = _is_forge_server(server_dir)
-    mem = os.environ.get("MC_MEMORY", "2G")
+    mem = _mc_memory_limit()
     java, mc_ver = _get_java_for_server(server_dir)
 
     if forge:

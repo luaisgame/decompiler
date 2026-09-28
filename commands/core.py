@@ -1731,6 +1731,15 @@ mc_processes = {}
 mc_console_buffers = {}
 mc_ws_clients = {}
 
+def _mc_memory_limit():
+    configured = os.environ.get("MC_MEMORY", "auto").strip()
+    if configured and configured.lower() != "auto":
+        return configured
+    total_gb = psutil.virtual_memory().total / (1024 ** 3)
+    allocated_gb = max(1, int(total_gb * 0.90))
+    print(f"[MINECRAFT] Automatic memory allocation: {allocated_gb}G of {total_gb:.1f}G")
+    return f"{allocated_gb}G"
+
 def _mc_get_servers():
     if not os.path.isdir(MC_DIR):
         return []
@@ -2145,7 +2154,7 @@ async def mc_api_start(request):
         if not jar and not is_forge:
             buf.append(f"[{time.strftime('%H:%M:%S')}] Still no server.jar after install.")
             return web.json_response({"error": "No server jar after install"}, status=500)
-    mem = os.environ.get("MC_MEMORY", "2G")
+    mem = _mc_memory_limit()
     java = _mc_get_java(server_dir)
     forge_jvm_args_str = " ".join(FORGE_JVM_ARGS)
     if is_forge:
