@@ -117,7 +117,7 @@ def get_cloudflared_path():
             return p
     return None
 
-def ensure_tunnel():
+def ensure_tunnel(port=5000):
     cf = get_cloudflared_path()
     if not cf:
         return False
@@ -161,7 +161,7 @@ credentials-file: {cred_file}
 
 ingress:
   - hostname: {TUNNEL_DOMAIN}
-    service: http://127.0.0.1:5000
+    service: http://127.0.0.1:{port}
   - service: http_status:404
 """
     with open(config_path, "w") as f:
@@ -271,9 +271,16 @@ async def on_command_completion(ctx):
 
 async def main():
     from commands.core import start_local_server
-    await start_local_server(port=5000)
-    if ensure_cloudflared() and ensure_tunnel():
-        start_tunnel()
+    port = await start_local_server(port=5000)
+
+    async def setup_tunnel():
+        try:
+            if await asyncio.to_thread(ensure_cloudflared) and await asyncio.to_thread(ensure_tunnel, port or 5000):
+                start_tunnel()
+        except Exception as e:
+            print(f"[STARTUP] Tunnel setup failed: {e}")
+
+    asyncio.create_task(setup_tunnel())
     await bot.start(BOT_TOKEN)
 
 if __name__ == "__main__":
