@@ -100,6 +100,7 @@ BOT_OWNER_ID = int(os.environ.get("BOT_OWNER_ID", "1293889121374179328"))
 MC_OWNER_ID = 1401271744597196831
 _auth_sessions = {}
 _oauth_states = {}
+MC_PERMISSIONS_FILE = os.path.join(BASE_DIR, "mc_permissions.json")
 
 def _cleanup_storage():
     try:
@@ -1249,8 +1250,9 @@ async def handle_auth_me(request):
     user = _get_user_info(request)
     if not user:
         return web.json_response({"authenticated": False}, status=401)
-    authorized = int(user.get("id", 0)) in (BOT_OWNER_ID, MC_OWNER_ID)
-    return web.json_response({"authenticated": True, "mc_authorized": authorized, **user})
+    mc_admin = int(user.get("id", 0)) in (BOT_OWNER_ID, MC_OWNER_ID)
+    authorized = mc_admin or _mc_has_any_access(str(user.get("id", "")))
+    return web.json_response({"authenticated": True, "mc_authorized": authorized, "mc_admin": mc_admin, **user})
 
 def _get_user_info(request):
     session_id = request.cookies.get("session_id", "")
@@ -1273,6 +1275,40 @@ def _is_mc_admin(request):
     if not user:
         return False
     return int(user.get("id", 0)) in (BOT_OWNER_ID, MC_OWNER_ID)
+
+def _load_mc_permissions():
+    if not os.path.exists(MC_PERMISSIONS_FILE):
+        return {}
+    try:
+        with open(MC_PERMISSIONS_FILE, "r") as f:
+            data = json.load(f)
+        return {
+            str(server): [str(user_id) for user_id in user_ids]
+            for server, user_ids in data.items()
+            if isinstance(user_ids, list)
+        }
+    except Exception:
+        return {}
+
+def _save_mc_permissions(data):
+    with open(MC_PERMISSIONS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+def _mc_has_any_access(user_id):
+    return any(str(user_id) in user_ids for user_ids in _load_mc_permissions().values())
+
+def _can_access_mc_server(request, server_name):
+    if _is_mc_admin(request):
+        return True
+    user = _get_user_info(request)
+    if not user:
+        return False
+    permissions = _load_mc_permissions()
+    return str(user.get("id", "")) in permissions.get(str(server_name), [])
+
+def _is_mc_authorized(request):
+    user = _get_user_info(request)
+    return bool(user and (_is_mc_admin(request) or _mc_has_any_access(str(user.get("id", "")))))
 
 async def handle_admin_data(request):
     if not _is_admin(request):
@@ -1344,7 +1380,7 @@ async def handle_index(request):
     if ip in _get_banned_ips():
         return web.Response(text="Access denied.", status=403)
     admin = _is_admin(request)
-    mc_authorized = _is_mc_admin(request)
+    mc_authorized = _is_mc_authorized(request)
     user_info = _get_user_info(request)
     games_json = os.path.join(storage_dir, "games.json")
     entries = []
@@ -1770,7 +1806,7 @@ def _mc_change_server_version(server_dir, loader_type, version):
     return True
 
 async def mc_api_versions(request):
-    if not _is_mc_admin(request):
+    if not _is_mc_authorized(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     try:
         async with aiohttp.ClientSession() as session:
@@ -1784,11 +1820,11 @@ async def mc_api_versions(request):
         return web.json_response({"error": str(e)}, status=502)
 
 async def mc_api_change_version(request):
-    if not _is_mc_admin(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
     name = data.get("name", "").strip()
     version = data.get("version", "").strip()
+    if not _can_access_mc_server(request, name):
+        return web.json_response({"error": "unauthorized"}, status=401)
     server_dir = _mc_safe_server_dir(name)
     if not server_dir:
         return web.json_response({"error": "Server not found"}, status=404)
@@ -1811,10 +1847,10 @@ async def mc_api_change_version(request):
     return web.json_response({"ok": True, "version": version})
 
 async def mc_api_delete_server(request):
-    if not _is_mc_admin(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
     name = data.get("name", "").strip()
+    if not _can_access_mc_server(request, name):
+        return web.json_response({"error": "unauthorized"}, status=401)
     server_dir = _mc_safe_server_dir(name)
     if not server_dir:
         return web.json_response({"error": "Server not found"}, status=404)
@@ -1980,18 +2016,103 @@ async def _mc_read_output(name, proc):
         mc_processes[name] = None
 
 async def mc_api_servers(request):
+    if not _is_mc_authorized(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    servers = _mc_get_servers()
+    if not _is_mc_admin(request):
+        user = _get_user_info(request)
+        user_id = str(user.get("id", ""))
+        allowed = _load_mc_permissions()
+        servers = [server for server in servers if user_id in allowed.get(server["name"], [])]
+    return web.json_response({"servers": servers})
+
+async def _mc_discord_profile(user_id):
+    try:
+        user = await bot.fetch_user(int(user_id))
+        avatar = str(user.display_avatar.url) if user.display_avatar else ""
+        banner = str(user.banner.url) if getattr(user, "banner", None) else ""
+        return {"id": str(user.id), "username": str(user), "avatar": avatar, "banner": banner}
+    except Exception:
+        return {"id": str(user_id), "username": "Unknown Discord user", "avatar": "", "banner": ""}
+
+async def mc_api_permissions(request):
     if not _is_mc_admin(request):
         return web.json_response({"error": "unauthorized"}, status=401)
-    return web.json_response({"servers": _mc_get_servers()})
+    name = request.query.get("name", "")
+    if not _mc_safe_server_dir(name):
+        return web.json_response({"error": "Server not found"}, status=404)
+    user_ids = _load_mc_permissions().get(name, [])
+    profiles = [await _mc_discord_profile(user_id) for user_id in user_ids]
+    return web.json_response({"users": profiles})
 
-async def mc_api_start(request):
+async def mc_api_add_permission(request):
     if not _is_mc_admin(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
+    name = data.get("name", "").strip()
+    user_id = str(data.get("user_id", "")).strip()
+    if not _mc_safe_server_dir(name):
+        return web.json_response({"error": "Server not found"}, status=404)
+    if not user_id.isdigit():
+        return web.json_response({"error": "Enter a numeric Discord user ID"}, status=400)
+    permissions = _load_mc_permissions()
+    permissions.setdefault(name, [])
+    if user_id not in permissions[name]:
+        permissions[name].append(user_id)
+        _save_mc_permissions(permissions)
+    return web.json_response({"ok": True, "profile": await _mc_discord_profile(user_id)})
+
+async def mc_api_remove_permission(request):
+    if not _is_mc_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    data = await request.json()
+    name = data.get("name", "").strip()
+    user_id = str(data.get("user_id", "")).strip()
+    permissions = _load_mc_permissions()
+    if name in permissions:
+        permissions[name] = [value for value in permissions[name] if value != user_id]
+        if permissions[name]:
+            _save_mc_permissions(permissions)
+        else:
+            permissions.pop(name, None)
+            _save_mc_permissions(permissions)
+    return web.json_response({"ok": True})
+
+async def mc_api_players(request):
+    name = request.query.get("name", "")
+    if not _can_access_mc_server(request, name):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    proc = mc_processes.get(name)
+    if proc and proc.returncode is None and proc.stdin:
+        try:
+            proc.stdin.write(b"list\n")
+            await proc.stdin.drain()
+            await asyncio.sleep(0.3)
+        except Exception:
+            pass
+    players = []
+    pattern = re.compile(r"There are \d+ of a max of \d+ players online:\s*(.*)", re.IGNORECASE)
+    for line in reversed(mc_console_buffers.get(name, [])):
+        match = pattern.search(line)
+        if match:
+            players = [value.strip() for value in match.group(1).split(",") if value.strip()]
+            break
+    profiles = []
+    for user_id in _load_mc_permissions().get(name, []):
+        profiles.append(await _mc_discord_profile(user_id))
+    return web.json_response({
+        "players": [{"name": player, "head": f"https://mc-heads.net/avatar/{quote(player)}/48"} for player in players],
+        "profiles": profiles,
+    })
+
+async def mc_api_start(request):
+    data = await request.json()
     name = data.get("name", "")
+    if not _can_access_mc_server(request, name):
+        return web.json_response({"error": "unauthorized"}, status=401)
     loader_type = data.get("loader", "fabric")
-    server_dir = os.path.join(MC_DIR, name)
-    if not os.path.isdir(server_dir):
+    server_dir = _mc_safe_server_dir(name)
+    if not server_dir:
         return web.json_response({"error": "Server folder not found"}, status=404)
     if name in mc_processes and mc_processes[name] is not None and mc_processes[name].returncode is None:
         return web.json_response({"error": "Already running"}, status=400)
@@ -2112,10 +2233,10 @@ async def mc_api_create(request):
     return web.json_response({"ok": True})
 
 async def mc_api_stop(request):
-    if not _is_mc_admin(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
     name = data.get("name", "")
+    if not _can_access_mc_server(request, name):
+        return web.json_response({"error": "unauthorized"}, status=401)
     proc = mc_processes.get(name)
     if not proc or proc.returncode is not None:
         return web.json_response({"error": "Not running"}, status=400)
@@ -2132,11 +2253,11 @@ async def mc_api_stop(request):
     return web.json_response({"ok": True})
 
 async def mc_api_command(request):
-    if not _is_mc_admin(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
     name = data.get("name", "")
     cmd = data.get("command", "")
+    if not _can_access_mc_server(request, name):
+        return web.json_response({"error": "unauthorized"}, status=401)
     proc = mc_processes.get(name)
     if not proc or proc.returncode is not None:
         return web.json_response({"error": "Server not running"}, status=400)
@@ -2148,18 +2269,20 @@ async def mc_api_command(request):
     return web.json_response({"ok": True})
 
 async def mc_api_console(request):
-    if not _is_mc_admin(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
     name = request.query.get("name", "")
+    if not _can_access_mc_server(request, name):
+        return web.json_response({"error": "unauthorized"}, status=401)
     buf = mc_console_buffers.get(name, [])
     return web.json_response({"lines": buf[-200:]})
 
 
 async def mc_api_mods(request):
-    if not _is_mc_admin(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
     name = request.query.get("name", "")
-    server_dir = os.path.join(MC_DIR, name)
+    if not _can_access_mc_server(request, name):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    server_dir = _mc_safe_server_dir(name)
+    if not server_dir:
+        return web.json_response({"error": "Server not found"}, status=404)
     mods_dir = os.path.join(server_dir, "mods")
     if not os.path.isdir(mods_dir):
         return web.json_response({"mods": []})
@@ -2171,9 +2294,10 @@ async def mc_api_mods(request):
     return web.json_response({"mods": mods})
 
 async def mc_api_icon(request):
-    if not _is_mc_admin(request):
+    name = request.query.get("name", "")
+    if not _can_access_mc_server(request, name):
         return web.json_response({"error": "unauthorized"}, status=401)
-    server_dir = _mc_safe_server_dir(request.query.get("name", ""))
+    server_dir = _mc_safe_server_dir(name)
     if not server_dir:
         return web.json_response({"error": "Server not found"}, status=404)
     icon_path = os.path.join(server_dir, "server-icon.png")
@@ -2182,8 +2306,6 @@ async def mc_api_icon(request):
     return web.FileResponse(icon_path, headers={"Cache-Control": "no-cache"})
 
 async def mc_api_upload_icon(request):
-    if not _is_mc_admin(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
     reader = await request.multipart()
     server_name = None
     icon_data = None
@@ -2200,6 +2322,8 @@ async def mc_api_upload_icon(request):
     server_dir = _mc_safe_server_dir(server_name or "")
     if not server_dir:
         return web.json_response({"error": "Server not found"}, status=404)
+    if not _can_access_mc_server(request, server_name):
+        return web.json_response({"error": "unauthorized"}, status=401)
     if not icon_data or len(icon_data) > 2 * 1024 * 1024:
         return web.json_response({"error": "Icon must be smaller than 2 MB."}, status=400)
     if icon_data[:8] != b"\x89PNG\r\n\x1a\n" or len(icon_data) < 24:
@@ -2216,8 +2340,6 @@ async def mc_api_upload_icon(request):
 
 
 async def mc_api_upload_mod(request):
-    if not _is_mc_admin(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
     reader = await request.multipart()
     server_name = None
     filename = None
@@ -2252,6 +2374,10 @@ async def mc_api_upload_mod(request):
         elif part.name == "server":
             server_name = (await part.read()).decode()
     server_name = (server_name or "").strip()
+    if not _can_access_mc_server(request, server_name):
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+        return web.json_response({"error": "unauthorized"}, status=401)
     server_dir = _mc_safe_server_dir(server_name)
     if not server_dir:
         if temp_path and os.path.exists(temp_path):
@@ -2271,11 +2397,11 @@ async def mc_api_upload_mod(request):
 
 
 async def mc_api_delete_mod(request):
-    if not _is_mc_admin(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
     name = data.get("name", "")
     mod = data.get("mod", "")
+    if not _can_access_mc_server(request, name):
+        return web.json_response({"error": "unauthorized"}, status=401)
     if not name or not mod:
         return web.json_response({"error": "Missing params"}, status=400)
     mod_path = os.path.join(MC_DIR, name, "mods", mod)
@@ -2288,7 +2414,7 @@ async def mc_api_delete_mod(request):
 
 async def mc_ws_console(request):
     name = request.match_info.get("name", "")
-    if not _is_mc_admin(request):
+    if not _can_access_mc_server(request, name):
         return web.Response(status=401)
     ws = web.WebSocketResponse()
     await ws.prepare(request)
@@ -2433,6 +2559,10 @@ body{
 .console-header .actions .props:hover{background:rgba(0,220,120,.08);border-color:rgba(0,220,120,.35);color:#00dc78}
 .console-header .actions .version{border-color:rgba(168,85,247,.3);color:#c084fc}
 .console-header .actions .version:hover{background:rgba(168,85,247,.1);color:#d8b4fe}
+.console-header .actions .people{border-color:rgba(45,212,191,.3);color:#5eead4}
+.console-header .actions .people:hover{background:rgba(45,212,191,.1);color:#99f6e4}
+.console-header .actions .access{border-color:rgba(251,191,36,.3);color:#fbbf24}
+.console-header .actions .access:hover{background:rgba(251,191,36,.1);color:#fde68a}
 .console-header .actions .delete{border-color:rgba(239,68,68,.3);color:#f87171}
 .console-header .actions .delete:hover{background:rgba(239,68,68,.1);color:#fca5a5}
 .console-header .actions .icon-upload{border-color:rgba(88,101,242,.3);color:#8b9cf7}
@@ -2562,7 +2692,7 @@ async function checkAuth(){
   var avatar=userInfo.avatar?'<img src="https://cdn.discordapp.com/avatars/'+userInfo.id+'/'+userInfo.avatar+'.png">':'';
   var websiteLink=userInfo.mc_authorized?'<a class="nav-link" href="/">Website</a>':'';
   document.getElementById('userInfo').innerHTML=avatar+'<span class="name">'+userInfo.username+'</span>'+websiteLink;
-  var createEl=document.getElementById('createServer');if(createEl)createEl.style.display='';
+  var createEl=document.getElementById('createServer');if(createEl)createEl.style.display=userInfo.mc_admin?'':'none';
   return true;
 }
 function loadServers(){
@@ -2621,7 +2751,8 @@ function selectServer(name){
       document.getElementById('cmdInput').focus();
       return;
     }
-     wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button><button class="props" onclick="openProps()">Properties</button><button class="version" onclick="changeServerVersion()">Version</button><button class="icon-upload" onclick="document.getElementById(\'serverIconInput\').click()">Icon</button><button class="delete" onclick="deleteServer()">Delete</button><input id="serverIconInput" type="file" accept="image/*" style="display:none" onchange="openIconCrop(this)"></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
+     wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button><button class="props" onclick="openProps()">Properties</button><button class="people" onclick="openPeople()">People</button><button class="version" onclick="changeServerVersion()">Version</button><button class="icon-upload" onclick="document.getElementById(\'serverIconInput\').click()">Icon</button><button class="delete" onclick="deleteServer()">Delete</button><button id="accessBtn" class="access" onclick="openPeople()">Access</button><input id="serverIconInput" type="file" accept="image/*" style="display:none" onchange="openIconCrop(this)"></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
+     var accessBtn=document.getElementById('accessBtn');if(accessBtn&&!userInfo.mc_admin)accessBtn.style.display='none';
     out=document.getElementById('consoleOutput');
     out.dataset.server=name;
     out.addEventListener('scroll',function(){
@@ -2807,6 +2938,8 @@ function stopServer(){
   if(!activeServer)return;
   fetch('/api/mc/stop',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer})}).then(function(r){return r.json()}).then(function(){loadServers()});
 }
+function closeProps(){document.getElementById('propsPanel').style.display='none'}
+function closePeople(){document.getElementById('peoplePanel').style.display='none'}
 checkAuth().then(function(ok){
   if(ok){
     loadVersions();
@@ -2819,9 +2952,31 @@ function openProps(){
     .then(r=>r.json()).then(d=>{
       if(d.properties){
         buildPropsEditor(d.properties);
-        document.getElementById('propsPanel').style.display='block';
+         document.getElementById('propsPanel').style.display='flex';
       }
     });
+}
+function openPeople(){
+  if(!activeServer)return;
+  fetch('/api/mc/players?name='+encodeURIComponent(activeServer),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
+    if(d.error){alert(d.error);return}
+    var h='<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="color:#fff;font-size:20px">'+escapeHtml(activeServer)+'</h2><button onclick="closePeople()" style="background:none;border:none;color:#8b949e;font-size:24px;cursor:pointer">X</button></div>';
+    h+='<p style="color:#8b949e;font-size:12px;margin:8px 0 20px">Players online</p><div style="display:flex;flex-wrap:wrap;gap:10px">';
+    (d.players||[]).forEach(function(player){h+='<div style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.04);padding:8px 10px;border-radius:10px"><img src="'+player.head+'" style="width:40px;height:40px;border-radius:8px" onerror="this.style.display=\'none\'"><span style="color:#fff">'+escapeHtml(player.name)+'</span></div>'});
+    if(!(d.players||[]).length)h+='<span style="color:#8b949e">No players reported. Press refresh to query the server.</span>';
+    h+='</div><p style="color:#8b949e;font-size:12px;margin:24px 0 10px">Discord access</p><div style="display:grid;gap:8px">';
+    (d.profiles||[]).forEach(function(profile){h+='<div style="display:flex;align-items:center;gap:10px;background:rgba(255,255,255,.04);padding:8px;border-radius:10px">'+(profile.avatar?'<img src="'+profile.avatar+'" style="width:36px;height:36px;border-radius:50%">':'')+'<div style="flex:1"><strong style="color:#fff">'+escapeHtml(profile.username)+'</strong><small style="display:block;color:#8b949e">'+profile.id+'</small></div>'+(userInfo.mc_admin?'<button onclick="removeServerAccess(\''+profile.id+'\')" style="background:none;border:1px solid rgba(239,68,68,.3);color:#f87171;border-radius:6px;padding:5px 8px;cursor:pointer">Remove</button>':'')+'</div>'});
+    if(userInfo.mc_admin)h+='</div><div style="display:flex;gap:8px;margin-top:14px"><input id="accessUserId" placeholder="Discord user ID" style="flex:1;background:#0d1117;border:1px solid rgba(255,255,255,.1);color:#fff;padding:9px;border-radius:8px"><button onclick="addServerAccess()" style="background:#fbbf24;color:#211600;border:0;border-radius:8px;padding:9px 12px;font-weight:600;cursor:pointer">Add</button></div>';
+    else h+='</div>';
+    document.getElementById('peopleContent').innerHTML=h;document.getElementById('peoplePanel').style.display='flex';
+  });
+}
+function addServerAccess(){
+  var input=document.getElementById('accessUserId');if(!input||!input.value.trim())return;
+  fetch('/api/mc/permissions',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer,user_id:input.value.trim()})}).then(function(r){return r.json()}).then(function(d){if(d.error){alert(d.error);return}openPeople()});
+}
+function removeServerAccess(userId){
+  fetch('/api/mc/permissions',{method:'DELETE',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer,user_id:userId})}).then(function(){openPeople()});
 }
 function buildPropsEditor(props){
   propsCache=JSON.parse(JSON.stringify(props||{}));
@@ -2858,12 +3013,15 @@ function saveProps(){
     .then(r=>r.json()).then(d=>{if(d.ok)alert('Saved!')});
 }
 </script>
-<div id="propsPanel" style="display:none;position:fixed;top:0;right:0;width:360px;height:100vh;background:rgba(5,5,8,.95);border-left:1px solid rgba(0,220,120,.15);z-index:200;overflow-y:auto;padding:20px;backdrop-filter:blur(12px)">
+<div id="propsPanel" style="display:none;position:fixed;inset:0;width:auto;height:auto;flex-direction:column;background:rgba(5,5,8,.98);z-index:200;overflow-y:auto;padding:28px;backdrop-filter:blur(12px)">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
     <h2 style="color:#fff;font-size:16px">Server Properties</h2>
-    <button onclick="document.getElementById('propsPanel').style.display='none'" style="background:none;border:none;color:#8b949e;font-size:20px;cursor:pointer">X</button>
+    <button onclick="closeProps()" style="background:none;border:none;color:#8b949e;font-size:20px;cursor:pointer">Back to Console</button>
   </div>
   <div id="propsContent"></div>
+</div>
+<div id="peoplePanel" style="display:none;position:fixed;inset:0;width:auto;height:auto;flex-direction:column;background:rgba(5,5,8,.98);z-index:200;overflow-y:auto;padding:28px;backdrop-filter:blur(12px)">
+  <div id="peopleContent" style="max-width:900px;width:100%;margin:0 auto"></div>
 </div>
 </body>
 </html>'''
@@ -2906,10 +3064,12 @@ def _save_properties(server_dir, props):
             f.write(f"{k}={v['value']}\n")
 
 async def mc_api_properties(request):
-    if not _is_mc_admin(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
     name = request.query.get("name", "")
-    server_dir = os.path.join(MC_DIR, name)
+    if not _can_access_mc_server(request, name):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    server_dir = _mc_safe_server_dir(name)
+    if not server_dir:
+        return web.json_response({"error": "Server not found"}, status=404)
     props_path = os.path.join(server_dir, "server.properties")
     if not os.path.exists(props_path):
         return web.json_response({"error": "server.properties not found"}, status=404)
@@ -2917,11 +3077,13 @@ async def mc_api_properties(request):
     return web.json_response({"properties": props})
 
 async def mc_api_set_properties(request):
-    if not _is_mc_admin(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
     name = data.get("name", "")
-    server_dir = os.path.join(MC_DIR, name)
+    if not _can_access_mc_server(request, name):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    server_dir = _mc_safe_server_dir(name)
+    if not server_dir:
+        return web.json_response({"error": "Server not found"}, status=404)
     props = data.get("properties", {})
     _save_properties(server_dir, props)
     return web.json_response({"ok": True})
@@ -2943,6 +3105,10 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_post("/api/mc/version", mc_api_change_version)
     app.router.add_post("/api/mc/delete", mc_api_delete_server)
     app.router.add_get("/api/mc/servers", mc_api_servers)
+    app.router.add_get("/api/mc/permissions", mc_api_permissions)
+    app.router.add_post("/api/mc/permissions", mc_api_add_permission)
+    app.router.add_delete("/api/mc/permissions", mc_api_remove_permission)
+    app.router.add_get("/api/mc/players", mc_api_players)
     app.router.add_post("/api/mc/create", mc_api_create)
     app.router.add_post("/api/mc/start", mc_api_start)
     app.router.add_post("/api/mc/stop", mc_api_stop)

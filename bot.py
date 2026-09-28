@@ -201,7 +201,7 @@ def start_tunnel():
 async def on_ready():
     print(f"[DEBUG] Online as: {bot.user}")
 
-    from commands.core import switch_to_default_cookie, load_queue, start_local_server, decompile_queue_worker, reset_bot_presence
+    from commands.core import switch_to_default_cookie, load_queue, decompile_queue_worker, reset_bot_presence
 
     try:
         from commands.core import start_screenshare_on_ready
@@ -222,12 +222,6 @@ async def on_ready():
         run_minecraft_setup()
     except Exception as e:
         print(f"[MINECRAFT] Setup failed: {e}")
-
-    if ensure_cloudflared():
-        if ensure_tunnel():
-            start_tunnel()
-
-    await start_local_server(port=5000)
 
     asyncio.create_task(decompile_queue_worker())
 
@@ -275,5 +269,12 @@ async def on_command_completion(ctx):
     except Exception as e:
         print(f"[DEBUG] Could not delete command message: {e}")
 
+async def main():
+    from commands.core import start_local_server
+    await start_local_server(port=5000)
+    if ensure_cloudflared() and ensure_tunnel():
+        start_tunnel()
+    await bot.start(BOT_TOKEN)
+
 if __name__ == "__main__":
-    bot.run(BOT_TOKEN)
+    asyncio.run(main())
