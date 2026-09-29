@@ -25,7 +25,7 @@ load_dotenv(os.path.join(_BASE_DIR, ".env"))
 REPO = "luaisgame/decompiler"
 BRANCH = "main"
 RAW_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
-RAW_VERSION = "add71fc"
+RAW_VERSION = "417acf6"
 
 GITHUB_FILES = [
     "commands/core.py",
