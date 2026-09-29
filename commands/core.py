@@ -2261,6 +2261,7 @@ def _parse_nbt_items(lines):
     for raw in compounds:
         item_id = re.search(r"\bid:\s*\"?([a-z0-9_.:-]+)", raw, re.IGNORECASE)
         if not item_id:
+            items.append({"id": None, "count": 0, "slot": None, "enchants": [], "raw": raw})
             continue
         count_match = re.search(r"\b(?:count|Count):\s*(\d+)", raw)
         slot_match = re.search(r"\bSlot:\s*(-?\d+)", raw)
@@ -2316,14 +2317,16 @@ async def mc_api_player(request):
     inventory = {}
     for item in _parse_nbt_items(details.get("Inventory", [])):
         if item["slot"] is not None and 0 <= item["slot"] <= 35:
-            inventory[f"inventory.{item['slot']}"] = item
+            slot_name = f"hotbar.{item['slot']}" if item["slot"] < 9 else f"inventory.{item['slot'] - 9}"
+            inventory[slot_name] = item
     armor_slots = ["armor.feet", "armor.legs", "armor.chest", "armor.head"]
     for index, item in enumerate(_parse_nbt_items(details.get("Armor", []))[:4]):
-        inventory[armor_slots[index]] = item
+        if item.get("id"):
+            inventory[armor_slots[index]] = item
     hands = _parse_nbt_items(details.get("Hands", []))
-    if hands:
+    if hands and hands[0].get("id"):
         inventory["weapon.mainhand"] = hands[0]
-    if len(hands) > 1:
+    if len(hands) > 1 and hands[1].get("id"):
         inventory["weapon.offhand"] = hands[1]
     server_dir = _mc_safe_server_dir(server_name)
     has_custom_skin = bool(server_dir and _mc_find_skin_url(server_dir, player_name))
@@ -2345,15 +2348,40 @@ async def mc_api_inventory_move(request):
     destination = data.get("destination", "")
     if not _can_access_mc_server(request, server_name):
         return web.json_response({"error": "unauthorized"}, status=401)
-    if not _valid_mc_player_name(player_name) or not re.fullmatch(r"(?:inventory\.\d+|armor\.(?:head|chest|legs|feet)|weapon\.(?:mainhand|offhand))", source or "") or not re.fullmatch(r"(?:inventory\.\d+|armor\.(?:head|chest|legs|feet)|weapon\.(?:mainhand|offhand))", destination or ""):
+    slot_pattern = r"(?:hotbar\.\d+|inventory\.\d+|armor\.(?:head|chest|legs|feet)|weapon\.(?:mainhand|offhand))"
+    if not _valid_mc_player_name(player_name) or not re.fullmatch(slot_pattern, source or "") or not re.fullmatch(slot_pattern, destination or ""):
         return web.json_response({"error": "Invalid inventory slot"}, status=400)
     if source == destination:
         return web.json_response({"ok": True})
     proc = mc_processes.get(server_name)
     if not proc or proc.returncode is not None:
         return web.json_response({"error": "Server not running"}, status=400)
-    await _mc_run_command_capture(server_name, f"item replace entity {player_name} {destination} from entity {player_name} {source}")
+    def nbt_path(slot):
+        if slot.startswith("hotbar."):
+            return f"Inventory[{{Slot:{slot.split('.')[1]}b}}]"
+        if slot.startswith("inventory."):
+            return f"Inventory[{{Slot:{int(slot.split('.')[1]) + 9}b}}]"
+        if slot == "armor.feet":
+            return "ArmorItems[0]"
+        if slot == "armor.legs":
+            return "ArmorItems[1]"
+        if slot == "armor.chest":
+            return "ArmorItems[2]"
+        if slot == "armor.head":
+            return "ArmorItems[3]"
+        return f"HandItems[{0 if slot == 'weapon.mainhand' else 1}]"
+
+    storage = "website:inventory"
+    source_path = nbt_path(source)
+    destination_path = nbt_path(destination)
+    await _mc_run_command_capture(server_name, f"data remove storage {storage} source")
+    await _mc_run_command_capture(server_name, f"data remove storage {storage} destination")
+    await _mc_run_command_capture(server_name, f"execute if data entity {player_name} {source_path} run data modify storage {storage} source set from entity {player_name} {source_path}")
+    await _mc_run_command_capture(server_name, f"execute if data entity {player_name} {destination_path} run data modify storage {storage} destination set from entity {player_name} {destination_path}")
     await _mc_run_command_capture(server_name, f"item replace entity {player_name} {source} with air")
+    await _mc_run_command_capture(server_name, f"item replace entity {player_name} {destination} with air")
+    await _mc_run_command_capture(server_name, f"execute if data storage {storage} source run data modify entity {player_name} {destination_path} set from storage {storage} source")
+    await _mc_run_command_capture(server_name, f"execute if data storage {storage} destination run data modify entity {player_name} {source_path} set from storage {storage} destination")
     return web.json_response({"ok": True})
 
 async def mc_api_player_action(request):
@@ -3313,9 +3341,9 @@ function renderInventory(inventory){
   var h='<div class="inventory-section"><h3>Armor and offhand</h3><div class="inventory-row">';
   ['armor.head','armor.chest','armor.legs','armor.feet','weapon.offhand'].forEach(function(slot){h+=inventorySlot(slot,currentPlayerInventory[slot])});
   h+='</div></div><div class="inventory-section"><h3>Main inventory</h3><div class="inventory-grid">';
-  for(var row=0;row<3;row++)for(var col=0;col<9;col++){var slot='inventory.'+(9+row*9+col);h+=inventorySlot(slot,currentPlayerInventory[slot])}
+  for(var row=0;row<3;row++)for(var col=0;col<9;col++){var slot='inventory.'+(row*9+col);h+=inventorySlot(slot,currentPlayerInventory[slot])}
   h+='</div></div><div class="inventory-section"><h3>Hotbar</h3><div class="inventory-grid">';
-  for(var hot=0;hot<9;hot++)h+=inventorySlot('inventory.'+hot,currentPlayerInventory['inventory.'+hot]);
+  for(var hot=0;hot<9;hot++)h+=inventorySlot('hotbar.'+hot,currentPlayerInventory['hotbar.'+hot]);
   return h+'</div></div>';
 }
 function inventoryDrag(event,slot){event.dataTransfer.setData('slot',slot)}
@@ -3323,7 +3351,6 @@ function inventoryDrop(event,destination){
   event.preventDefault();
   var source=event.dataTransfer.getData('slot');
   if(!source||source===destination)return;
-  if(currentPlayerInventory[destination]){alert('Move items to an empty slot to avoid overwriting them.');return}
   fetch('/api/mc/inventory-move',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({server:activeServer,player:currentPlayerName,source:source,destination:destination})}).then(function(r){return r.json()}).then(function(d){if(d.error)alert(d.error);else showPlayerDetails(currentPlayerName)});
 }
 function showPlayerDetails(player){
