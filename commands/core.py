@@ -13,6 +13,7 @@ import time
 import json
 import re
 import zipfile
+import hashlib
 import secrets
 import aiohttp
 import discord
@@ -1775,6 +1776,62 @@ def _mc_safe_server_dir(name):
     server_dir = os.path.join(MC_DIR, name)
     return server_dir if os.path.isdir(server_dir) else None
 
+def _mc_offline_uuid(player_name):
+    digest = bytearray(hashlib.md5(f"OfflinePlayer:{player_name}".encode("utf-8")).digest())
+    digest[6] = (digest[6] & 0x0F) | 0x30
+    digest[8] = (digest[8] & 0x3F) | 0x80
+    return uuid.UUID(bytes=bytes(digest))
+
+def _find_texture_url(value):
+    if isinstance(value, dict):
+        textures = value.get("textures")
+        if isinstance(textures, dict):
+            skin = textures.get("SKIN")
+            if isinstance(skin, dict) and skin.get("url"):
+                return skin["url"]
+        for child in value.values():
+            result = _find_texture_url(child)
+            if result:
+                return result
+    elif isinstance(value, list):
+        for child in value:
+            result = _find_texture_url(child)
+            if result:
+                return result
+    elif isinstance(value, str) and len(value) > 20:
+        try:
+            decoded = base64.b64decode(value).decode("utf-8")
+            return _find_texture_url(json.loads(decoded))
+        except Exception:
+            pass
+    return None
+
+def _mc_find_skin_url(server_dir, player_name):
+    offline_id = _mc_offline_uuid(player_name).hex
+    roots = [
+        os.path.join(server_dir, "config", "skinrestorer"),
+        os.path.join(server_dir, "config", "SkinRestorer"),
+        os.path.join(server_dir, "plugins", "SkinsRestorer"),
+    ]
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for current, _, files in os.walk(root):
+            for filename in files:
+                if not filename.endswith((".playerskin", ".skin", ".json")):
+                    continue
+                stem = os.path.splitext(filename)[0].replace("-", "").lower()
+                if offline_id not in stem and player_name.lower() not in filename.lower():
+                    continue
+                try:
+                    with open(os.path.join(current, filename), "r", encoding="utf-8") as f:
+                        url = _find_texture_url(json.load(f))
+                    if url:
+                        return url
+                except Exception:
+                    continue
+    return None
+
 def _mc_change_server_version(server_dir, loader_type, version):
     from minecraft_setup import setup_server
     backup_dir = os.path.join(MC_DIR, f".{os.path.basename(server_dir)}-version-backup-{uuid.uuid4().hex}")
@@ -2110,9 +2167,31 @@ async def mc_api_players(request):
     for user_id in _load_mc_permissions().get(name, []):
         profiles.append(await _mc_discord_profile(user_id))
     return web.json_response({
-        "players": [{"name": player, "head": f"https://mc-heads.net/avatar/{quote(player)}/48"} for player in players],
+        "players": [{
+            "name": player,
+            "head": f"https://mc-heads.net/avatar/{quote(player)}/48",
+            "skin": bool(_mc_find_skin_url(_mc_safe_server_dir(name), player)),
+        } for player in players],
         "profiles": profiles,
     })
+
+async def mc_api_player_skin(request):
+    name = request.query.get("server", "")
+    player = request.query.get("player", "").strip()
+    if not player or not _can_access_mc_server(request, name):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    server_dir = _mc_safe_server_dir(name)
+    skin_url = _mc_find_skin_url(server_dir, player) if server_dir else None
+    if not skin_url:
+        return web.Response(status=404)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(skin_url) as response:
+                if response.status != 200:
+                    return web.Response(status=404)
+                return web.Response(body=await response.read(), content_type="image/png", headers={"Cache-Control": "no-cache"})
+    except Exception:
+        return web.Response(status=404)
 
 async def mc_api_start(request):
     data = await request.json()
@@ -2949,6 +3028,14 @@ function stopServer(){
 }
 function closeProps(){document.getElementById('propsPanel').style.display='none'}
 function closePeople(){document.getElementById('peoplePanel').style.display='none'}
+function renderSkinHeads(){
+  document.querySelectorAll('.player-head[data-skin]').forEach(function(canvas){
+    var image=new Image();image.onload=function(){
+      var ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=false;
+      ctx.clearRect(0,0,48,48);ctx.drawImage(image,8,8,8,8,0,0,48,48);ctx.drawImage(image,40,8,8,8,0,0,48,48);
+    };image.src=canvas.dataset.skin;
+  });
+}
 checkAuth().then(function(ok){
   if(ok){
     loadVersions();
@@ -2971,13 +3058,13 @@ function openPeople(){
     if(d.error){alert(d.error);return}
     var h='<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="color:#fff;font-size:20px">'+escapeHtml(activeServer)+'</h2><button onclick="closePeople()" style="background:none;border:none;color:#8b949e;font-size:24px;cursor:pointer">X</button></div>';
     h+='<p style="color:#8b949e;font-size:12px;margin:8px 0 20px">Players online</p><div style="display:flex;flex-wrap:wrap;gap:10px">';
-    (d.players||[]).forEach(function(player){h+='<div style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.04);padding:8px 10px;border-radius:10px"><img src="'+player.head+'" style="width:40px;height:40px;border-radius:8px" onerror="this.style.display=\'none\'"><span style="color:#fff">'+escapeHtml(player.name)+'</span></div>'});
+    (d.players||[]).forEach(function(player){var head=player.skin?'<canvas class="player-head" width="48" height="48" data-skin="/api/mc/player-skin?server='+encodeURIComponent(activeServer)+'&player='+encodeURIComponent(player.name)+'" style="width:40px;height:40px;border-radius:8px;image-rendering:pixelated"></canvas>':'<img src="'+player.head+'" style="width:40px;height:40px;border-radius:8px" onerror="this.style.display=\'none\'">';h+='<div style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.04);padding:8px 10px;border-radius:10px">'+head+'<span style="color:#fff">'+escapeHtml(player.name)+'</span></div>'});
     if(!(d.players||[]).length)h+='<span style="color:#8b949e">No players reported. Press refresh to query the server.</span>';
     h+='</div><p style="color:#8b949e;font-size:12px;margin:24px 0 10px">Discord access</p><div style="display:grid;gap:8px">';
     (d.profiles||[]).forEach(function(profile){h+='<div style="display:flex;align-items:center;gap:10px;background:rgba(255,255,255,.04);padding:8px;border-radius:10px">'+(profile.avatar?'<img src="'+profile.avatar+'" style="width:36px;height:36px;border-radius:50%">':'')+'<div style="flex:1"><strong style="color:#fff">'+escapeHtml(profile.username)+'</strong><small style="display:block;color:#8b949e">'+profile.id+'</small></div>'+(userInfo.mc_admin?'<button onclick="removeServerAccess(\''+profile.id+'\')" style="background:none;border:1px solid rgba(239,68,68,.3);color:#f87171;border-radius:6px;padding:5px 8px;cursor:pointer">Remove</button>':'')+'</div>'});
     if(userInfo.mc_admin)h+='</div><div style="display:flex;gap:8px;margin-top:14px"><input id="accessUserId" placeholder="Discord user ID" style="flex:1;background:#0d1117;border:1px solid rgba(255,255,255,.1);color:#fff;padding:9px;border-radius:8px"><button onclick="addServerAccess()" style="background:#fbbf24;color:#211600;border:0;border-radius:8px;padding:9px 12px;font-weight:600;cursor:pointer">Add</button></div>';
     else h+='</div>';
-    document.getElementById('peopleContent').innerHTML=h;document.getElementById('peoplePanel').style.display='flex';
+    document.getElementById('peopleContent').innerHTML=h;document.getElementById('peoplePanel').style.display='flex';renderSkinHeads();
   });
 }
 function addServerAccess(){
@@ -3118,6 +3205,7 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_post("/api/mc/permissions", mc_api_add_permission)
     app.router.add_delete("/api/mc/permissions", mc_api_remove_permission)
     app.router.add_get("/api/mc/players", mc_api_players)
+    app.router.add_get("/api/mc/player-skin", mc_api_player_skin)
     app.router.add_post("/api/mc/create", mc_api_create)
     app.router.add_post("/api/mc/start", mc_api_start)
     app.router.add_post("/api/mc/stop", mc_api_stop)
