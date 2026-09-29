@@ -1746,6 +1746,8 @@ def _mc_get_servers():
         return []
     servers = []
     for name in sorted(os.listdir(MC_DIR)):
+        if name == "backups" or name.startswith("."):
+            continue
         path = os.path.join(MC_DIR, name)
         if os.path.isdir(path):
             running = name in mc_processes and mc_processes[name] is not None and mc_processes[name].returncode is None
@@ -1929,6 +1931,61 @@ async def mc_api_delete_server(request):
     mc_ws_clients.pop(name, None)
     shutil.rmtree(server_dir)
     return web.json_response({"ok": True})
+
+def _mc_create_backup(server_name, server_dir):
+    backup_dir = os.path.join(MC_DIR, "backups", server_name)
+    os.makedirs(backup_dir, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup_path = os.path.join(backup_dir, f"{server_name}-{stamp}.zip")
+    with zipfile.ZipFile(backup_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for root, dirs, files in os.walk(server_dir):
+            dirs[:] = [directory for directory in dirs if directory not in ("backups",) and not directory.startswith(".")]
+            for filename in files:
+                if filename.endswith((".lock", ".tmp")) or filename.startswith("."):
+                    continue
+                path = os.path.join(root, filename)
+                archive.write(path, os.path.relpath(path, server_dir))
+    return backup_path
+
+async def mc_api_backup(request):
+    data = await request.json()
+    name = data.get("name", "").strip()
+    if not _can_access_mc_server(request, name):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    server_dir = _mc_safe_server_dir(name)
+    if not server_dir:
+        return web.json_response({"error": "Server not found"}, status=404)
+    try:
+        backup_path = await asyncio.to_thread(_mc_create_backup, name, server_dir)
+        return web.json_response({"ok": True, "name": os.path.basename(backup_path)})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+async def mc_api_backups(request):
+    name = request.query.get("name", "")
+    if not _can_access_mc_server(request, name):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    backup_dir = os.path.join(MC_DIR, "backups", name)
+    if not os.path.isdir(backup_dir):
+        return web.json_response({"backups": []})
+    backups = []
+    for filename in sorted(os.listdir(backup_dir), reverse=True):
+        path = os.path.join(backup_dir, filename)
+        if filename.endswith(".zip") and os.path.isfile(path):
+            backups.append({"name": filename, "size": os.path.getsize(path), "created": os.path.getmtime(path)})
+    return web.json_response({"backups": backups})
+
+async def mc_api_backup_download(request):
+    name = request.query.get("name", "")
+    filename = os.path.basename(request.query.get("file", ""))
+    if not _can_access_mc_server(request, name):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not filename.endswith(".zip"):
+        return web.json_response({"error": "Invalid backup"}, status=400)
+    path = os.path.join(MC_DIR, "backups", name, filename)
+    if not os.path.isfile(path):
+        return web.json_response({"error": "Backup not found"}, status=404)
+    return web.FileResponse(path, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 def _mc_find_jar(server_dir):
     for f in os.listdir(server_dir):
@@ -2799,6 +2856,8 @@ body{
 .console-header .actions .access:hover{background:rgba(251,191,36,.1);color:#fde68a}
 .console-header .actions .delete{border-color:rgba(239,68,68,.3);color:#f87171}
 .console-header .actions .delete:hover{background:rgba(239,68,68,.1);color:#fca5a5}
+.console-header .actions .backup{border-color:rgba(96,165,250,.3);color:#93c5fd}
+.console-header .actions .backup:hover{background:rgba(96,165,250,.1);color:#bfdbfe}
 .console-header .actions .icon-upload{border-color:rgba(88,101,242,.3);color:#8b9cf7}
 .console-header .actions .icon-upload:hover{background:rgba(88,101,242,.1);color:#b7c0ff}
 .console-header .actions .start:hover{background:rgba(34,197,94,.08);border-color:rgba(34,197,94,.4)}
@@ -2994,7 +3053,7 @@ function selectServer(name){
       document.getElementById('cmdInput').focus();
       return;
     }
-     wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button><button class="props" onclick="openProps()">Properties</button><button class="people" onclick="openPeople()">People</button><button class="version" onclick="changeServerVersion()">Version</button><button class="icon-upload" onclick="document.getElementById(\'serverIconInput\').click()">Icon</button><button class="delete" onclick="deleteServer()">Delete</button><button id="accessBtn" class="access" onclick="openPeople()">Access</button><input id="serverIconInput" type="file" accept="image/*" style="display:none" onchange="openIconCrop(this)"></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
+     wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button><button class="props" onclick="openProps()">Properties</button><button class="people" onclick="openPeople()">People</button><button class="backup" onclick="createBackup()">Backup</button><button class="version" onclick="changeServerVersion()">Version</button><button class="icon-upload" onclick="document.getElementById(\'serverIconInput\').click()">Icon</button><button class="delete" onclick="deleteServer()">Delete</button><button id="accessBtn" class="access" onclick="openPeople()">Access</button><input id="serverIconInput" type="file" accept="image/*" style="display:none" onchange="openIconCrop(this)"></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
      var accessBtn=document.getElementById('accessBtn');if(accessBtn&&!userInfo.mc_admin)accessBtn.style.display='none';
     out=document.getElementById('consoleOutput');
     out.dataset.server=name;
@@ -3099,6 +3158,14 @@ function deleteServer(){
     if(d.error){alert(d.error);return}
     if(ws){ws.close();ws=null}activeServer=null;lastWSServer='';loadServers();
     document.getElementById('consoleWrap').innerHTML='<div class="no-servers" id="noSelect">Select a server</div>';
+  });
+}
+function createBackup(){
+  if(!activeServer)return;
+  if(!confirm('Create a backup of '+activeServer+' now?'))return;
+  fetch('/api/mc/backup',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer})}).then(function(r){return r.json()}).then(function(d){
+    if(d.error){alert(d.error);return}
+    alert('Backup created: '+d.name);
   });
 }
 var iconCrop={img:null,fileInput:null,scale:1,left:0,top:0,width:0,height:0,size:0,x:0,y:0,dragging:false,startX:0,startY:0,startCropX:0,startCropY:0};
@@ -3411,6 +3478,9 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_get("/api/mc/versions", mc_api_versions)
     app.router.add_post("/api/mc/version", mc_api_change_version)
     app.router.add_post("/api/mc/delete", mc_api_delete_server)
+    app.router.add_post("/api/mc/backup", mc_api_backup)
+    app.router.add_get("/api/mc/backups", mc_api_backups)
+    app.router.add_get("/api/mc/backup-download", mc_api_backup_download)
     app.router.add_get("/api/mc/servers", mc_api_servers)
     app.router.add_get("/api/mc/permissions", mc_api_permissions)
     app.router.add_post("/api/mc/permissions", mc_api_add_permission)
