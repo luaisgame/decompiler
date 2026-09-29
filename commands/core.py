@@ -2175,6 +2175,73 @@ async def mc_api_players(request):
         "profiles": profiles,
     })
 
+def _valid_mc_player_name(name):
+    return bool(re.fullmatch(r"[A-Za-z0-9_]{1,16}", name or ""))
+
+async def _mc_run_command_capture(server_name, command):
+    proc = mc_processes.get(server_name)
+    if not proc or proc.returncode is not None or not proc.stdin:
+        return ["Server is not running."]
+    buffer = mc_console_buffers.setdefault(server_name, [])
+    start = len(buffer)
+    proc.stdin.write((command + "\n").encode("utf-8"))
+    await proc.stdin.drain()
+    deadline = asyncio.get_running_loop().time() + 2
+    while asyncio.get_running_loop().time() < deadline and len(buffer) == start:
+        await asyncio.sleep(0.1)
+    return buffer[start:]
+
+async def mc_api_player(request):
+    server_name = request.query.get("server", "")
+    player_name = request.query.get("player", "").strip()
+    if not _can_access_mc_server(request, server_name):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _valid_mc_player_name(player_name):
+        return web.json_response({"error": "Invalid player name"}, status=400)
+    commands = {
+        "Inventory": f"data get entity {player_name} Inventory",
+        "Armor": f"data get entity {player_name} ArmorItems",
+        "Hands": f"data get entity {player_name} HandItems",
+        "Selected Item": f"data get entity {player_name} SelectedItem",
+        "Health": f"data get entity {player_name} Health",
+        "Position": f"data get entity {player_name} Pos",
+        "Dimension": f"data get entity {player_name} Dimension",
+        "Experience": f"data get entity {player_name} XpLevel",
+    }
+    details = {}
+    for label, command in commands.items():
+        details[label] = await _mc_run_command_capture(server_name, command)
+    server_dir = _mc_safe_server_dir(server_name)
+    has_custom_skin = bool(server_dir and _mc_find_skin_url(server_dir, player_name))
+    return web.json_response({
+        "name": player_name,
+        "skin": has_custom_skin,
+        "skin_url": f"/api/mc/player-skin?server={quote(server_name)}&player={quote(player_name)}" if has_custom_skin else "",
+        "details": details,
+    })
+
+async def mc_api_player_action(request):
+    data = await request.json()
+    server_name = data.get("server", "")
+    player_name = str(data.get("player", "")).strip()
+    action = data.get("action", "")
+    reason = str(data.get("reason", "Website action")).replace("\n", " ").strip()[:200]
+    if not _can_access_mc_server(request, server_name):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _valid_mc_player_name(player_name):
+        return web.json_response({"error": "Invalid player name"}, status=400)
+    commands = {
+        "kick": f"kick {player_name} {reason}",
+        "ban": f"ban {player_name} {reason}",
+        "ban-ip": f"ban-ip {player_name} {reason}",
+        "op": f"op {player_name}",
+        "unop": f"deop {player_name}",
+    }
+    if action not in commands:
+        return web.json_response({"error": "Invalid player action"}, status=400)
+    output = await _mc_run_command_capture(server_name, commands[action])
+    return web.json_response({"ok": True, "output": output})
+
 async def mc_api_player_skin(request):
     name = request.query.get("server", "")
     player = request.query.get("player", "").strip()
@@ -3027,7 +3094,8 @@ function stopServer(){
   fetch('/api/mc/stop',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer})}).then(function(r){return r.json()}).then(function(){loadServers()});
 }
 function closeProps(){document.getElementById('propsPanel').style.display='none'}
-function closePeople(){document.getElementById('peoplePanel').style.display='none'}
+var peopleTimer=null;
+function closePeople(){if(peopleTimer){clearInterval(peopleTimer);peopleTimer=null}document.getElementById('peoplePanel').style.display='none'}
 function renderSkinHeads(){
   document.querySelectorAll('.player-head[data-skin]').forEach(function(canvas){
     var image=new Image();image.onload=function(){
@@ -3054,18 +3122,39 @@ function openProps(){
 }
 function openPeople(){
   if(!activeServer)return;
+  document.getElementById('peoplePanel').style.display='flex';
+  refreshPeople();
+  if(peopleTimer)clearInterval(peopleTimer);
+  peopleTimer=setInterval(refreshPeople,2000);
+}
+function refreshPeople(){
+  if(!activeServer)return;
   fetch('/api/mc/players?name='+encodeURIComponent(activeServer),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
-    if(d.error){alert(d.error);return}
+    if(d.error){alert(d.error);closePeople();return}
     var h='<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="color:#fff;font-size:20px">'+escapeHtml(activeServer)+'</h2><button onclick="closePeople()" style="background:none;border:none;color:#8b949e;font-size:24px;cursor:pointer">X</button></div>';
-    h+='<p style="color:#8b949e;font-size:12px;margin:8px 0 20px">Players online</p><div style="display:flex;flex-wrap:wrap;gap:10px">';
-    (d.players||[]).forEach(function(player){var head=player.skin?'<canvas class="player-head" width="48" height="48" data-skin="/api/mc/player-skin?server='+encodeURIComponent(activeServer)+'&player='+encodeURIComponent(player.name)+'" style="width:40px;height:40px;border-radius:8px;image-rendering:pixelated"></canvas>':'<img src="'+player.head+'" style="width:40px;height:40px;border-radius:8px" onerror="this.style.display=\'none\'">';h+='<div style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.04);padding:8px 10px;border-radius:10px">'+head+'<span style="color:#fff">'+escapeHtml(player.name)+'</span></div>'});
-    if(!(d.players||[]).length)h+='<span style="color:#8b949e">No players reported. Press refresh to query the server.</span>';
+    h+='<p style="color:#8b949e;font-size:12px;margin:8px 0 20px">Players online <span style="color:#00dc78">Live</span></p><div style="display:flex;flex-wrap:wrap;gap:10px">';
+    (d.players||[]).forEach(function(player){var head=player.skin?'<canvas class="player-head" width="48" height="48" data-skin="/api/mc/player-skin?server='+encodeURIComponent(activeServer)+'&player='+encodeURIComponent(player.name)+'" style="width:40px;height:40px;border-radius:8px;image-rendering:pixelated"></canvas>':'<img src="'+player.head+'" style="width:40px;height:40px;border-radius:8px" onerror="this.style.display=\'none\'">';h+='<button onclick="showPlayerDetails(\''+escapeHtml(player.name)+'\')" style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.04);padding:8px 10px;border-radius:10px;border:0;cursor:pointer">'+head+'<span style="color:#fff">'+escapeHtml(player.name)+'</span></button>'});
+    if(!(d.players||[]).length)h+='<span style="color:#8b949e">No players reported.</span>';
     h+='</div><p style="color:#8b949e;font-size:12px;margin:24px 0 10px">Discord access</p><div style="display:grid;gap:8px">';
     (d.profiles||[]).forEach(function(profile){h+='<div style="display:flex;align-items:center;gap:10px;background:rgba(255,255,255,.04);padding:8px;border-radius:10px">'+(profile.avatar?'<img src="'+profile.avatar+'" style="width:36px;height:36px;border-radius:50%">':'')+'<div style="flex:1"><strong style="color:#fff">'+escapeHtml(profile.username)+'</strong><small style="display:block;color:#8b949e">'+profile.id+'</small></div>'+(userInfo.mc_admin?'<button onclick="removeServerAccess(\''+profile.id+'\')" style="background:none;border:1px solid rgba(239,68,68,.3);color:#f87171;border-radius:6px;padding:5px 8px;cursor:pointer">Remove</button>':'')+'</div>'});
     if(userInfo.mc_admin)h+='</div><div style="display:flex;gap:8px;margin-top:14px"><input id="accessUserId" placeholder="Discord user ID" style="flex:1;background:#0d1117;border:1px solid rgba(255,255,255,.1);color:#fff;padding:9px;border-radius:8px"><button onclick="addServerAccess()" style="background:#fbbf24;color:#211600;border:0;border-radius:8px;padding:9px 12px;font-weight:600;cursor:pointer">Add</button></div>';
     else h+='</div>';
-    document.getElementById('peopleContent').innerHTML=h;document.getElementById('peoplePanel').style.display='flex';renderSkinHeads();
+    document.getElementById('peopleContent').innerHTML=h;renderSkinHeads();
   });
+}
+function showPlayerDetails(player){
+  if(peopleTimer){clearInterval(peopleTimer);peopleTimer=null}
+  fetch('/api/mc/player?server='+encodeURIComponent(activeServer)+'&player='+encodeURIComponent(player),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
+    if(d.error){alert(d.error);return}
+    var h='<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="color:#fff;font-size:20px">'+escapeHtml(player)+'</h2><button onclick="openPeople()" style="background:none;border:none;color:#00dc78;font-size:14px;cursor:pointer">Back to Players</button></div>';
+    h+='<div style="display:flex;gap:18px;align-items:center;margin:18px 0">'+(d.skin?'<img src="'+d.skin_url+'" style="width:128px;height:128px;image-rendering:pixelated;object-fit:contain;background:#111">':'<img src="https://mc-heads.net/avatar/'+encodeURIComponent(player)+'/128" style="width:128px;height:128px;border-radius:12px">')+'<div style="display:flex;flex-wrap:wrap;gap:8px"><button onclick="playerAction(\'kick\')">Kick</button><button onclick="playerAction(\'ban\')">Ban Player</button><button onclick="playerAction(\'ban-ip\')">Ban IP</button><button onclick="playerAction(\'op\')">OP</button><button onclick="playerAction(\'unop\')">UnOP</button></div></div>';
+    Object.keys(d.details||{}).forEach(function(key){h+='<section style="margin:14px 0"><h3 style="color:#00dc78;font-size:14px">'+key+'</h3><pre style="white-space:pre-wrap;word-break:break-word;background:#0d1117;border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:12px;color:#c9d1d9;font-size:12px">'+escapeHtml((d.details[key]||[]).join('\n'))+'</pre></section>'});
+    document.getElementById('peopleContent').innerHTML=h;
+  });
+}
+function playerAction(action){
+  var reason=(action==='op'||action==='unop')?'Website action':(prompt('Reason:','Website action')||'Website action');
+  fetch('/api/mc/player-action',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({server:activeServer,player:document.querySelector('#peopleContent h2').textContent,action:action,reason:reason})}).then(function(r){return r.json()}).then(function(d){if(d.error)alert(d.error);else alert(action+' sent')});
 }
 function addServerAccess(){
   var input=document.getElementById('accessUserId');if(!input||!input.value.trim())return;
@@ -3206,6 +3295,8 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_delete("/api/mc/permissions", mc_api_remove_permission)
     app.router.add_get("/api/mc/players", mc_api_players)
     app.router.add_get("/api/mc/player-skin", mc_api_player_skin)
+    app.router.add_get("/api/mc/player", mc_api_player)
+    app.router.add_post("/api/mc/player-action", mc_api_player_action)
     app.router.add_post("/api/mc/create", mc_api_create)
     app.router.add_post("/api/mc/start", mc_api_start)
     app.router.add_post("/api/mc/stop", mc_api_stop)
