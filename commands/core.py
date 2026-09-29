@@ -2928,6 +2928,15 @@ body{
 .icon-crop-actions{display:flex;gap:8px;justify-content:flex-end}
 .icon-crop-actions button{padding:9px 15px;border-radius:8px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:#c9d1d9;cursor:pointer;font-family:inherit;font-weight:600}
 .icon-crop-actions .apply{background:#00dc78;color:#050508;border-color:#00dc78}
+.inventory-section{margin:18px 0}
+.inventory-section h3{color:#00dc78;font-size:13px;margin-bottom:8px}
+.inventory-grid{display:grid;grid-template-columns:repeat(9,52px);gap:5px;width:max-content;max-width:100%;padding:10px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.08);border-radius:10px}
+.inventory-slot{width:52px;height:52px;border:1px solid rgba(255,255,255,.1);border-radius:7px;background:rgba(13,17,23,.9);display:flex;align-items:center;justify-content:center;position:relative;cursor:grab;padding:4px}
+.inventory-slot:hover{border-color:#00dc78;background:rgba(0,220,120,.08)}
+.inventory-slot img{width:42px;height:42px;image-rendering:pixelated;object-fit:contain}
+.inventory-slot .item-count{position:absolute;right:3px;bottom:1px;color:#fff;font-size:11px;font-weight:700;text-shadow:1px 1px #000}
+.inventory-slot.empty{cursor:default;opacity:.45}
+.inventory-row{display:flex;gap:5px;padding:10px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.08);border-radius:10px;width:max-content;max-width:100%}
 @media(max-width:480px){
   .sidebar{width:160px}
   .sidebar .title{font-size:10px}
@@ -2988,16 +2997,7 @@ async function checkAuth(){
   var createEl=document.getElementById('createServer');if(createEl)createEl.style.display=userInfo.mc_admin?'':'none';
   return true;
 }
-.inventory-section{margin:18px 0}
-.inventory-section h3{color:#00dc78;font-size:13px;margin-bottom:8px}
-.inventory-grid{display:grid;grid-template-columns:repeat(9,52px);gap:5px;width:max-content;max-width:100%;padding:10px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.08);border-radius:10px}
-.inventory-slot{width:52px;height:52px;border:1px solid rgba(255,255,255,.1);border-radius:7px;background:rgba(13,17,23,.9);display:flex;align-items:center;justify-content:center;position:relative;cursor:grab;padding:4px}
-.inventory-slot:hover{border-color:#00dc78;background:rgba(0,220,120,.08)}
-.inventory-slot img{width:42px;height:42px;image-rendering:pixelated;object-fit:contain}
-.inventory-slot .item-count{position:absolute;right:3px;bottom:1px;color:#fff;font-size:11px;font-weight:700;text-shadow:1px 1px #000}
-.inventory-slot.empty{cursor:default;opacity:.45}
-.inventory-row{display:flex;gap:5px;padding:10px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.08);border-radius:10px;width:max-content;max-width:100%}
-function loadServers(){
+ function loadServers(){
   fetch('/api/mc/servers',{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
     var el=document.getElementById('serverList');if(!el)return;el.innerHTML='';
     (d.servers||[]).forEach(function(s){
