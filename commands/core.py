@@ -2006,6 +2006,12 @@ def _mc_is_forge(server_dir):
     return False
 
 def _mc_detect_ver(server_dir):
+    version_file = os.path.join(server_dir, ".mc_version")
+    if os.path.exists(version_file):
+        with open(version_file, "r") as f:
+            saved_version = f.read().strip()
+        if re.match(r"^\d+\.\d+(?:\.\d+)?$", saved_version):
+            return saved_version
     libs_dir = os.path.join(server_dir, "libraries", "net", "minecraftforge", "forge")
     if os.path.isdir(libs_dir):
         for d in os.listdir(libs_dir):
@@ -3332,7 +3338,8 @@ function inventorySlot(slot,item){
   var label=item?item.id.replace(/^minecraft:/,'').replace(/_/g,' '):'';
   var enchantText=item&&item.enchants&&item.enchants.length?' Enchants: '+item.enchants.map(function(e){return e.name+' '+e.level}).join(', '):'';
   var title=item?escapeHtml(label+' x'+item.count+enchantText+'\n'+(item.raw||'')):'Empty slot';
-  var icon=item?'<img src="https://assets.mcasset.cloud/'+currentInventoryAssetVersion+'/assets/minecraft/textures/item/'+item.id.replace(/^minecraft:/,'')+'.png" onerror="this.remove()" alt="">':'';
+  var itemPath=item?item.id.replace(/^minecraft:/,''):'';
+  var icon=item?'<img src="https://assets.mcasset.cloud/'+currentInventoryAssetVersion+'/assets/minecraft/textures/item/'+itemPath+'.png" data-fallback="https://assets.mcasset.cloud/'+currentInventoryAssetVersion+'/assets/minecraft/textures/block/'+itemPath+'.png" onerror="if(this.dataset.fallback&&this.src.indexOf(\'/block/\')===-1){this.src=this.dataset.fallback}else{this.remove()}" alt="">':'';
   var enchantBadge=item&&item.enchants&&item.enchants.length?'<span style="position:absolute;left:3px;top:1px;color:#c084fc;font-size:9px;font-weight:700">E</span>':'';
   return '<div class="inventory-slot '+(item?'':'empty')+'" '+(item?'draggable="true" ondragstart="inventoryDrag(event,\''+slot+'\')"':'')+' ondragover="event.preventDefault()" ondrop="inventoryDrop(event,\''+slot+'\')" title="'+title+'">'+(item?icon+enchantBadge+'<span style="color:#e8e8e8;text-align:center;font-size:9px;line-height:1.1;text-transform:capitalize">'+escapeHtml(label)+'</span><span class="item-count">'+item.count+'</span>':'')+'</div>';
 }
