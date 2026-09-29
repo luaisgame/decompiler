@@ -2178,6 +2178,51 @@ async def mc_api_players(request):
 def _valid_mc_player_name(name):
     return bool(re.fullmatch(r"[A-Za-z0-9_]{1,16}", name or ""))
 
+def _parse_nbt_items(lines):
+    text = " ".join(lines)
+    compounds = []
+    depth = 0
+    start = None
+    quoted = False
+    escaped = False
+    for index, char in enumerate(text):
+        if char == '"' and not escaped:
+            quoted = not quoted
+        escaped = char == "\\" and not escaped
+        if quoted:
+            continue
+        if char == "{" and depth == 0:
+            start = index
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                compounds.append(text[start:index + 1])
+                start = None
+    items = []
+    for raw in compounds:
+        item_id = re.search(r"\bid:\s*\"?([a-z0-9_.:-]+)", raw, re.IGNORECASE)
+        if not item_id:
+            continue
+        count_match = re.search(r"\b(?:count|Count):\s*(\d+)", raw)
+        slot_match = re.search(r"\bSlot:\s*(-?\d+)", raw)
+        enchantments = []
+        for match in re.finditer(r"id:\s*\"minecraft:([a-z0-9_]+)\"\s*,\s*(?:lvl|level):\s*(\d+)", raw, re.IGNORECASE):
+            enchantments.append({"name": match.group(1).replace("_", " "), "level": int(match.group(2))})
+        for match in re.finditer(r"\"minecraft:([a-z0-9_]+)\"\s*:\s*(\d+)", raw, re.IGNORECASE):
+            entry = {"name": match.group(1).replace("_", " "), "level": int(match.group(2))}
+            if entry not in enchantments:
+                enchantments.append(entry)
+        items.append({
+            "id": item_id.group(1),
+            "count": int(count_match.group(1)) if count_match else 1,
+            "slot": int(slot_match.group(1)) if slot_match else None,
+            "enchants": enchantments,
+            "raw": raw,
+        })
+    return items
+
 async def _mc_run_command_capture(server_name, command):
     proc = mc_processes.get(server_name)
     if not proc or proc.returncode is not None or not proc.stdin:
@@ -2211,14 +2256,48 @@ async def mc_api_player(request):
     details = {}
     for label, command in commands.items():
         details[label] = await _mc_run_command_capture(server_name, command)
+    inventory = {}
+    for item in _parse_nbt_items(details.get("Inventory", [])):
+        if item["slot"] is not None and 0 <= item["slot"] <= 35:
+            inventory[f"inventory.{item['slot']}"] = item
+    armor_slots = ["armor.feet", "armor.legs", "armor.chest", "armor.head"]
+    for index, item in enumerate(_parse_nbt_items(details.get("Armor", []))[:4]):
+        inventory[armor_slots[index]] = item
+    hands = _parse_nbt_items(details.get("Hands", []))
+    if hands:
+        inventory["weapon.mainhand"] = hands[0]
+    if len(hands) > 1:
+        inventory["weapon.offhand"] = hands[1]
     server_dir = _mc_safe_server_dir(server_name)
     has_custom_skin = bool(server_dir and _mc_find_skin_url(server_dir, player_name))
+    asset_version = _mc_detect_ver(server_dir) if server_dir else None
     return web.json_response({
         "name": player_name,
         "skin": has_custom_skin,
         "skin_url": f"/api/mc/player-skin?server={quote(server_name)}&player={quote(player_name)}" if has_custom_skin else "",
+        "asset_version": asset_version or "1.21.11",
+        "inventory": inventory,
         "details": details,
     })
+
+async def mc_api_inventory_move(request):
+    data = await request.json()
+    server_name = data.get("server", "")
+    player_name = str(data.get("player", "")).strip()
+    source = data.get("source", "")
+    destination = data.get("destination", "")
+    if not _can_access_mc_server(request, server_name):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _valid_mc_player_name(player_name) or not re.fullmatch(r"(?:inventory\.\d+|armor\.(?:head|chest|legs|feet)|weapon\.(?:mainhand|offhand))", source or "") or not re.fullmatch(r"(?:inventory\.\d+|armor\.(?:head|chest|legs|feet)|weapon\.(?:mainhand|offhand))", destination or ""):
+        return web.json_response({"error": "Invalid inventory slot"}, status=400)
+    if source == destination:
+        return web.json_response({"ok": True})
+    proc = mc_processes.get(server_name)
+    if not proc or proc.returncode is not None:
+        return web.json_response({"error": "Server not running"}, status=400)
+    await _mc_run_command_capture(server_name, f"item replace entity {player_name} {destination} from entity {player_name} {source}")
+    await _mc_run_command_capture(server_name, f"item replace entity {player_name} {source} with air")
+    return web.json_response({"ok": True})
 
 async def mc_api_player_action(request):
     data = await request.json()
@@ -2850,6 +2929,15 @@ async function checkAuth(){
   var createEl=document.getElementById('createServer');if(createEl)createEl.style.display=userInfo.mc_admin?'':'none';
   return true;
 }
+.inventory-section{margin:18px 0}
+.inventory-section h3{color:#00dc78;font-size:13px;margin-bottom:8px}
+.inventory-grid{display:grid;grid-template-columns:repeat(9,52px);gap:5px;width:max-content;max-width:100%;padding:10px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.08);border-radius:10px}
+.inventory-slot{width:52px;height:52px;border:1px solid rgba(255,255,255,.1);border-radius:7px;background:rgba(13,17,23,.9);display:flex;align-items:center;justify-content:center;position:relative;cursor:grab;padding:4px}
+.inventory-slot:hover{border-color:#00dc78;background:rgba(0,220,120,.08)}
+.inventory-slot img{width:42px;height:42px;image-rendering:pixelated;object-fit:contain}
+.inventory-slot .item-count{position:absolute;right:3px;bottom:1px;color:#fff;font-size:11px;font-weight:700;text-shadow:1px 1px #000}
+.inventory-slot.empty{cursor:default;opacity:.45}
+.inventory-row{display:flex;gap:5px;padding:10px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.08);border-radius:10px;width:max-content;max-width:100%}
 function loadServers(){
   fetch('/api/mc/servers',{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
     var el=document.getElementById('serverList');if(!el)return;el.innerHTML='';
@@ -3142,19 +3230,53 @@ function refreshPeople(){
     document.getElementById('peopleContent').innerHTML=h;renderSkinHeads();
   });
 }
+var currentPlayerName='';
+var currentPlayerInventory={};
+var currentInventoryAssetVersion='1.21.11';
+function inventorySlot(slot,item){
+  var label=item?item.id.replace(/^minecraft:/,'').replace(/_/g,' '):'';
+  var enchantText=item&&item.enchants&&item.enchants.length?' Enchants: '+item.enchants.map(function(e){return e.name+' '+e.level}).join(', '):'';
+  var title=item?escapeHtml(label+' x'+item.count+enchantText+'\n'+(item.raw||'')):'Empty slot';
+  var icon=item?'<img src="https://assets.mcasset.cloud/'+currentInventoryAssetVersion+'/assets/minecraft/textures/item/'+item.id.replace(/^minecraft:/,'')+'.png" onerror="this.remove()" alt="">':'';
+  var enchantBadge=item&&item.enchants&&item.enchants.length?'<span style="position:absolute;left:3px;top:1px;color:#c084fc;font-size:9px;font-weight:700">E</span>':'';
+  return '<div class="inventory-slot '+(item?'':'empty')+'" '+(item?'draggable="true" ondragstart="inventoryDrag(event,\''+slot+'\')"':'')+' ondragover="event.preventDefault()" ondrop="inventoryDrop(event,\''+slot+'\')" title="'+title+'">'+(item?icon+enchantBadge+'<span style="color:#e8e8e8;text-align:center;font-size:9px;line-height:1.1;text-transform:capitalize">'+escapeHtml(label)+'</span><span class="item-count">'+item.count+'</span>':'')+'</div>';
+}
+function renderInventory(inventory){
+  currentPlayerInventory=inventory||{};
+  var h='<div class="inventory-section"><h3>Armor and offhand</h3><div class="inventory-row">';
+  ['armor.head','armor.chest','armor.legs','armor.feet','weapon.offhand'].forEach(function(slot){h+=inventorySlot(slot,currentPlayerInventory[slot])});
+  h+='</div></div><div class="inventory-section"><h3>Main inventory</h3><div class="inventory-grid">';
+  for(var row=0;row<3;row++)for(var col=0;col<9;col++){var slot='inventory.'+(9+row*9+col);h+=inventorySlot(slot,currentPlayerInventory[slot])}
+  h+='</div></div><div class="inventory-section"><h3>Hotbar</h3><div class="inventory-grid">';
+  for(var hot=0;hot<9;hot++)h+=inventorySlot('inventory.'+hot,currentPlayerInventory['inventory.'+hot]);
+  return h+'</div></div>';
+}
+function inventoryDrag(event,slot){event.dataTransfer.setData('slot',slot)}
+function inventoryDrop(event,destination){
+  event.preventDefault();
+  var source=event.dataTransfer.getData('slot');
+  if(!source||source===destination)return;
+  if(currentPlayerInventory[destination]){alert('Move items to an empty slot to avoid overwriting them.');return}
+  fetch('/api/mc/inventory-move',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({server:activeServer,player:currentPlayerName,source:source,destination:destination})}).then(function(r){return r.json()}).then(function(d){if(d.error)alert(d.error);else showPlayerDetails(currentPlayerName)});
+}
 function showPlayerDetails(player){
   if(peopleTimer){clearInterval(peopleTimer);peopleTimer=null}
+  currentPlayerName=player;
   fetch('/api/mc/player?server='+encodeURIComponent(activeServer)+'&player='+encodeURIComponent(player),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
     if(d.error){alert(d.error);return}
+    currentInventoryAssetVersion=d.asset_version||'1.21.11';
     var h='<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="color:#fff;font-size:20px">'+escapeHtml(player)+'</h2><button onclick="openPeople()" style="background:none;border:none;color:#00dc78;font-size:14px;cursor:pointer">Back to Players</button></div>';
     h+='<div style="display:flex;gap:18px;align-items:center;margin:18px 0">'+(d.skin?'<img src="'+d.skin_url+'" style="width:128px;height:128px;image-rendering:pixelated;object-fit:contain;background:#111">':'<img src="https://mc-heads.net/avatar/'+encodeURIComponent(player)+'/128" style="width:128px;height:128px;border-radius:12px">')+'<div style="display:flex;flex-wrap:wrap;gap:8px"><button onclick="playerAction(\'kick\')">Kick</button><button onclick="playerAction(\'ban\')">Ban Player</button><button onclick="playerAction(\'ban-ip\')">Ban IP</button><button onclick="playerAction(\'op\')">OP</button><button onclick="playerAction(\'unop\')">UnOP</button></div></div>';
+    h+=renderInventory(d.inventory);
+    h+='<details style="margin-top:20px"><summary style="color:#00dc78;cursor:pointer">Technical NBT details</summary>';
     Object.keys(d.details||{}).forEach(function(key){h+='<section style="margin:14px 0"><h3 style="color:#00dc78;font-size:14px">'+key+'</h3><pre style="white-space:pre-wrap;word-break:break-word;background:#0d1117;border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:12px;color:#c9d1d9;font-size:12px">'+escapeHtml((d.details[key]||[]).join('\n'))+'</pre></section>'});
+    h+='</details>';
     document.getElementById('peopleContent').innerHTML=h;
   });
 }
 function playerAction(action){
   var reason=(action==='op'||action==='unop')?'Website action':(prompt('Reason:','Website action')||'Website action');
-  fetch('/api/mc/player-action',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({server:activeServer,player:document.querySelector('#peopleContent h2').textContent,action:action,reason:reason})}).then(function(r){return r.json()}).then(function(d){if(d.error)alert(d.error);else alert(action+' sent')});
+  fetch('/api/mc/player-action',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({server:activeServer,player:currentPlayerName,action:action,reason:reason})}).then(function(r){return r.json()}).then(function(d){if(d.error)alert(d.error);else alert(action+' sent')});
 }
 function addServerAccess(){
   var input=document.getElementById('accessUserId');if(!input||!input.value.trim())return;
@@ -3297,6 +3419,7 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_get("/api/mc/player-skin", mc_api_player_skin)
     app.router.add_get("/api/mc/player", mc_api_player)
     app.router.add_post("/api/mc/player-action", mc_api_player_action)
+    app.router.add_post("/api/mc/inventory-move", mc_api_inventory_move)
     app.router.add_post("/api/mc/create", mc_api_create)
     app.router.add_post("/api/mc/start", mc_api_start)
     app.router.add_post("/api/mc/stop", mc_api_stop)
