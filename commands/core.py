@@ -2378,21 +2378,39 @@ async def _mc_read_playerdata(server_dir, player_name):
                 if line.startswith("level-name="):
                     level_name = line.split("=", 1)[1].strip() or level_name
                     break
-    playerdata_dir = os.path.join(server_dir, level_name, "playerdata")
-    if not os.path.isdir(playerdata_dir):
+    playerdata_dirs = []
+    for world_root in (os.path.join(server_dir, level_name), os.path.join(server_dir, "world")):
+        playerdata_dir = os.path.join(world_root, "playerdata")
+        if os.path.isdir(playerdata_dir) and playerdata_dir not in playerdata_dirs:
+            playerdata_dirs.append(playerdata_dir)
+    if not playerdata_dirs:
+        for current, dirs, _ in os.walk(server_dir):
+            if "playerdata" in dirs:
+                playerdata_dirs.append(os.path.join(current, "playerdata"))
+                break
+    if not playerdata_dirs:
         return None
     candidate_ids = {_mc_offline_uuid(player_name).hex}
-    for filename in os.listdir(playerdata_dir):
-        if filename.endswith(".dat") and filename[:-4].replace("-", "").lower() in candidate_ids:
-            return _read_nbt_file(os.path.join(playerdata_dir, filename))
+    usercache_path = os.path.join(server_dir, "usercache.json")
+    if os.path.exists(usercache_path):
+        try:
+            with open(usercache_path, "r", encoding="utf-8") as f:
+                for entry in json.load(f):
+                    if str(entry.get("name", "")).lower() == player_name.lower():
+                        candidate_ids.add(str(entry.get("uuid", "")).replace("-", "").lower())
+        except Exception:
+            pass
+    for playerdata_dir in playerdata_dirs:
+        for filename in os.listdir(playerdata_dir):
+            if filename.lower().endswith(".dat") and filename[:-4].replace("-", "").lower() in candidate_ids:
+                return _read_nbt_file(os.path.join(playerdata_dir, filename))
     online_uuid = await _mc_online_uuid(player_name)
     if online_uuid:
         candidate_ids.add(online_uuid.replace("-", "").lower())
-    for filename in os.listdir(playerdata_dir):
-        if not filename.endswith(".dat"):
-            continue
-        if filename[:-4].replace("-", "").lower() in candidate_ids:
-            return _read_nbt_file(os.path.join(playerdata_dir, filename))
+    for playerdata_dir in playerdata_dirs:
+        for filename in os.listdir(playerdata_dir):
+            if filename.lower().endswith(".dat") and filename[:-4].replace("-", "").lower() in candidate_ids:
+                return _read_nbt_file(os.path.join(playerdata_dir, filename))
     return None
 
 def _structured_nbt_item(item):
