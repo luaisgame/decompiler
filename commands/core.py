@@ -14,6 +14,9 @@ import json
 import re
 import zipfile
 import hashlib
+import struct
+import gzip
+import zlib
 import secrets
 import aiohttp
 import discord
@@ -2287,6 +2290,136 @@ def _parse_nbt_items(lines):
         })
     return items
 
+class _NBTReader:
+    def __init__(self, data):
+        self.data = data
+        self.offset = 0
+
+    def read(self, size):
+        value = self.data[self.offset:self.offset + size]
+        self.offset += size
+        return value
+
+    def number(self, fmt):
+        size = struct.calcsize(fmt)
+        return struct.unpack(fmt, self.read(size))[0]
+
+    def string(self):
+        size = self.number(">H")
+        return self.read(size).decode("utf-8", errors="replace")
+
+    def payload(self, tag_type):
+        if tag_type == 1:
+            return self.number(">b")
+        if tag_type == 2:
+            return self.number(">h")
+        if tag_type == 3:
+            return self.number(">i")
+        if tag_type == 4:
+            return self.number(">q")
+        if tag_type == 5:
+            return self.number(">f")
+        if tag_type == 6:
+            return self.number(">d")
+        if tag_type == 7:
+            return self.read(self.number(">i"))
+        if tag_type == 8:
+            return self.string()
+        if tag_type == 9:
+            child_type = self.number(">B")
+            count = self.number(">i")
+            return [self.payload(child_type) for _ in range(max(0, count))]
+        if tag_type == 10:
+            result = {}
+            while True:
+                child_type = self.number(">B")
+                if child_type == 0:
+                    return result
+                result[self.string()] = self.payload(child_type)
+        if tag_type == 11:
+            return [self.number(">i") for _ in range(max(0, self.number(">i")))]
+        if tag_type == 12:
+            return [self.number(">q") for _ in range(max(0, self.number(">i")))]
+        raise ValueError(f"Unknown NBT tag {tag_type}")
+
+def _read_nbt_file(path):
+    with open(path, "rb") as f:
+        compressed = f.read()
+    for decoder in (gzip.decompress, zlib.decompress, lambda value: value):
+        try:
+            data = decoder(compressed)
+            reader = _NBTReader(data)
+            tag_type = reader.number(">B")
+            if tag_type != 10:
+                return None
+            reader.string()
+            return reader.payload(tag_type)
+        except Exception:
+            continue
+    return None
+
+async def _mc_online_uuid(player_name):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://api.mojang.com/users/profiles/minecraft/{quote(player_name)}") as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get("id", "")
+    except Exception:
+        pass
+    return ""
+
+async def _mc_read_playerdata(server_dir, player_name):
+    level_name = "world"
+    props_path = os.path.join(server_dir, "server.properties")
+    if os.path.exists(props_path):
+        with open(props_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("level-name="):
+                    level_name = line.split("=", 1)[1].strip() or level_name
+                    break
+    playerdata_dir = os.path.join(server_dir, level_name, "playerdata")
+    if not os.path.isdir(playerdata_dir):
+        return None
+    candidate_ids = {_mc_offline_uuid(player_name).hex}
+    for filename in os.listdir(playerdata_dir):
+        if filename.endswith(".dat") and filename[:-4].replace("-", "").lower() in candidate_ids:
+            return _read_nbt_file(os.path.join(playerdata_dir, filename))
+    online_uuid = await _mc_online_uuid(player_name)
+    if online_uuid:
+        candidate_ids.add(online_uuid.replace("-", "").lower())
+    for filename in os.listdir(playerdata_dir):
+        if not filename.endswith(".dat"):
+            continue
+        if filename[:-4].replace("-", "").lower() in candidate_ids:
+            return _read_nbt_file(os.path.join(playerdata_dir, filename))
+    return None
+
+def _structured_nbt_item(item):
+    if not isinstance(item, dict) or not item.get("id"):
+        return None
+    enchantments = []
+    legacy = item.get("Enchantments", [])
+    if isinstance(legacy, list):
+        for enchantment in legacy:
+            if isinstance(enchantment, dict) and enchantment.get("id"):
+                enchantments.append({"name": str(enchantment["id"]).replace("minecraft:", "").replace("_", " "), "level": enchantment.get("lvl", 1)})
+    components = item.get("components", {})
+    if isinstance(components, dict):
+        for key in ("minecraft:enchantments", "minecraft:stored_enchantments"):
+            levels = components.get(key, {}).get("levels", {}) if isinstance(components.get(key), dict) else {}
+            if isinstance(levels, dict):
+                for enchantment, level in levels.items():
+                    entry = {"name": str(enchantment).replace("minecraft:", "").replace("_", " "), "level": level}
+                    if entry not in enchantments:
+                        enchantments.append(entry)
+    return {
+        "id": str(item.get("id")),
+        "count": int(item.get("Count", item.get("count", 1))),
+        "enchants": enchantments,
+        "raw": json.dumps(item, default=str),
+    }
+
 async def _mc_run_command_capture(server_name, command):
     proc = mc_processes.get(server_name)
     if not proc or proc.returncode is not None or not proc.stdin:
@@ -2307,36 +2440,38 @@ async def mc_api_player(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     if not _valid_mc_player_name(player_name):
         return web.json_response({"error": "Invalid player name"}, status=400)
-    commands = {
-        "Inventory": f"data get entity {player_name} Inventory",
-        "Armor": f"data get entity {player_name} ArmorItems",
-        "Hands": f"data get entity {player_name} HandItems",
-        "Selected Item": f"data get entity {player_name} SelectedItem",
-        "Health": f"data get entity {player_name} Health",
-        "Position": f"data get entity {player_name} Pos",
-        "Dimension": f"data get entity {player_name} Dimension",
-        "Experience": f"data get entity {player_name} XpLevel",
-    }
-    details = {}
-    for label, command in commands.items():
-        details[label] = await _mc_run_command_capture(server_name, command)
-    inventory = {}
-    for item in _parse_nbt_items(details.get("Inventory", [])):
-        if item["slot"] is not None and 0 <= item["slot"] <= 35:
-            slot_name = f"hotbar.{item['slot']}" if item["slot"] < 9 else f"inventory.{item['slot'] - 9}"
-            inventory[slot_name] = item
-    armor_slots = ["armor.feet", "armor.legs", "armor.chest", "armor.head"]
-    for index, item in enumerate(_parse_nbt_items(details.get("Armor", []))[:4]):
-        if item.get("id"):
-            inventory[armor_slots[index]] = item
-    hands = _parse_nbt_items(details.get("Hands", []))
-    if hands and hands[0].get("id"):
-        inventory["weapon.mainhand"] = hands[0]
-    if len(hands) > 1 and hands[1].get("id"):
-        inventory["weapon.offhand"] = hands[1]
     server_dir = _mc_safe_server_dir(server_name)
+    player_data = await _mc_read_playerdata(server_dir, player_name) if server_dir else None
+    if not player_data:
+        return web.json_response({"error": "Player data has not been saved yet. Try again after the next server save."}, status=404)
+    inventory = {}
+    for item in player_data.get("Inventory", []) if isinstance(player_data.get("Inventory", []), list) else []:
+        structured = _structured_nbt_item(item)
+        if structured and item.get("Slot") is not None and 0 <= int(item["Slot"]) <= 35:
+            slot_number = int(item["Slot"])
+            slot_name = f"hotbar.{slot_number}" if slot_number < 9 else f"inventory.{slot_number - 9}"
+            inventory[slot_name] = structured
+    armor_slots = ["armor.feet", "armor.legs", "armor.chest", "armor.head"]
+    for index, item in enumerate(player_data.get("ArmorItems", [])[:4]):
+        structured = _structured_nbt_item(item)
+        if structured:
+            inventory[armor_slots[index]] = structured
+    hands = player_data.get("HandItems", [])
+    if hands and _structured_nbt_item(hands[0]):
+        inventory["weapon.mainhand"] = _structured_nbt_item(hands[0])
+    if len(hands) > 1 and _structured_nbt_item(hands[1]):
+        inventory["weapon.offhand"] = _structured_nbt_item(hands[1])
     has_custom_skin = bool(server_dir and _mc_find_skin_url(server_dir, player_name))
     asset_version = _mc_detect_ver(server_dir) if server_dir else None
+    details = {
+        "Health": [str(player_data.get("Health", "Unknown"))],
+        "Position": [json.dumps(player_data.get("Pos", []), default=str)],
+        "Dimension": [str(player_data.get("Dimension", "Unknown"))],
+        "Experience": [str(player_data.get("XpLevel", "Unknown"))],
+        "Inventory": [json.dumps(player_data.get("Inventory", []), default=str)],
+        "ArmorItems": [json.dumps(player_data.get("ArmorItems", []), default=str)],
+        "HandItems": [json.dumps(player_data.get("HandItems", []), default=str)],
+    }
     return web.json_response({
         "name": player_name,
         "skin": has_custom_skin,
@@ -2745,12 +2880,6 @@ async def mc_ws_console(request):
     await ws.prepare(request)
     ws_list = mc_ws_clients.setdefault(name, [])
     ws_list.append(ws)
-    buf = mc_console_buffers.get(name, [])
-    for line in buf[-100:]:
-        try:
-            await ws.send_json({"type": "output", "line": line})
-        except Exception:
-            break
     try:
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:
