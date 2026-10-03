@@ -18,6 +18,7 @@ import struct
 import gzip
 import zlib
 import secrets
+import ipaddress
 import aiohttp
 import discord
 import requests
@@ -1734,6 +1735,15 @@ MC_DIR = os.path.join(os.path.dirname(BASE_DIR), "minecraft")
 mc_processes = {}
 mc_console_buffers = {}
 mc_ws_clients = {}
+mc_command_capture_states = {}
+mc_command_locks = {}
+mc_live_player_cache = {}
+mc_live_player_locks = {}
+mc_players_cache = {}
+mc_players_locks = {}
+mc_discord_profile_cache = {}
+mc_bans_cache = {}
+mc_skin_cache = {}
 
 def _mc_memory_limit():
     configured = os.environ.get("MC_MEMORY", "auto").strip()
@@ -1812,6 +1822,11 @@ def _find_texture_url(value):
     return None
 
 def _mc_find_skin_url(server_dir, player_name):
+    cache_key = (server_dir, player_name.lower())
+    cached = mc_skin_cache.get(cache_key)
+    now = time.monotonic()
+    if cached and cached[0] > now:
+        return cached[1]
     offline_id = _mc_offline_uuid(player_name).hex
     roots = [
         os.path.join(server_dir, "config", "skinrestorer"),
@@ -1832,9 +1847,11 @@ def _mc_find_skin_url(server_dir, player_name):
                     with open(os.path.join(current, filename), "r", encoding="utf-8") as f:
                         url = _find_texture_url(json.load(f))
                     if url:
+                        mc_skin_cache[cache_key] = (now + 30, url)
                         return url
                 except Exception:
                     continue
+    mc_skin_cache[cache_key] = (now + 30, None)
     return None
 
 def _mc_change_server_version(server_dir, loader_type, version):
@@ -2131,6 +2148,12 @@ async def _mc_read_output(name, proc):
             text = line.decode("utf-8", errors="replace").rstrip("\n\r")
             ts = time.strftime("%H:%M:%S")
             entry = f"[{ts}] {text}"
+            capture = mc_command_capture_states.get(name)
+            if capture and (not capture.get("silent") or _mc_command_result_matches(capture.get("command", ""), text)):
+                capture["lines"].append(entry)
+                capture["event"].set()
+                if capture.get("silent"):
+                    continue
             buf.append(entry)
             if len(buf) > 500:
                 buf[:] = buf[-500:]
@@ -2159,13 +2182,22 @@ async def mc_api_servers(request):
     return web.json_response({"servers": servers})
 
 async def _mc_discord_profile(user_id):
+    user_id = str(user_id)
+    cached = mc_discord_profile_cache.get(user_id)
+    now = time.monotonic()
+    if cached and cached[0] > now:
+        return cached[1]
     try:
         user = await bot.fetch_user(int(user_id))
         avatar = str(user.display_avatar.url) if user.display_avatar else ""
         banner = str(user.banner.url) if getattr(user, "banner", None) else ""
-        return {"id": str(user.id), "username": str(user), "avatar": avatar, "banner": banner}
+        profile = {"id": str(user.id), "username": str(user), "avatar": avatar, "banner": banner}
+        mc_discord_profile_cache[user_id] = (now + 300, profile)
+        return profile
     except Exception:
-        return {"id": str(user_id), "username": "Unknown Discord user", "avatar": "", "banner": ""}
+        profile = {"id": str(user_id), "username": "Unknown Discord user", "avatar": "", "banner": ""}
+        mc_discord_profile_cache[user_id] = (now + 30, profile)
+        return profile
 
 async def mc_api_permissions(request):
     if not _is_mc_admin(request):
@@ -2210,28 +2242,158 @@ async def mc_api_remove_permission(request):
             _save_mc_permissions(permissions)
     return web.json_response({"ok": True})
 
+def _mc_command_result_matches(command, text):
+    lowered = text.lower()
+    if command.strip().lower() == "list":
+        return bool(re.search(r"there are \d+ of a max of \d+ players online:", lowered))
+    if command.strip().lower().startswith("data get entity "):
+        return "following entity data:" in lowered or any(phrase in lowered for phrase in (
+            "no entity was found", "entity was not found", "unable to get entity data",
+            "cannot get entity data", "couldn't get entity data", "could not get entity data",
+        ))
+    return True
+
+def _mc_parse_online_players(lines):
+    pattern = re.compile(r"There are \d+ of a max of \d+ players online:\s*(.*)", re.IGNORECASE)
+    for line in reversed(lines):
+        match = pattern.search(line)
+        if match:
+            return [value.strip() for value in match.group(1).split(",") if value.strip()]
+    return None
+
+async def _mc_get_live_players(server_name):
+    proc = mc_processes.get(server_name)
+    if not proc or proc.returncode is not None or not proc.stdin:
+        return []
+    now = time.monotonic()
+    cached = mc_players_cache.get(server_name)
+    if cached and now - cached[0] < 0.08:
+        return cached[1]
+    lock = mc_players_locks.setdefault(server_name, asyncio.Lock())
+    async with lock:
+        now = time.monotonic()
+        cached = mc_players_cache.get(server_name)
+        if cached and now - cached[0] < 0.08:
+            return cached[1]
+        lines = await _mc_run_command_capture(server_name, "list", timeout=1.0, silent=True)
+        players = _mc_parse_online_players(lines)
+        if players is None:
+            cached = mc_players_cache.get(server_name)
+            if cached and time.monotonic() - cached[0] < 2:
+                return cached[1]
+            players = []
+        mc_players_cache[server_name] = (time.monotonic(), players)
+        return players
+
+def _mc_normalize_ip(value):
+    try:
+        return str(ipaddress.ip_address(str(value).strip()))
+    except ValueError:
+        return str(value).strip()
+
+def _mc_read_json_list(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError, TypeError):
+        return []
+
+def _mc_write_json_list(path, values):
+    temp_path = path + ".tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(values, f, indent=2)
+    os.replace(temp_path, path)
+
+def _mc_player_uuid_from_cache(server_dir, player_name):
+    cache_path = os.path.join(server_dir, "usercache.json")
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            for entry in json.load(f):
+                if str(entry.get("name", "")).lower() == player_name.lower():
+                    return str(entry.get("uuid", ""))
+    except Exception:
+        pass
+    return ""
+
+def _mc_get_server_bans(server_name):
+    server_dir = _mc_safe_server_dir(server_name)
+    if not server_dir:
+        return {"banned_players": [], "banned_ips": []}
+    now = time.monotonic()
+    cached = mc_bans_cache.get(server_name)
+    if cached and now - cached[0] < 1:
+        return cached[1]
+
+    usercache_names = {}
+    try:
+        with open(os.path.join(server_dir, "usercache.json"), "r", encoding="utf-8") as f:
+            for entry in json.load(f):
+                usercache_names[str(entry.get("uuid", "")).replace("-", "").lower()] = str(entry.get("name", ""))
+    except Exception:
+        pass
+
+    banned_players = []
+    for entry in _mc_read_json_list(os.path.join(server_dir, "banned-players.json")):
+        if not isinstance(entry, dict):
+            continue
+        player_uuid = str(entry.get("uuid", ""))
+        name = str(entry.get("name", "")) or usercache_names.get(player_uuid.replace("-", "").lower(), "")
+        head_target = name or player_uuid
+        banned_players.append({
+            "uuid": player_uuid,
+            "name": name or "Unknown player",
+            "head": f"https://mc-heads.net/avatar/{quote(head_target)}/48" if head_target else "",
+            "created": str(entry.get("created", "")),
+            "source": str(entry.get("source", "")),
+            "expires": str(entry.get("expires", "")),
+            "reason": str(entry.get("reason", "")),
+        })
+
+    owners_path = os.path.join(server_dir, ".ip_ban_owners.json")
+    try:
+        with open(owners_path, "r", encoding="utf-8") as f:
+            ip_owners = json.load(f)
+        if not isinstance(ip_owners, dict):
+            ip_owners = {}
+    except Exception:
+        ip_owners = {}
+    normalized_owners = {_mc_normalize_ip(key): value for key, value in ip_owners.items()}
+    banned_ips = []
+    for entry in _mc_read_json_list(os.path.join(server_dir, "banned-ips.json")):
+        if not isinstance(entry, dict):
+            continue
+        address = _mc_normalize_ip(entry.get("ip", ""))
+        owner = normalized_owners.get(address, {})
+        if not isinstance(owner, dict):
+            owner = {}
+        player_name = str(owner.get("name", "") or entry.get("name", ""))
+        player_uuid = str(owner.get("uuid", ""))
+        head_target = player_name or player_uuid
+        banned_ips.append({
+            "ip": address,
+            "name": player_name,
+            "uuid": player_uuid,
+            "head": f"https://mc-heads.net/avatar/{quote(head_target)}/48" if head_target else "",
+            "created": str(entry.get("created", "")),
+            "source": str(entry.get("source", "")),
+            "expires": str(entry.get("expires", "")),
+            "reason": str(entry.get("reason", "")),
+        })
+
+    result = {"banned_players": banned_players, "banned_ips": banned_ips}
+    mc_bans_cache[server_name] = (time.monotonic(), result)
+    return result
+
 async def mc_api_players(request):
     name = request.query.get("name", "")
     if not _can_access_mc_server(request, name):
         return web.json_response({"error": "unauthorized"}, status=401)
-    proc = mc_processes.get(name)
-    if proc and proc.returncode is None and proc.stdin:
-        try:
-            proc.stdin.write(b"list\n")
-            await proc.stdin.drain()
-            await asyncio.sleep(0.3)
-        except Exception:
-            pass
-    players = []
-    pattern = re.compile(r"There are \d+ of a max of \d+ players online:\s*(.*)", re.IGNORECASE)
-    for line in reversed(mc_console_buffers.get(name, [])):
-        match = pattern.search(line)
-        if match:
-            players = [value.strip() for value in match.group(1).split(",") if value.strip()]
-            break
+    players = await _mc_get_live_players(name)
     profiles = []
     for user_id in _load_mc_permissions().get(name, []):
         profiles.append(await _mc_discord_profile(user_id))
+    bans = _mc_get_server_bans(name)
     return web.json_response({
         "players": [{
             "name": player,
@@ -2239,6 +2401,7 @@ async def mc_api_players(request):
             "skin": bool(_mc_find_skin_url(_mc_safe_server_dir(name), player)),
         } for player in players],
         "profiles": profiles,
+        **bans,
     })
 
 def _valid_mc_player_name(name):
@@ -2413,6 +2576,159 @@ async def _mc_read_playerdata(server_dir, player_name):
                 return _read_nbt_file(os.path.join(playerdata_dir, filename))
     return None
 
+
+class _SNBTParser:
+    def __init__(self, text):
+        self.text = text
+        self.index = 0
+
+    def _skip_space(self):
+        while self.index < len(self.text) and self.text[self.index].isspace():
+            self.index += 1
+
+    def _quoted(self):
+        quote_char = self.text[self.index]
+        self.index += 1
+        result = []
+        while self.index < len(self.text):
+            char = self.text[self.index]
+            self.index += 1
+            if char == quote_char:
+                return "".join(result)
+            if char == "\\" and self.index < len(self.text):
+                escaped = self.text[self.index]
+                self.index += 1
+                result.append({"n": "\n", "r": "\r", "t": "\t"}.get(escaped, escaped))
+            else:
+                result.append(char)
+        raise ValueError("Unterminated SNBT string")
+
+    def _scalar(self):
+        start = self.index
+        while self.index < len(self.text) and self.text[self.index] not in ",}]":
+            self.index += 1
+        token = self.text[start:self.index].strip()
+        lowered = token.lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+        number = re.fullmatch(r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)([bBsSlLfFdD]?)", token)
+        if number:
+            raw, suffix = number.groups()
+            if suffix.lower() in ("f", "d") or "." in raw or "e" in raw.lower():
+                return float(raw)
+            return int(raw)
+        return token
+
+    def _value(self):
+        self._skip_space()
+        if self.index >= len(self.text):
+            raise ValueError("Missing SNBT value")
+        char = self.text[self.index]
+        if char in "\"'":
+            return self._quoted()
+        if char == "{":
+            self.index += 1
+            result = {}
+            self._skip_space()
+            if self.index < len(self.text) and self.text[self.index] == "}":
+                self.index += 1
+                return result
+            while self.index < len(self.text):
+                self._skip_space()
+                key = self._quoted() if self.text[self.index] in "\"'" else self._read_key()
+                self._skip_space()
+                if self.index >= len(self.text) or self.text[self.index] != ":":
+                    raise ValueError("Expected ':' in SNBT compound")
+                self.index += 1
+                result[key] = self._value()
+                self._skip_space()
+                if self.index < len(self.text) and self.text[self.index] == ",":
+                    self.index += 1
+                    continue
+                if self.index < len(self.text) and self.text[self.index] == "}":
+                    self.index += 1
+                    return result
+                raise ValueError("Expected ',' or '}' in SNBT compound")
+            raise ValueError("Unterminated SNBT compound")
+        if char == "[":
+            self.index += 1
+            self._skip_space()
+            if re.match(r"[BILbil]\s*;", self.text[self.index:]):
+                self.index = self.text.index(";", self.index) + 1
+            values = []
+            self._skip_space()
+            if self.index < len(self.text) and self.text[self.index] == "]":
+                self.index += 1
+                return values
+            while self.index < len(self.text):
+                values.append(self._value())
+                self._skip_space()
+                if self.index < len(self.text) and self.text[self.index] == ",":
+                    self.index += 1
+                    continue
+                if self.index < len(self.text) and self.text[self.index] == "]":
+                    self.index += 1
+                    return values
+                raise ValueError("Expected ',' or ']' in SNBT list")
+            raise ValueError("Unterminated SNBT list")
+        return self._scalar()
+
+    def _read_key(self):
+        start = self.index
+        while self.index < len(self.text) and self.text[self.index] != ":":
+            self.index += 1
+        if self.index >= len(self.text):
+            raise ValueError("Unterminated SNBT key")
+        return self.text[start:self.index].strip()
+
+    def parse(self):
+        value = self._value()
+        self._skip_space()
+        if self.index != len(self.text):
+            raise ValueError("Unexpected trailing SNBT data")
+        return value
+
+
+def _mc_parse_live_player_data(lines):
+    for line in reversed(lines):
+        marker = re.search(r"following entity data:\s*", line, re.IGNORECASE)
+        if not marker:
+            continue
+        snbt = line[marker.end():].strip()
+        if len(snbt) > 2_000_000:
+            return None
+        try:
+            parsed = _SNBTParser(snbt).parse()
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception as e:
+            print(f"[MINECRAFT] Could not parse live player NBT: {e}")
+    return None
+
+
+async def _mc_read_live_playerdata(server_name, player_name):
+    key = (server_name.lower(), player_name.lower())
+    now = time.monotonic()
+    cached = mc_live_player_cache.get(key)
+    if cached and now - cached[0] < 0.08:
+        return cached[1], cached[2]
+    lock = mc_live_player_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        now = time.monotonic()
+        cached = mc_live_player_cache.get(key)
+        if cached and now - cached[0] < 0.08:
+            return cached[1], cached[2]
+        lines = await _mc_run_command_capture(
+            server_name, f"data get entity {player_name}", timeout=1.0, silent=True
+        )
+        player_data = _mc_parse_live_player_data(lines)
+        player_online = any("following entity data:" in line.lower() for line in lines)
+        mc_live_player_cache[key] = (time.monotonic(), player_data, player_online)
+        return player_data, player_online
+
+
 def _structured_nbt_item(item):
     if not isinstance(item, dict) or not item.get("id"):
         return None
@@ -2438,18 +2754,31 @@ def _structured_nbt_item(item):
         "raw": json.dumps(item, default=str),
     }
 
-async def _mc_run_command_capture(server_name, command):
+async def _mc_run_command_capture(server_name, command, timeout=2.0, silent=False):
     proc = mc_processes.get(server_name)
     if not proc or proc.returncode is not None or not proc.stdin:
         return ["Server is not running."]
-    buffer = mc_console_buffers.setdefault(server_name, [])
-    start = len(buffer)
-    proc.stdin.write((command + "\n").encode("utf-8"))
-    await proc.stdin.drain()
-    deadline = asyncio.get_running_loop().time() + 2
-    while asyncio.get_running_loop().time() < deadline and len(buffer) == start:
-        await asyncio.sleep(0.1)
-    return buffer[start:]
+    lock = mc_command_locks.setdefault(server_name, asyncio.Lock())
+    async with lock:
+        proc = mc_processes.get(server_name)
+        if not proc or proc.returncode is not None or not proc.stdin:
+            return ["Server is not running."]
+        state = {"command": command, "lines": [], "event": asyncio.Event(), "silent": silent}
+        mc_command_capture_states[server_name] = state
+        try:
+            proc.stdin.write((command + "\n").encode("utf-8"))
+            await proc.stdin.drain()
+            try:
+                await asyncio.wait_for(state["event"].wait(), timeout=max(0.05, timeout))
+                await asyncio.sleep(0.02)
+            except asyncio.TimeoutError:
+                pass
+            return list(state["lines"])
+        except Exception as e:
+            return [str(e)]
+        finally:
+            if mc_command_capture_states.get(server_name) is state:
+                mc_command_capture_states.pop(server_name, None)
 
 async def mc_api_player(request):
     server_name = request.query.get("server", "")
@@ -2459,9 +2788,12 @@ async def mc_api_player(request):
     if not _valid_mc_player_name(player_name):
         return web.json_response({"error": "Invalid player name"}, status=400)
     server_dir = _mc_safe_server_dir(server_name)
-    player_data = await _mc_read_playerdata(server_dir, player_name) if server_dir else None
+    live_player_data, player_online = await _mc_read_live_playerdata(server_name, player_name) if server_dir else (None, False)
+    player_data = live_player_data
+    if not player_data and server_dir:
+        player_data = await _mc_read_playerdata(server_dir, player_name)
     if not player_data:
-        return web.json_response({"error": "Player data has not been saved yet. Try again after the next server save."}, status=404)
+        return web.json_response({"error": "No live player data or saved player data was found. The player may be offline or not yet saved.", "online": player_online}, status=404)
     inventory = {}
     for item in player_data.get("Inventory", []) if isinstance(player_data.get("Inventory", []), list) else []:
         structured = _structured_nbt_item(item)
@@ -2497,6 +2829,8 @@ async def mc_api_player(request):
         "asset_version": asset_version or "1.21.11",
         "inventory": inventory,
         "details": details,
+        "live": live_player_data is not None,
+        "online": player_online,
     })
 
 async def mc_api_inventory_move(request):
@@ -2562,8 +2896,116 @@ async def mc_api_player_action(request):
     }
     if action not in commands:
         return web.json_response({"error": "Invalid player action"}, status=400)
+    server_dir = _mc_safe_server_dir(server_name)
+    before_ips = set()
+    if action == "ban-ip" and server_dir:
+        before_ips = {
+            _mc_normalize_ip(entry.get("ip", ""))
+            for entry in _mc_read_json_list(os.path.join(server_dir, "banned-ips.json"))
+            if isinstance(entry, dict) and entry.get("ip")
+        }
     output = await _mc_run_command_capture(server_name, commands[action])
+    if action == "ban-ip" and server_dir:
+        after_ips = [
+            _mc_normalize_ip(entry.get("ip", ""))
+            for entry in _mc_read_json_list(os.path.join(server_dir, "banned-ips.json"))
+            if isinstance(entry, dict) and entry.get("ip")
+        ]
+        added_ips = [address for address in after_ips if address not in before_ips]
+        if added_ips:
+            owners_path = os.path.join(server_dir, ".ip_ban_owners.json")
+            try:
+                with open(owners_path, "r", encoding="utf-8") as f:
+                    owners = json.load(f)
+                if not isinstance(owners, dict):
+                    owners = {}
+            except Exception:
+                owners = {}
+            owner = {"name": player_name, "uuid": _mc_player_uuid_from_cache(server_dir, player_name)}
+            for address in added_ips:
+                owners[address] = owner
+            with open(owners_path + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(owners, f, indent=2)
+            os.replace(owners_path + ".tmp", owners_path)
+    mc_bans_cache.pop(server_name, None)
     return web.json_response({"ok": True, "output": output})
+
+def _mc_ban_player_matches(entry, target):
+    name = str(entry.get("name", "")).lower()
+    entry_uuid = str(entry.get("uuid", "")).replace("-", "").lower()
+    target_lower = target.lower()
+    target_uuid = target.replace("-", "").lower()
+    return name == target_lower or (entry_uuid and entry_uuid == target_uuid)
+
+async def mc_api_unban(request):
+    data = await request.json()
+    server_name = str(data.get("server", "")).strip()
+    ban_type = str(data.get("type", "")).strip().lower()
+    target = str(data.get("target", "")).strip()
+    if not _can_access_mc_server(request, server_name):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    server_dir = _mc_safe_server_dir(server_name)
+    if not server_dir:
+        return web.json_response({"error": "Server not found"}, status=404)
+
+    if ban_type == "player":
+        if not (_valid_mc_player_name(target) or re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", target)):
+            return web.json_response({"error": "Invalid player or UUID"}, status=400)
+        path = os.path.join(server_dir, "banned-players.json")
+        entries = _mc_read_json_list(path)
+        matching = [entry for entry in entries if isinstance(entry, dict) and _mc_ban_player_matches(entry, target)]
+        if not matching:
+            return web.json_response({"error": "Player is not banned"}, status=404)
+        proc = mc_processes.get(server_name)
+        if proc and proc.returncode is None and proc.stdin:
+            command_target = str(matching[0].get("name", "") or target)
+            output = await _mc_run_command_capture(server_name, f"pardon {command_target}", timeout=2.0)
+            result = "\n".join(output).lower()
+            if "not banned" in result or "is not banned" in result:
+                return web.json_response({"error": "Player was not banned by the running server."}, status=404)
+        else:
+            removed_ids = {
+                (str(entry.get("uuid", "")).replace("-", "").lower(), str(entry.get("name", "")).lower())
+                for entry in matching
+            }
+            remaining = [entry for entry in entries if not isinstance(entry, dict) or (
+                str(entry.get("uuid", "")).replace("-", "").lower(), str(entry.get("name", "")).lower()
+            ) not in removed_ids]
+            _mc_write_json_list(path, remaining)
+    elif ban_type == "ip":
+        try:
+            target = str(ipaddress.ip_address(target))
+        except ValueError:
+            return web.json_response({"error": "Enter a valid IPv4 or IPv6 address"}, status=400)
+        path = os.path.join(server_dir, "banned-ips.json")
+        entries = _mc_read_json_list(path)
+        matching = [entry for entry in entries if isinstance(entry, dict) and _mc_normalize_ip(entry.get("ip", "")) == target]
+        if not matching:
+            return web.json_response({"error": "IP address is not banned"}, status=404)
+        proc = mc_processes.get(server_name)
+        if proc and proc.returncode is None and proc.stdin:
+            output = await _mc_run_command_capture(server_name, f"pardon-ip {target}", timeout=2.0)
+            result = "\n".join(output).lower()
+            if "not banned" in result or "is not banned" in result:
+                return web.json_response({"error": "IP address was not banned by the running server."}, status=404)
+        else:
+            _mc_write_json_list(path, [entry for entry in entries if not isinstance(entry, dict) or _mc_normalize_ip(entry.get("ip", "")) != target])
+        owners_path = os.path.join(server_dir, ".ip_ban_owners.json")
+        try:
+            with open(owners_path, "r", encoding="utf-8") as f:
+                owners = json.load(f)
+            if isinstance(owners, dict):
+                owners = {key: value for key, value in owners.items() if _mc_normalize_ip(key) != target}
+                with open(owners_path + ".tmp", "w", encoding="utf-8") as f:
+                    json.dump(owners, f, indent=2)
+                os.replace(owners_path + ".tmp", owners_path)
+        except Exception:
+            pass
+    else:
+        return web.json_response({"error": "Ban type must be player or ip"}, status=400)
+
+    mc_bans_cache.pop(server_name, None)
+    return web.json_response({"ok": True})
 
 async def mc_api_player_skin(request):
     name = request.query.get("server", "")
@@ -2928,6 +3370,11 @@ body{
   background:#050508;color:#e0e0e0;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
   height:100vh;display:flex;flex-direction:column;overflow:hidden;position:relative
 }
+button{font-family:inherit;cursor:pointer;transition:filter .15s ease,transform .15s ease,border-color .15s ease,background-color .15s ease}
+button:not(:disabled):hover{filter:brightness(1.12);transform:translateY(-1px)}
+button:not(:disabled):active{transform:translateY(0) scale(.98)}
+button:focus-visible{outline:2px solid rgba(0,220,120,.75);outline-offset:2px}
+button:disabled{opacity:.5;cursor:not-allowed}
 .bg-grid{
   position:fixed;top:0;left:0;width:100%;height:100%;z-index:0;pointer-events:none;
   background-image:
@@ -3118,10 +3565,35 @@ body{
 .inventory-slot .item-count{position:absolute;right:3px;bottom:1px;color:#fff;font-size:11px;font-weight:700;text-shadow:1px 1px #000}
 .inventory-slot.empty{cursor:default;opacity:.45}
 .inventory-row{display:flex;gap:5px;padding:10px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.08);border-radius:10px;width:max-content;max-width:100%}
+.player-actions{display:flex;flex-wrap:wrap;gap:8px}
+.mc-action-btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:8px 13px;border-radius:9px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.045);color:#e5e7eb;font-size:12px;font-weight:650;white-space:nowrap;box-shadow:0 4px 14px rgba(0,0,0,.16)}
+.mc-action-neutral:hover{border-color:rgba(255,255,255,.22);background:rgba(255,255,255,.09)}
+.mc-action-danger{border-color:rgba(248,113,113,.25);background:rgba(239,68,68,.08);color:#fca5a5}
+.mc-action-danger:hover{border-color:rgba(248,113,113,.55);background:rgba(239,68,68,.16)}
+.mc-action-success{border-color:rgba(34,197,94,.28);background:rgba(34,197,94,.08);color:#86efac}
+.mc-action-success:hover{border-color:rgba(34,197,94,.55);background:rgba(34,197,94,.16)}
+.player-live-status{margin:10px 0;padding:8px 11px;border-radius:8px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.025);color:#a1a1aa;font-size:12px}
+.player-live-status.is-live{border-color:rgba(34,197,94,.2);background:rgba(34,197,94,.06);color:#86efac}
+.ban-section{margin-top:26px;padding-top:16px;border-top:1px solid rgba(255,255,255,.07)}
+.ban-section h3{display:flex;align-items:center;gap:8px;color:#e5e7eb;font-size:14px;margin-bottom:10px}
+.ban-section h3 span{padding:2px 7px;border-radius:999px;background:rgba(255,255,255,.07);color:#a1a1aa;font-size:10px}
+.ban-list{display:grid;gap:7px}
+.ban-row{display:flex;align-items:center;gap:11px;min-width:0;padding:10px 12px;border:1px solid rgba(255,255,255,.07);border-radius:11px;background:linear-gradient(120deg,rgba(255,255,255,.04),rgba(255,255,255,.018));transition:border-color .15s,background .15s}
+.ban-row:hover{border-color:rgba(248,113,113,.2);background:rgba(255,255,255,.05)}
+.ban-head,.ban-head-placeholder{width:42px;height:42px;border-radius:10px;flex:0 0 42px;object-fit:cover;image-rendering:pixelated;background:rgba(255,255,255,.05)}
+.ban-head-placeholder{display:flex;align-items:center;justify-content:center;color:#a1a1aa;font-size:20px}
+.ban-row-info{display:grid;gap:3px;min-width:0;flex:1}
+.ban-row-info strong{color:#f4f4f5;font-size:13px;overflow-wrap:anywhere}
+.ban-row-info small{color:#8b949e;font-size:11px;overflow-wrap:anywhere}
+.ban-row-info .ban-reason{color:#71717a}
+.ban-empty{padding:12px;border:1px dashed rgba(255,255,255,.1);border-radius:10px;color:#71717a;font-size:12px}
 @media(max-width:480px){
   .sidebar{width:160px}
   .sidebar .title{font-size:10px}
   .server-item .name{font-size:12px}
+  .ban-row{flex-wrap:wrap}
+  .ban-row-info{min-width:calc(100% - 60px)}
+  .ban-row .mc-action-btn{margin-left:auto}
 }
 </style>
 </head>
@@ -3430,8 +3902,8 @@ function stopServer(){
   fetch('/api/mc/stop',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer})}).then(function(r){return r.json()}).then(function(){loadServers()});
 }
 function closeProps(){document.getElementById('propsPanel').style.display='none'}
-var peopleTimer=null;
-function closePeople(){if(peopleTimer){clearInterval(peopleTimer);peopleTimer=null}document.getElementById('peoplePanel').style.display='none'}
+var peopleTimer=null,peopleRefreshBusy=false,playerDetailsTimer=null,playerDetailsRefreshBusy=false;
+function closePeople(){if(peopleTimer){clearInterval(peopleTimer);peopleTimer=null}if(playerDetailsTimer){clearInterval(playerDetailsTimer);playerDetailsTimer=null}document.getElementById('peoplePanel').style.display='none'}
 function renderSkinHeads(){
   document.querySelectorAll('.player-head[data-skin]').forEach(function(canvas){
     var image=new Image();image.onload=function(){
@@ -3458,25 +3930,81 @@ function openProps(){
 }
 function openPeople(){
   if(!activeServer)return;
+  if(playerDetailsTimer){clearInterval(playerDetailsTimer);playerDetailsTimer=null}
+  currentPlayerName='';
   document.getElementById('peoplePanel').style.display='flex';
+  document.getElementById('peopleContent').dataset.peopleServer='';
   refreshPeople();
   if(peopleTimer)clearInterval(peopleTimer);
-  peopleTimer=setInterval(refreshPeople,2000);
+  peopleTimer=setInterval(refreshPeople,100);
+}
+function onlinePlayersHtml(players){
+  var h='';
+  (players||[]).forEach(function(player){
+    var head=player.skin?'<canvas class="player-head" width="48" height="48" data-skin="/api/mc/player-skin?server='+encodeURIComponent(activeServer)+'&player='+encodeURIComponent(player.name)+'" style="width:40px;height:40px;border-radius:8px;image-rendering:pixelated"></canvas>':'<img src="'+player.head+'" style="width:40px;height:40px;border-radius:8px" onerror="this.style.display=\'none\'">';
+    h+='<button onclick="showPlayerDetails(\''+escapeHtml(player.name)+'\')" style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.04);padding:8px 10px;border-radius:10px;border:0;cursor:pointer">'+head+'<span style="color:#fff">'+escapeHtml(player.name)+'</span></button>';
+  });
+  if(!(players||[]).length)h='<span style="color:#8b949e">No players reported.</span>';
+  return h;
+}
+function discordAccessHtml(profiles){
+  var h='';
+  (profiles||[]).forEach(function(profile){h+='<div style="display:flex;align-items:center;gap:10px;background:rgba(255,255,255,.04);padding:8px;border-radius:10px">'+(profile.avatar?'<img src="'+profile.avatar+'" style="width:36px;height:36px;border-radius:50%">':'')+'<div style="flex:1"><strong style="color:#fff">'+escapeHtml(profile.username)+'</strong><small style="display:block;color:#8b949e">'+profile.id+'</small></div>'+(userInfo.mc_admin?'<button onclick="removeServerAccess(\''+profile.id+'\')" style="background:none;border:1px solid rgba(239,68,68,.3);color:#f87171;border-radius:6px;padding:5px 8px;cursor:pointer">Remove</button>':'')+'</div>'});
+  if(userInfo.mc_admin)h+='<div style="display:flex;gap:8px;margin-top:14px"><input id="accessUserId" placeholder="Discord user ID" style="flex:1;background:#0d1117;border:1px solid rgba(255,255,255,.1);color:#fff;padding:9px;border-radius:8px"><button onclick="addServerAccess()" style="background:#fbbf24;color:#211600;border:0;border-radius:8px;padding:9px 12px;font-weight:600;cursor:pointer">Add</button></div>';
+  return h;
+}
+function bannedPlayersHtml(bans){
+  if(!bans||!bans.length)return '<div class="ban-empty">No banned players.</div>';
+  return bans.map(function(ban){
+    var target=ban.name&&ban.name!=='Unknown player'?ban.name:ban.uuid;
+    var head=ban.head?'<img class="ban-head" src="'+ban.head+'" alt="">':'<span class="ban-head-placeholder">👤</span>';
+    var meta=[ban.source,ban.expires&&ban.expires!=='forever'?'Expires '+ban.expires:''].filter(Boolean).join(' · ');
+    return '<div class="ban-row">'+head+'<div class="ban-row-info"><strong>'+escapeHtml(ban.name||'Unknown player')+'</strong><small>'+escapeHtml(meta||ban.uuid||'Player ban')+'</small><small class="ban-reason">'+escapeHtml(ban.reason||'No reason provided')+'</small></div><button class="mc-action-btn mc-action-danger" onclick="unbanServerItem(\'player\',\''+escapeHtml(target)+'\')">Unban</button></div>';
+  }).join('');
+}
+function bannedIpsHtml(bans){
+  if(!bans||!bans.length)return '<div class="ban-empty">No banned IPs.</div>';
+  return bans.map(function(ban){
+    var head=ban.head?'<img class="ban-head" src="'+ban.head+'" alt="">':'<span class="ban-head-placeholder">⌁</span>';
+    var meta=ban.name?escapeHtml(ban.name):'Player not recorded for this IP';
+    var extra=[ban.source,ban.expires&&ban.expires!=='forever'?'Expires '+ban.expires:''].filter(Boolean).join(' · ');
+    return '<div class="ban-row">'+head+'<div class="ban-row-info"><strong>'+escapeHtml(ban.ip)+'</strong><small>'+meta+(extra?' · '+escapeHtml(extra):'')+'</small><small class="ban-reason">'+escapeHtml(ban.reason||'No reason provided')+'</small></div><button class="mc-action-btn mc-action-danger" onclick="unbanServerItem(\'ip\',\''+escapeHtml(ban.ip)+'\')">Unban IP</button></div>';
+  }).join('');
 }
 function refreshPeople(){
-  if(!activeServer)return;
-  fetch('/api/mc/players?name='+encodeURIComponent(activeServer),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
+  if(!activeServer||peopleRefreshBusy||currentPlayerName)return;
+  var server=activeServer;
+  peopleRefreshBusy=true;
+  fetch('/api/mc/players?name='+encodeURIComponent(server),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
+    var panel=document.getElementById('peoplePanel');
+    if(server!==activeServer||!panel||panel.style.display==='none'||currentPlayerName)return;
     if(d.error){alert(d.error);closePeople();return}
-    var h='<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="color:#fff;font-size:20px">'+escapeHtml(activeServer)+'</h2><button onclick="closePeople()" style="background:none;border:none;color:#8b949e;font-size:24px;cursor:pointer">X</button></div>';
-    h+='<p style="color:#8b949e;font-size:12px;margin:8px 0 20px">Players online <span style="color:#00dc78">Live</span></p><div style="display:flex;flex-wrap:wrap;gap:10px">';
-    (d.players||[]).forEach(function(player){var head=player.skin?'<canvas class="player-head" width="48" height="48" data-skin="/api/mc/player-skin?server='+encodeURIComponent(activeServer)+'&player='+encodeURIComponent(player.name)+'" style="width:40px;height:40px;border-radius:8px;image-rendering:pixelated"></canvas>':'<img src="'+player.head+'" style="width:40px;height:40px;border-radius:8px" onerror="this.style.display=\'none\'">';h+='<button onclick="showPlayerDetails(\''+escapeHtml(player.name)+'\')" style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.04);padding:8px 10px;border-radius:10px;border:0;cursor:pointer">'+head+'<span style="color:#fff">'+escapeHtml(player.name)+'</span></button>'});
-    if(!(d.players||[]).length)h+='<span style="color:#8b949e">No players reported.</span>';
-    h+='</div><p style="color:#8b949e;font-size:12px;margin:24px 0 10px">Discord access</p><div style="display:grid;gap:8px">';
-    (d.profiles||[]).forEach(function(profile){h+='<div style="display:flex;align-items:center;gap:10px;background:rgba(255,255,255,.04);padding:8px;border-radius:10px">'+(profile.avatar?'<img src="'+profile.avatar+'" style="width:36px;height:36px;border-radius:50%">':'')+'<div style="flex:1"><strong style="color:#fff">'+escapeHtml(profile.username)+'</strong><small style="display:block;color:#8b949e">'+profile.id+'</small></div>'+(userInfo.mc_admin?'<button onclick="removeServerAccess(\''+profile.id+'\')" style="background:none;border:1px solid rgba(239,68,68,.3);color:#f87171;border-radius:6px;padding:5px 8px;cursor:pointer">Remove</button>':'')+'</div>'});
-    if(userInfo.mc_admin)h+='</div><div style="display:flex;gap:8px;margin-top:14px"><input id="accessUserId" placeholder="Discord user ID" style="flex:1;background:#0d1117;border:1px solid rgba(255,255,255,.1);color:#fff;padding:9px;border-radius:8px"><button onclick="addServerAccess()" style="background:#fbbf24;color:#211600;border:0;border-radius:8px;padding:9px 12px;font-weight:600;cursor:pointer">Add</button></div>';
-    else h+='</div>';
-    document.getElementById('peopleContent').innerHTML=h;renderSkinHeads();
-  });
+    var content=document.getElementById('peopleContent');
+    var players=d.players||[],profiles=d.profiles||[],bannedPlayers=d.banned_players||[],bannedIps=d.banned_ips||[];
+    var playerSnapshot=JSON.stringify(players),profileSnapshot=JSON.stringify(profiles),bannedPlayersSnapshot=JSON.stringify(bannedPlayers),bannedIpsSnapshot=JSON.stringify(bannedIps);
+    var online=document.getElementById('onlinePlayers'),access=document.getElementById('discordAccess'),playerBans=document.getElementById('bannedPlayers'),ipBans=document.getElementById('bannedIps');
+    if(content.dataset.peopleServer===server&&online&&access&&playerBans&&ipBans){
+      if(online.dataset.snapshot!==playerSnapshot){online.innerHTML=onlinePlayersHtml(players);online.dataset.snapshot=playerSnapshot;renderSkinHeads()}
+      if(access.dataset.snapshot!==profileSnapshot){access.innerHTML=discordAccessHtml(profiles);access.dataset.snapshot=profileSnapshot}
+      if(playerBans.dataset.snapshot!==bannedPlayersSnapshot){playerBans.innerHTML=bannedPlayersHtml(bannedPlayers);playerBans.dataset.snapshot=bannedPlayersSnapshot}
+      if(ipBans.dataset.snapshot!==bannedIpsSnapshot){ipBans.innerHTML=bannedIpsHtml(bannedIps);ipBans.dataset.snapshot=bannedIpsSnapshot}
+      var playerCount=document.getElementById('bannedPlayerCount'),ipCount=document.getElementById('bannedIpCount');
+      if(playerCount)playerCount.textContent=bannedPlayers.length;
+      if(ipCount)ipCount.textContent=bannedIps.length;
+      return;
+    }
+    var h='<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="color:#fff;font-size:20px">'+escapeHtml(server)+'</h2><button onclick="closePeople()" style="background:none;border:none;color:#8b949e;font-size:24px;cursor:pointer">X</button></div>';
+    h+='<p style="color:#8b949e;font-size:12px;margin:8px 0 20px">Players online <span style="color:#00dc78">Live · 0.1s</span></p><div id="onlinePlayers" style="display:flex;flex-wrap:wrap;gap:10px"></div>';
+    h+='<p style="color:#8b949e;font-size:12px;margin:24px 0 10px">Discord access</p><div id="discordAccess" style="display:grid;gap:8px"></div>';
+    h+='<section class="ban-section"><h3>Banned players <span id="bannedPlayerCount">'+bannedPlayers.length+'</span></h3><div id="bannedPlayers" class="ban-list"></div></section>';
+    h+='<section class="ban-section"><h3>Banned IPs <span id="bannedIpCount">'+bannedIps.length+'</span></h3><div id="bannedIps" class="ban-list"></div></section>';
+    content.innerHTML=h;content.dataset.peopleServer=server;
+    online=document.getElementById('onlinePlayers');online.innerHTML=onlinePlayersHtml(players);online.dataset.snapshot=playerSnapshot;
+    access=document.getElementById('discordAccess');access.innerHTML=discordAccessHtml(profiles);access.dataset.snapshot=profileSnapshot;
+    playerBans=document.getElementById('bannedPlayers');playerBans.innerHTML=bannedPlayersHtml(bannedPlayers);playerBans.dataset.snapshot=bannedPlayersSnapshot;
+    ipBans=document.getElementById('bannedIps');ipBans.innerHTML=bannedIpsHtml(bannedIps);ipBans.dataset.snapshot=bannedIpsSnapshot;
+    renderSkinHeads();
+  }).catch(function(err){console.error('Player list refresh failed:',err)}).finally(function(){peopleRefreshBusy=false});
 }
 var currentPlayerName='';
 var currentPlayerInventory={};
@@ -3507,24 +4035,55 @@ function inventoryDrop(event,destination){
   if(!source||source===destination)return;
   fetch('/api/mc/inventory-move',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({server:activeServer,player:currentPlayerName,source:source,destination:destination})}).then(function(r){return r.json()}).then(function(d){if(d.error)alert(d.error);else showPlayerDetails(currentPlayerName)});
 }
+function playerTechnicalHtml(details){
+  var h='';
+  Object.keys(details||{}).forEach(function(key){h+='<section style="margin:14px 0"><h3 style="color:#00dc78;font-size:14px">'+escapeHtml(key)+'</h3><pre style="white-space:pre-wrap;word-break:break-word;background:#0d1117;border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:12px;color:#c9d1d9;font-size:12px">'+escapeHtml((details[key]||[]).join('\n'))+'</pre></section>'});
+  return h;
+}
 function showPlayerDetails(player){
   if(peopleTimer){clearInterval(peopleTimer);peopleTimer=null}
+  if(playerDetailsTimer){clearInterval(playerDetailsTimer);playerDetailsTimer=null}
   currentPlayerName=player;
   fetch('/api/mc/player?server='+encodeURIComponent(activeServer)+'&player='+encodeURIComponent(player),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
-    if(d.error){alert(d.error);return}
+    if(currentPlayerName!==player||document.getElementById('peoplePanel').style.display==='none')return;
+    if(d.error&&!d.online){alert(d.error);return}
+    if(d.error&&d.online)d={name:player,skin:false,asset_version:'1.21.11',inventory:{},details:{},live:false,online:true};
     currentInventoryAssetVersion=d.asset_version||'1.21.11';
-    var h='<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="color:#fff;font-size:20px">'+escapeHtml(player)+'</h2><button onclick="openPeople()" style="background:none;border:none;color:#00dc78;font-size:14px;cursor:pointer">Back to Players</button></div>';
-    h+='<div style="display:flex;gap:18px;align-items:center;margin:18px 0">'+(d.skin?'<img src="'+d.skin_url+'" style="width:128px;height:128px;image-rendering:pixelated;object-fit:contain;background:#111">':'<img src="https://mc-heads.net/avatar/'+encodeURIComponent(player)+'/128" style="width:128px;height:128px;border-radius:12px">')+'<div style="display:flex;flex-wrap:wrap;gap:8px"><button onclick="playerAction(\'kick\')">Kick</button><button onclick="playerAction(\'ban\')">Ban Player</button><button onclick="playerAction(\'ban-ip\')">Ban IP</button><button onclick="playerAction(\'op\')">OP</button><button onclick="playerAction(\'unop\')">UnOP</button></div></div>';
-    h+=renderInventory(d.inventory);
-    h+='<details style="margin-top:20px"><summary style="color:#00dc78;cursor:pointer">Technical NBT details</summary>';
-    Object.keys(d.details||{}).forEach(function(key){h+='<section style="margin:14px 0"><h3 style="color:#00dc78;font-size:14px">'+key+'</h3><pre style="white-space:pre-wrap;word-break:break-word;background:#0d1117;border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:12px;color:#c9d1d9;font-size:12px">'+escapeHtml((d.details[key]||[]).join('\n'))+'</pre></section>'});
-    h+='</details>';
-    document.getElementById('peopleContent').innerHTML=h;
+    var h='<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="color:#fff;font-size:20px">'+escapeHtml(player)+'</h2><button class="mc-action-btn mc-action-neutral" onclick="openPeople()">Back to Players</button></div>';
+    h+='<div style="display:flex;gap:18px;align-items:center;margin:18px 0">'+(d.skin?'<img src="'+d.skin_url+'" style="width:128px;height:128px;image-rendering:pixelated;object-fit:contain;background:#111">':'<img src="https://mc-heads.net/avatar/'+encodeURIComponent(player)+'/128" style="width:128px;height:128px;border-radius:12px">')+'<div class="player-actions"><button class="mc-action-btn mc-action-neutral" onclick="playerAction(\'kick\')">Kick</button><button class="mc-action-btn mc-action-danger" onclick="playerAction(\'ban\')">Ban Player</button><button class="mc-action-btn mc-action-danger" onclick="playerAction(\'ban-ip\')">Ban IP</button><button class="mc-action-btn mc-action-success" onclick="playerAction(\'op\')">OP</button><button class="mc-action-btn mc-action-neutral" onclick="playerAction(\'unop\')">UnOP</button></div></div>';
+    h+='<div id="playerLiveStatus" class="player-live-status '+(d.live?'is-live':'')+'">'+(d.live?'● Live · server data, 0.1s refresh':d.online?'● Player online · waiting for live data':'● Last saved data · player is offline')+'</div>';
+    h+='<div id="playerInventoryView"></div><details style="margin-top:20px"><summary style="color:#00dc78;cursor:pointer">Technical NBT details</summary><div id="playerTechnicalDetails"></div></details>';
+    var content=document.getElementById('peopleContent');content.innerHTML=h;
+    var inventoryView=document.getElementById('playerInventoryView');
+    inventoryView.innerHTML=renderInventory(d.inventory);inventoryView.dataset.snapshot=JSON.stringify(d.inventory||{});
+    var technical=document.getElementById('playerTechnicalDetails');
+    technical.innerHTML=playerTechnicalHtml(d.details);technical.dataset.snapshot=JSON.stringify(d.details||{});
+    if(d.online)playerDetailsTimer=setInterval(refreshPlayerDetails,100);
   });
+}
+function refreshPlayerDetails(){
+  if(!currentPlayerName||playerDetailsRefreshBusy||!document.getElementById('playerInventoryView'))return;
+  var server=activeServer,player=currentPlayerName;playerDetailsRefreshBusy=true;
+  fetch('/api/mc/player?server='+encodeURIComponent(server)+'&player='+encodeURIComponent(player),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
+    if(server!==activeServer||player!==currentPlayerName||!document.getElementById('playerInventoryView'))return;
+    if(d.error){var status=document.getElementById('playerLiveStatus');if(status){status.textContent=d.online?'Player online · waiting for live data':'Live sync unavailable';status.classList.remove('is-live')}if(!d.online&&playerDetailsTimer){clearInterval(playerDetailsTimer);playerDetailsTimer=null}return}
+    currentInventoryAssetVersion=d.asset_version||currentInventoryAssetVersion;
+    var status=document.getElementById('playerLiveStatus');
+    if(status){status.textContent=d.live?'● Live · server data, 0.1s refresh':d.online?'● Player online · waiting for live data':'● Last saved data · player is offline';status.classList.toggle('is-live',!!d.live)}
+    var inventoryView=document.getElementById('playerInventoryView'),inventorySnapshot=JSON.stringify(d.inventory||{});
+    if(inventoryView&&inventoryView.dataset.snapshot!==inventorySnapshot){inventoryView.innerHTML=renderInventory(d.inventory);inventoryView.dataset.snapshot=inventorySnapshot}
+    var technical=document.getElementById('playerTechnicalDetails'),detailsSnapshot=JSON.stringify(d.details||{});
+    if(technical&&technical.dataset.snapshot!==detailsSnapshot){technical.innerHTML=playerTechnicalHtml(d.details);technical.dataset.snapshot=detailsSnapshot}
+    if(!d.online&&playerDetailsTimer){clearInterval(playerDetailsTimer);playerDetailsTimer=null}
+  }).catch(function(err){console.error('Live player refresh failed:',err)}).finally(function(){playerDetailsRefreshBusy=false});
 }
 function playerAction(action){
   var reason=(action==='op'||action==='unop')?'Website action':(prompt('Reason:','Website action')||'Website action');
-  fetch('/api/mc/player-action',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({server:activeServer,player:currentPlayerName,action:action,reason:reason})}).then(function(r){return r.json()}).then(function(d){if(d.error)alert(d.error);else alert(action+' sent')});
+  fetch('/api/mc/player-action',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({server:activeServer,player:currentPlayerName,action:action,reason:reason})}).then(function(r){return r.json()}).then(function(d){if(d.error)alert(d.error);else if(action==='ban'||action==='ban-ip')openPeople()});
+}
+function unbanServerItem(type,target){
+  if(!confirm('Unban '+target+'?'))return;
+  fetch('/api/mc/unban',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({server:activeServer,type:type,target:target})}).then(function(r){return r.json()}).then(function(d){if(d.error){alert(d.error);return}refreshPeople()}).catch(function(){alert('Could not unban '+target+'.')});
 }
 function addServerAccess(){
   var input=document.getElementById('accessUserId');if(!input||!input.value.trim())return;
@@ -3670,6 +4229,7 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_get("/api/mc/player-skin", mc_api_player_skin)
     app.router.add_get("/api/mc/player", mc_api_player)
     app.router.add_post("/api/mc/player-action", mc_api_player_action)
+    app.router.add_post("/api/mc/unban", mc_api_unban)
     app.router.add_post("/api/mc/inventory-move", mc_api_inventory_move)
     app.router.add_post("/api/mc/create", mc_api_create)
     app.router.add_post("/api/mc/start", mc_api_start)
