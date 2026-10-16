@@ -102,7 +102,7 @@ DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "1532820804402806844")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "xN_MmWZKUhswwN3jSe2XnCQKBnBviKti")
 DISCORD_REDIRECT_URI = os.environ.get("DISCORD_REDIRECT_URI", "https://storage.luaisgame.com/api/auth/callback")
 BOT_OWNER_ID = int(os.environ.get("BOT_OWNER_ID", "1293889121374179328"))
-MC_OWNER_ID = 1401271744597196831
+MC_OWNER_ID = 1325914599383498782
 _auth_sessions = {}
 _oauth_states = {}
 MC_PERMISSIONS_FILE = os.path.join(BASE_DIR, "mc_permissions.json")
@@ -4383,6 +4383,34 @@ async def _wait_with_pause(event, total, job_data, process=None):
         waited += step
     return event.is_set()
 
+
+def _cleanup_decompile_artifacts():
+    for filename in ("processed.rbxl", "processed.rbxlx", "game.rbxl", "game.rbxlx"):
+        path = os.path.join(storage_dir, filename)
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+                print(f"[DEBUG] Removed temporary decompile artifact: {filename}")
+        except OSError as e:
+            print(f"[DEBUG] Could not remove temporary artifact {path}: {e}")
+
+    try:
+        if os.path.isdir(WORKSPACE_DIR):
+            for filename in os.listdir(WORKSPACE_DIR):
+                lower_name = filename.lower()
+                if not lower_name.startswith(("game", "place")) or not lower_name.endswith((".rbxl", ".rbxlx")):
+                    continue
+                path = os.path.join(WORKSPACE_DIR, filename)
+                if os.path.isfile(path):
+                    try:
+                        os.remove(path)
+                        print(f"[DEBUG] Removed leftover workspace game file: {filename}")
+                    except OSError as e:
+                        print(f"[DEBUG] Could not remove workspace game file {path}: {e}")
+    except OSError as e:
+        print(f"[DEBUG] Could not inspect Roblox workspace for leftover game files: {e}")
+
+
 async def process_file(send_func, process, game_name, timeout=60, ephemeral=False, info_msg=None, embed=None, rec_ev=None, fin_ev=None, job_data=None, raw=False):
     decompile_dir = os.path.join(BASE_DIR, "storage")
     os.makedirs(decompile_dir, exist_ok=True)
@@ -4833,6 +4861,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                 await update_status(info_msg, embed, "error")
                 await send_msg(send_func, content=f"An error occurred: {e}", embed=embed, ephemeral=is_ephemeral)
         finally:
+            _cleanup_decompile_artifacts()
             running_jobs -= 1
             is_decompiling = running_jobs > 0
             if not data["aborted"]:
