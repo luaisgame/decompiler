@@ -2916,6 +2916,8 @@ async def mc_api_player_action(request):
         "ban-ip": f"ban-ip {player_name} {reason}",
         "op": f"op {player_name}",
         "unop": f"deop {player_name}",
+        "fly": f"ability {player_name} mayfly true",
+        "unfly": f"ability {player_name} mayfly false",
     }
     if action not in commands:
         return web.json_response({"error": "Invalid player action"}, status=400)
@@ -4080,7 +4082,7 @@ function showPlayerDetails(player){
     if(d.error&&d.online)d={name:player,skin:false,asset_version:'1.21.11',inventory:{},details:{},live:false,online:true};
     currentInventoryAssetVersion=d.asset_version||'1.21.11';
     var h='<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="color:#fff;font-size:20px">'+escapeHtml(player)+'</h2><button class="mc-action-btn mc-action-neutral" onclick="openPeople()">Back to Players</button></div>';
-    h+='<div style="display:flex;gap:18px;align-items:center;margin:18px 0">'+(d.skin?'<img src="'+d.skin_url+'" style="width:128px;height:128px;image-rendering:pixelated;object-fit:contain;background:#111">':'<img src="https://mc-heads.net/avatar/'+encodeURIComponent(player)+'/128" style="width:128px;height:128px;border-radius:12px">')+'<div class="player-actions"><button class="mc-action-btn mc-action-neutral" onclick="playerAction(\'kick\')">Kick</button><button class="mc-action-btn mc-action-danger" onclick="playerAction(\'ban\')">Ban Player</button><button class="mc-action-btn mc-action-danger" onclick="playerAction(\'ban-ip\')">Ban IP</button><button class="mc-action-btn mc-action-success" onclick="playerAction(\'op\')">OP</button><button class="mc-action-btn mc-action-neutral" onclick="playerAction(\'unop\')">UnOP</button></div></div>';
+    h+='<div style="display:flex;gap:18px;align-items:center;margin:18px 0">'+(d.skin?'<img src="'+d.skin_url+'" style="width:128px;height:128px;image-rendering:pixelated;object-fit:contain;background:#111">':'<img src="https://mc-heads.net/avatar/'+encodeURIComponent(player)+'/128" style="width:128px;height:128px;border-radius:12px">')+'<div class="player-actions"><button class="mc-action-btn mc-action-neutral" onclick="playerAction(\'kick\')">Kick</button><button class="mc-action-btn mc-action-danger" onclick="playerAction(\'ban\')">Ban Player</button><button class="mc-action-btn mc-action-danger" onclick="playerAction(\'ban-ip\')">Ban IP</button><button class="mc-action-btn mc-action-success" onclick="playerAction(\'op\')">OP</button><button class="mc-action-btn mc-action-neutral" onclick="playerAction(\'unop\')">UnOP</button><button class="mc-action-btn mc-action-success" onclick="playerAction(\'fly\')">Fly</button><button class="mc-action-btn mc-action-neutral" onclick="playerAction(\'unfly\')">No Fly</button></div></div>';
     h+='<div id="playerLiveStatus" class="player-live-status '+(d.live?'is-live':'')+'">'+(d.live?'● Live · server data, 0.1s refresh':d.online?'● Player online · waiting for live data':'● Last saved data · player is offline')+'</div>';
     h+='<div id="playerInventoryView"></div><details style="margin-top:20px"><summary style="color:#00dc78;cursor:pointer">Technical NBT details</summary><div id="playerTechnicalDetails"></div></details>';
     var content=document.getElementById('peopleContent');content.innerHTML=h;
