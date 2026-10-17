@@ -2883,14 +2883,21 @@ async def mc_api_inventory_move(request):
     storage = "website:inventory"
     source_path = nbt_path(source)
     destination_path = nbt_path(destination)
+    proc_check = mc_processes.get(server_name)
+    if not proc_check or proc_check.returncode is not None:
+        return web.json_response({"error": "Server not running"}, status=400)
     await _mc_run_command_capture(server_name, f"data remove storage {storage} source")
     await _mc_run_command_capture(server_name, f"data remove storage {storage} destination")
     await _mc_run_command_capture(server_name, f"execute if data entity {player_name} {source_path} run data modify storage {storage} source set from entity {player_name} {source_path}")
     await _mc_run_command_capture(server_name, f"execute if data entity {player_name} {destination_path} run data modify storage {storage} destination set from entity {player_name} {destination_path}")
+    proc_check = mc_processes.get(server_name)
+    if not proc_check or proc_check.returncode is not None:
+        return web.json_response({"error": "Server stopped during move; items were not modified"}, status=400)
     await _mc_run_command_capture(server_name, f"item replace entity {player_name} {source} with air")
     await _mc_run_command_capture(server_name, f"item replace entity {player_name} {destination} with air")
     await _mc_run_command_capture(server_name, f"execute if data storage {storage} source run data modify entity {player_name} {destination_path} set from storage {storage} source")
     await _mc_run_command_capture(server_name, f"execute if data storage {storage} destination run data modify entity {player_name} {source_path} set from storage {storage} destination")
+    await _mc_run_command_capture(server_name, "save-all flush")
     return web.json_response({"ok": True})
 
 async def mc_api_player_action(request):
@@ -3177,12 +3184,18 @@ async def mc_api_stop(request):
     if not proc or proc.returncode is not None:
         return web.json_response({"error": "Not running"}, status=400)
     try:
+        proc.stdin.write(b"save-all flush\n")
+        await proc.stdin.drain()
+    except Exception:
+        pass
+    await asyncio.sleep(1)
+    try:
         proc.stdin.write(b"stop\n")
         await proc.stdin.drain()
     except Exception:
         proc.kill()
     try:
-        await asyncio.wait_for(proc.wait(), timeout=15)
+        await asyncio.wait_for(proc.wait(), timeout=30)
     except asyncio.TimeoutError:
         proc.kill()
     mc_processes[name] = None
