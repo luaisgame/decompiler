@@ -2389,17 +2389,33 @@ async def mc_api_players(request):
     name = request.query.get("name", "")
     if not _can_access_mc_server(request, name):
         return web.json_response({"error": "unauthorized"}, status=401)
-    players = await _mc_get_live_players(name)
+    online = await _mc_get_live_players(name)
+    server_dir = _mc_safe_server_dir(name)
+    known = set(online)
+    if server_dir:
+        try:
+            with open(os.path.join(server_dir, "usercache.json"), "r", encoding="utf-8") as f:
+                for entry in json.load(f):
+                    n = str(entry.get("name", ""))
+                    if n:
+                        known.add(n)
+        except Exception:
+            pass
+    players = []
+    for player_name in known:
+        players.append({
+            "name": player_name,
+            "head": f"https://mc-heads.net/avatar/{quote(player_name)}/48",
+            "skin": bool(_mc_find_skin_url(server_dir, player_name)) if server_dir else False,
+            "online": player_name in online,
+        })
+    players.sort(key=lambda p: (not p["online"], p["name"].lower()))
     profiles = []
     for user_id in _load_mc_permissions().get(name, []):
         profiles.append(await _mc_discord_profile(user_id))
     bans = _mc_get_server_bans(name)
     return web.json_response({
-        "players": [{
-            "name": player,
-            "head": f"https://mc-heads.net/avatar/{quote(player)}/48",
-            "skin": bool(_mc_find_skin_url(_mc_safe_server_dir(name), player)),
-        } for player in players],
+        "players": players,
         "profiles": profiles,
         **bans,
     })
@@ -3941,8 +3957,9 @@ function openPeople(){
 function onlinePlayersHtml(players){
   var h='';
   (players||[]).forEach(function(player){
-    var head=player.skin?'<canvas class="player-head" width="48" height="48" data-skin="/api/mc/player-skin?server='+encodeURIComponent(activeServer)+'&player='+encodeURIComponent(player.name)+'" style="width:40px;height:40px;border-radius:8px;image-rendering:pixelated"></canvas>':'<img src="'+player.head+'" style="width:40px;height:40px;border-radius:8px" onerror="this.style.display=\'none\'">';
-    h+='<button onclick="showPlayerDetails(\''+escapeHtml(player.name)+'\')" style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.04);padding:8px 10px;border-radius:10px;border:0;cursor:pointer">'+head+'<span style="color:#fff">'+escapeHtml(player.name)+'</span></button>';
+    var head=player.skin?'<canvas class="player-head" width="48" height="48" data-skin="/api/mc/player-skin?server='+encodeURIComponent(activeServer)+'&player='+encodeURIComponent(player.name)+'" style="width:40px;height:40px;border-radius:8px;image-rendering:pixelated"></canvas>':'<img src="'+player.head+'" style="width:40px;height:40px;border-radius:8px'+(player.online?'':';opacity:.4')+'" onerror="this.style.display=\'none\'">';
+    var dot=player.online?'<span style="color:#00dc78;font-size:10px">●</span>':'<span style="color:#8b949e;font-size:10px">○</span>';
+    h+='<button onclick="showPlayerDetails(\''+escapeHtml(player.name)+'\')" style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.04);padding:8px 10px;border-radius:10px;border:0;cursor:pointer'+(player.online?'':';opacity:.6')+'">'+head+'<span style="color:#fff">'+escapeHtml(player.name)+'</span>'+dot+'</button>';
   });
   if(!(players||[]).length)h='<span style="color:#8b949e">No players reported.</span>';
   return h;
@@ -3994,7 +4011,7 @@ function refreshPeople(){
       return;
     }
     var h='<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="color:#fff;font-size:20px">'+escapeHtml(server)+'</h2><button onclick="closePeople()" style="background:none;border:none;color:#8b949e;font-size:24px;cursor:pointer">X</button></div>';
-    h+='<p style="color:#8b949e;font-size:12px;margin:8px 0 20px">Players online <span style="color:#00dc78">Live · 0.1s</span></p><div id="onlinePlayers" style="display:flex;flex-wrap:wrap;gap:10px"></div>';
+    h+='<p style="color:#8b949e;font-size:12px;margin:8px 0 20px">All players <span style="color:#00dc78">Live · 0.1s</span></p><div id="onlinePlayers" style="display:flex;flex-wrap:wrap;gap:10px"></div>';
     h+='<p style="color:#8b949e;font-size:12px;margin:24px 0 10px">Discord access</p><div id="discordAccess" style="display:grid;gap:8px"></div>';
     h+='<section class="ban-section"><h3>Banned players <span id="bannedPlayerCount">'+bannedPlayers.length+'</span></h3><div id="bannedPlayers" class="ban-list"></div></section>';
     h+='<section class="ban-section"><h3>Banned IPs <span id="bannedIpCount">'+bannedIps.length+'</span></h3><div id="bannedIps" class="ban-list"></div></section>';
