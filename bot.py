@@ -37,6 +37,7 @@ GITHUB_FILES = [
     "commands/cookie.py",
     "commands/decompile.py",
     "commands/help.py",
+    "commands/mc.py",
     "commands/__init__.py",
     "minecraft_setup.py",
 ]
