@@ -1,6 +1,7 @@
 import asyncio
 import base64
 from urllib.parse import parse_qs, urlparse, quote, urlencode
+import ctypes
 import os
 import sys
 import io
@@ -1296,7 +1297,7 @@ async def handle_auth_me(request):
     mc_admin = int(user.get("id", 0)) in (BOT_OWNER_ID, MC_OWNER_ID)
     authorized = mc_admin or _mc_has_any_access(str(user.get("id", "")))
     return web.json_response({"authenticated": True, "mc_authorized": authorized, "mc_admin": mc_admin,
-                              "mc_owner": int(user.get("id", 0)) == BOT_OWNER_ID, **user})
+                              "mc_owner": int(user.get("id", 0)) in (BOT_OWNER_ID, MC_OWNER_ID), **user})
 
 def _get_user_info(request):
     session_id = request.cookies.get("session_id", "")
@@ -4539,7 +4540,8 @@ function saveProps(){
       <option value="480p">480p</option>
     </select>
     <select class="ss-select" id="ssFps" onchange="ssSendFps()">
-      <option value="full" selected>Full FPS</option>
+      <option value="full" selected>Full FPS (100)</option>
+      <option value="60">60 FPS</option>
       <option value="30">30 FPS</option>
       <option value="20">20 FPS</option>
       <option value="15">15 FPS</option>
@@ -4570,7 +4572,7 @@ function confirmDialog(title,text,danger){
 function confirmResolveFn(v){if(confirmResolve)confirmResolve(v)}
 
 /* ============ SCREENSHARE ============ */
-var ssWS=null,ssViewing=false,ssControl=false,ssOpen=false,ssReconTimer=null,ssIdleTimer=null,ssQueue=[];
+var ssWS=null,ssViewing=false,ssControl=false,ssOpen=false,ssReconTimer=null,ssIdleTimer=null,ssQueue=[],ssCanControl=null;
 var ssCanvas=document.getElementById('ssCanvas'),ssCtx=ssCanvas?ssCanvas.getContext('2d'):null;
 var ssScreenW=0,ssScreenH=0;
 
@@ -4583,7 +4585,15 @@ function ssConnect(){
   ssWS.onmessage=function(ev){
     if(typeof ev.data==='string'){
       var m;try{m=JSON.parse(ev.data)}catch(e){return}
-      if(m.type==='hello'){if(m.screen){ssScreenW=m.screen.width;ssScreenH=m.screen.height;ssUpdateRes()}}
+      if(m.type==='hello'){
+        if(m.screen){ssScreenW=m.screen.width;ssScreenH=m.screen.height;ssUpdateRes()}
+        /* Server is authoritative about whether THIS session may control. */
+        ssCanControl=(m.owner!==false)&&(m.control!==false);
+        var cb=document.getElementById('ssCtrlBtn');
+        if(cb&&ssOpen)cb.style.display=ssCanControl?'':'none';
+        if(ssOpen&&!ssCanControl&&m.control===false)toast('Remote control unavailable: pyautogui not installed on the PC.','error');
+      }
+      else if(m.type==='control_error'){toast(m.error||'Remote control error.','error');ssSetControl(false)}
       else if(m.type==='viewers'){var v=document.getElementById('ssViewers');if(v)v.textContent=m.count+(m.count===1?' viewer':' viewers')}
     }else{
       var img=new Image();
@@ -4622,7 +4632,7 @@ function ssSend(obj){
   if(ssQueue.length>32)ssQueue.shift();
 }
 function ssSendQuality(){ssSend({type:'quality',quality:document.getElementById('ssQuality').value})}
-function ssSendFps(){var v=document.getElementById('ssFps').value;var n=v==='full'?60:Math.max(1,Math.min(60,parseInt(v,10)||15));ssSend({type:'fps',fps:n})}
+function ssSendFps(){var v=document.getElementById('ssFps').value;var n=v==='full'?100:Math.max(1,Math.min(100,parseInt(v,10)||100));ssSend({type:'fps',fps:n})}
 function ssUpdateRes(){var r=document.getElementById('ssRes');if(r)r.textContent=ssScreenW?ssScreenW+'×'+ssScreenH:'-'}
 
 function ssSeedFromPip(){
@@ -4660,6 +4670,7 @@ function closeSS(){
 
 function ssToggleControl(){
   if(!userInfo||!userInfo.mc_owner){toast('Only the owner can control this PC.','error');return}
+  if(ssCanControl===false){toast('Remote control unavailable: pyautogui not installed on the PC.','error');return}
   if(!ssControl){
     confirmDialog('Enable remote control?','You will fully control this PC (mouse + keyboard) through the browser. The toolbar stays on top so you can turn it off anytime.',false).then(function(ok){
       if(ok)ssSetControl(true);
@@ -4858,7 +4869,7 @@ async def mc_api_set_properties(request):
 # Admin-only (BOT_OWNER_ID / MC_OWNER_ID).
 
 SCREENCAST_IDLE_INTERVAL = 30.0
-SCREENCAST_MAX_FPS = 60
+SCREENCAST_MAX_FPS = 100
 SCREENCAST_QUALITIES = {
     "full": {"max_width": 0, "quality": 72},
     "720p": {"max_width": 1280, "quality": 68},
@@ -4871,6 +4882,7 @@ screencast_meta = {}            # ws -> {"viewing": bool, "quality": str, "fps":
 screencast_latest = {"jpeg": None, "width": 0, "height": 0, "screen_w": 0, "screen_h": 0, "ts": 0}
 screencast_task = None
 screencast_available = None
+screencast_control_ok = None     # pyautogui importable (remote control usable)
 screencast_sending = set()      # ws with a frame in flight (drop frame instead of queueing)
 
 def _screencast_check_available() -> bool:
@@ -4884,6 +4896,18 @@ def _screencast_check_available() -> bool:
             print(f"[SCREENCAST] Disabled (missing dependency): {e}. Install with: pip install pillow mss")
             screencast_available = False
     return screencast_available
+
+def _screencast_check_control() -> bool:
+    """Remote control needs pyautogui; report it so the UI can explain instead of silently doing nothing."""
+    global screencast_control_ok
+    if screencast_control_ok is None:
+        try:
+            import pyautogui  # noqa: F401
+            screencast_control_ok = True
+        except Exception as e:
+            print(f"[SCREENCAST] Remote control unavailable (missing dependency): {e}. Install with: pip install pyautogui")
+            screencast_control_ok = False
+    return screencast_control_ok
 
 _KEY_MAP = {
     "control": "ctrl", "ctrl": "ctrl", "alt": "alt", "shift": "shift",
@@ -4951,51 +4975,92 @@ async def _send_frame(ws, jpeg):
 
 async def _screencast_loop():
     """Idle: one screenshot every 30s. Watching: full-res stream up to max FPS."""
-    while True:
+    # Windows quantizes asyncio.sleep to the 15.6ms system timer, capping the
+    # stream at ~64fps. Raise resolution to 1ms — but only while someone watches,
+    # so the idle server keeps normal timer behavior.
+    timer_tick = False
+
+    def tick(on: bool):
+        nonlocal timer_tick
+        if os.name != "nt" or on == timer_tick:
+            return
         try:
-            active = [ws for ws in screencast_viewers if screencast_meta.get(ws, {}).get("viewing")]
-            if not screencast_viewers or not active:
-                await asyncio.sleep(SCREENCAST_IDLE_INTERVAL)
-                jpeg, w, h, sw, sh = await asyncio.to_thread(_screencast_capture_sync, "720p")
+            if on:
+                ctypes.windll.winmm.timeBeginPeriod(1)
+            else:
+                ctypes.windll.winmm.timeEndPeriod(1)
+            timer_tick = on
+        except Exception:
+            pass
+
+    try:
+        while True:
+            try:
+                active = [ws for ws in screencast_viewers if screencast_meta.get(ws, {}).get("viewing")]
+                if not screencast_viewers or not active:
+                    tick(False)
+                    await asyncio.sleep(SCREENCAST_IDLE_INTERVAL)
+                    jpeg, w, h, sw, sh = await asyncio.to_thread(_screencast_capture_sync, "720p")
+                    if jpeg:
+                        screencast_latest.update({"jpeg": jpeg, "width": w, "height": h,
+                                                  "screen_w": sw, "screen_h": sh, "ts": time.time()})
+                    continue
+                tick(True)
+
+                # Use the highest quality / fps any active viewer asked for.
+                quality = max((screencast_meta.get(ws, {}).get("quality", "720p") for ws in active),
+                              key=lambda q: _SCREENCAST_QUALITY_RANK.get(q, 0))
+                fps = min(SCREENCAST_MAX_FPS, max(int(screencast_meta.get(ws, {}).get("fps", 15) or 15) for ws in active))
+
+                # Deadline-based pacing: capture+encode time counts *against* the frame
+                # budget, so the requested FPS is the real achieved FPS (not slower).
+                frame_start = time.monotonic()
+                jpeg, w, h, sw, sh = await asyncio.to_thread(_screencast_capture_sync, quality)
                 if jpeg:
                     screencast_latest.update({"jpeg": jpeg, "width": w, "height": h,
                                               "screen_w": sw, "screen_h": sh, "ts": time.time()})
-                continue
-
-            # Use the highest quality / fps any active viewer asked for.
-            quality = max((screencast_meta.get(ws, {}).get("quality", "720p") for ws in active),
-                          key=lambda q: _SCREENCAST_QUALITY_RANK.get(q, 0))
-            fps = min(SCREENCAST_MAX_FPS, max(int(screencast_meta.get(ws, {}).get("fps", 15) or 15) for ws in active))
-
-            jpeg, w, h, sw, sh = await asyncio.to_thread(_screencast_capture_sync, quality)
-            if jpeg:
-                screencast_latest.update({"jpeg": jpeg, "width": w, "height": h,
-                                          "screen_w": sw, "screen_h": sh, "ts": time.time()})
-                for ws in list(active):
-                    asyncio.ensure_future(_send_frame(ws, jpeg))
-            await asyncio.sleep(max(0.008, 1.0 / fps))
-        except asyncio.CancelledError:
-            return
-        except Exception as e:
-            print(f"[SCREENCAST] Loop error: {e}")
-            await asyncio.sleep(1)
+                    for ws in list(active):
+                        asyncio.ensure_future(_send_frame(ws, jpeg))
+                remaining = (1.0 / fps) - (time.monotonic() - frame_start)
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                print(f"[SCREENCAST] Loop error: {e}")
+                await asyncio.sleep(1)
+    finally:
+        tick(False)
 
 async def _screencast_input(msg: dict):
-    """Apply a remote-control event (mouse / keyboard) on this PC."""
+    """Apply a remote-control event (mouse / keyboard) on this PC.
+
+    Returns None on success or a human-readable error string for the client."""
+    if not _screencast_check_control():
+        return "Remote control unavailable on this PC (pyautogui not installed)"
     try:
         import pyautogui
-    except Exception:
-        return
+    except Exception as e:
+        return f"Remote control unavailable: {e}"
     try:
+        # pyautogui sleeps 0.1s after EVERY call by default — that throttles input
+        # to ~10 events/s and stalls the event loop. Disable it for real-time control.
         pyautogui.FAILSAFE = False
+        pyautogui.PAUSE = 0
         kind = msg.get("kind")
-        screen_w = screencast_latest.get("screen_w") or 0
-        screen_h = screencast_latest.get("screen_h") or 0
-        if not screen_w or not screen_h:
-            return
         if kind == "mouse":
-            x = max(0, min(screen_w - 1, float(msg.get("x", 0)) * screen_w))
-            y = max(0, min(screen_h - 1, float(msg.get("y", 0)) * screen_h))
+            # Map normalized 0..1 coords into pyautogui's own coordinate space.
+            # mss reports physical pixels while pyautogui may use DPI-scaled
+            # logical pixels — using its size() keeps clicks landing correctly
+            # at 125%/150% display scaling.
+            try:
+                pw, ph = pyautogui.size()
+            except Exception:
+                pw, ph = screencast_latest.get("screen_w") or 0, screencast_latest.get("screen_h") or 0
+            if not pw or not ph:
+                return "Screen size unknown yet"
+            x = max(0, min(pw - 1, float(msg.get("x", 0)) * pw))
+            y = max(0, min(ph - 1, float(msg.get("y", 0)) * ph))
             button = {"left": "left", "right": "right", "middle": "middle"}.get(str(msg.get("button", "left")), "left")
             action = msg.get("action")
             if action == "move":
@@ -5013,15 +5078,17 @@ async def _screencast_input(msg: dict):
             key = str(msg.get("key", ""))
             if action == "type":
                 pyautogui.write(str(msg.get("text", ""))[:500], interval=0)
-                return
+                return None
             lowered = key.lower()
             mapped = _KEY_MAP.get(lowered, lowered if len(lowered) > 1 else key)
             if action == "down":
                 pyautogui.keyDown(mapped)
             elif action == "up":
                 pyautogui.keyUp(mapped)
+        return None
     except Exception as e:
         print(f"[SCREENCAST] Input error: {e}")
+        return f"Input error: {e}"
 
 async def _screencast_on_message(ws, msg: dict):
     kind = msg.get("type")
@@ -5049,13 +5116,19 @@ async def _screencast_on_message(ws, msg: dict):
         # Remote control is owner-only, enforced server-side (client just hides the button).
         if not meta.get("owner"):
             return
-        await _screencast_input(msg)
+        err = await _screencast_input(msg)
+        if err:
+            try:
+                await ws.send_json({"type": "control_error", "error": err})
+            except Exception:
+                pass
 
 async def screencast_status(request):
     if not _is_mc_admin(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     return web.json_response({
         "available": _screencast_check_available(),
+        "control": _screencast_check_control(),
         "screen": {"width": screencast_latest.get("screen_w", 0), "height": screencast_latest.get("screen_h", 0)},
         "viewers": len(screencast_viewers),
         "max_fps": SCREENCAST_MAX_FPS,
@@ -5085,11 +5158,13 @@ async def screencast_ws(request):
     ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024)
     await ws.prepare(request)
     screencast_viewers.add(ws)
-    screencast_meta[ws] = {"viewing": False, "quality": "720p", "fps": 15, "owner": _is_admin(request)}
+    screencast_meta[ws] = {"viewing": False, "quality": "720p", "fps": 15, "owner": _is_mc_admin(request)}
     try:
         await ws.send_json({
             "type": "hello",
             "available": _screencast_check_available(),
+            "control": _screencast_check_control(),
+            "owner": _is_mc_admin(request),
             "screen": {"width": screencast_latest.get("screen_w", 0), "height": screencast_latest.get("screen_h", 0)},
             "max_fps": SCREENCAST_MAX_FPS,
         })
