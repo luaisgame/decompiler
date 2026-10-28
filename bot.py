@@ -7,6 +7,7 @@ import json
 import shutil
 import subprocess
 import threading
+import time
 import discord
 
 if getattr(sys, "frozen", False):
@@ -25,7 +26,7 @@ load_dotenv(os.path.join(_BASE_DIR, ".env"))
 REPO = "luaisgame/decompiler"
 BRANCH = "main"
 RAW_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
-RAW_VERSION = "c95b0e3"
+RAW_VERSION = "2d5750e"
 
 GITHUB_FILES = [
     "commands/core.py",
@@ -81,6 +82,7 @@ from commands.core import bot, BOT_TOKEN
 
 TUNNEL_NAME = "storage"
 TUNNEL_DOMAIN = "storage.luaisgame.com"
+TUNNEL_DOMAIN_MC = "mc.luaisgame.com"
 
 def ensure_cloudflared():
     if shutil.which("cloudflared"):
@@ -119,6 +121,7 @@ def get_cloudflared_path():
     return None
 
 def ensure_tunnel(port=5000):
+    global _tunnel_config_changed
     cf = get_cloudflared_path()
     if not cf:
         return False
@@ -148,8 +151,13 @@ def ensure_tunnel(port=5000):
         if not tunnel_id:
             print("[STARTUP] Failed to create tunnel")
             return False
+
+    # Route DNS for BOTH hostnames on every startup (idempotent). This runs even
+    # when the tunnel already existed, so mc.luaisgame.com gets its CNAME without
+    # needing a manual `cloudflared tunnel route dns`.
+    for domain in (TUNNEL_DOMAIN, TUNNEL_DOMAIN_MC):
         subprocess.run(
-            [cf, "tunnel", "route", "dns", TUNNEL_NAME, TUNNEL_DOMAIN],
+            [cf, "tunnel", "route", "dns", TUNNEL_NAME, domain],
             capture_output=True
         )
 
@@ -163,25 +171,57 @@ credentials-file: {cred_file}
 ingress:
   - hostname: {TUNNEL_DOMAIN}
     service: http://127.0.0.1:{port}
+  - hostname: {TUNNEL_DOMAIN_MC}
+    service: http://127.0.0.1:{port}
   - service: http_status:404
 """
+    # Only rewrite + force a restart when the config actually changed, so normal
+    # restarts don't bounce the tunnel unnecessarily.
+    old = None
+    try:
+        with open(config_path, "r") as f:
+            old = f.read()
+    except OSError:
+        pass
+    _tunnel_config_changed = (old != config_content)
     with open(config_path, "w") as f:
         f.write(config_content)
+    if _tunnel_config_changed:
+        print("[STARTUP] Tunnel config changed (new hostname/ingress) — will restart tunnel.")
     return True
 
-def start_tunnel():
-    cf = get_cloudflared_path()
-    if not cf:
-        return
+_tunnel_config_changed = False
+
+def _cloudflared_running():
     try:
         result = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq cloudflared.exe"],
             capture_output=True, text=True
         )
-        if "cloudflared.exe" in result.stdout:
-            return
+        return "cloudflared.exe" in result.stdout
     except Exception:
-        pass
+        return False
+
+def start_tunnel():
+    cf = get_cloudflared_path()
+    if not cf:
+        return
+    if _cloudflared_running():
+        if _tunnel_config_changed:
+            # Config changed (e.g. mc.luaisgame.com added) but a tunnel is already
+            # running with the old single-hostname config. Bounce it so it picks up
+            # the new ingress.
+            print("[STARTUP] Restarting cloudflared to apply new tunnel config...")
+            try:
+                subprocess.run(
+                    ["taskkill", "/IM", "cloudflared.exe", "/F"],
+                    capture_output=True, text=True
+                )
+            except Exception:
+                pass
+            time.sleep(2)
+        else:
+            return
     proc = subprocess.Popen(
         [cf, "tunnel", "run", TUNNEL_NAME],
         creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
@@ -196,7 +236,7 @@ def start_tunnel():
         except Exception:
             pass
     threading.Thread(target=_read_tunnel, args=(proc.stdout,), daemon=True).start()
-    print(f"[STARTUP] Tunnel started: https://{TUNNEL_DOMAIN}")
+    print(f"[STARTUP] Tunnel started: https://{TUNNEL_DOMAIN} + https://{TUNNEL_DOMAIN_MC}")
 
 @bot.event
 async def on_ready():

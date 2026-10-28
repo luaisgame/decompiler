@@ -68,7 +68,7 @@ def get_cloudflared_path():
     return None
 
 def ensure_tunnel():
-    global TUNNEL_ID
+    global TUNNEL_ID, _tunnel_config_changed
     cf = get_cloudflared_path()
     if not cf:
         return False
@@ -98,12 +98,12 @@ def ensure_tunnel():
         if not TUNNEL_ID:
             print("[RUNNER] Failed to create tunnel")
             return False
+
+    # Route DNS for BOTH hostnames on every startup (idempotent), so a hostname
+    # added later (mc.luaisgame.com) gets its CNAME without manual intervention.
+    for domain in (TUNNEL_DOMAIN, TUNNEL_DOMAIN_MC):
         subprocess.run(
-            [cf, "tunnel", "route", "dns", TUNNEL_NAME, TUNNEL_DOMAIN],
-            capture_output=True
-        )
-        subprocess.run(
-            [cf, "tunnel", "route", "dns", TUNNEL_NAME, TUNNEL_DOMAIN_MC],
+            [cf, "tunnel", "route", "dns", TUNNEL_NAME, domain],
             capture_output=True
         )
 
@@ -120,25 +120,50 @@ ingress:
     service: http://127.0.0.1:5000
   - service: http_status:404
 """
+    old = None
+    try:
+        with open(CLOUDFLARED_CONFIG, "r") as f:
+            old = f.read()
+    except OSError:
+        pass
+    _tunnel_config_changed = (old != config_content)
     with open(CLOUDFLARED_CONFIG, "w") as f:
         f.write(config_content)
     print(f"[RUNNER] Tunnel config written to {CLOUDFLARED_CONFIG}")
     return True
 
-def start_tunnel():
-    cf = get_cloudflared_path()
-    if not cf:
-        return
+_tunnel_config_changed = False
+
+def _cloudflared_running():
     try:
         result = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq cloudflared.exe"],
             capture_output=True, text=True
         )
-        if "cloudflared.exe" in result.stdout:
+        return "cloudflared.exe" in result.stdout
+    except Exception:
+        return False
+
+def start_tunnel():
+    cf = get_cloudflared_path()
+    if not cf:
+        return
+    if _cloudflared_running():
+        if _tunnel_config_changed:
+            # Config changed but a tunnel is running with the old ingress — bounce
+            # it so the new hostname (mc.luaisgame.com) is picked up.
+            print("[RUNNER] Restarting cloudflared to apply new tunnel config...")
+            try:
+                subprocess.run(
+                    ["taskkill", "/IM", "cloudflared.exe", "/F"],
+                    capture_output=True, text=True
+                )
+            except Exception:
+                pass
+            time.sleep(2)
+        else:
             print(f"[RUNNER] Tunnel already running: https://{TUNNEL_DOMAIN} + https://{TUNNEL_DOMAIN_MC}")
             return
-    except Exception:
-        pass
     subprocess.Popen(
         [cf, "tunnel", "run", TUNNEL_NAME],
         creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
