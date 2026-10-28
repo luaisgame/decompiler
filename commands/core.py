@@ -1420,7 +1420,7 @@ async def handle_thumbnail(request):
 async def handle_index(request):
     # mc.luaisgame.com is served by this same app: its root shows the MC console.
     if _request_is_mc_host(request):
-        return web.Response(text=MC_PAGE_HTML, content_type="text/html")
+        return _mc_page_response(request)
     ip = request.headers.get("X-Forwarded-For", request.remote)
     _track_ip(ip)
     if ip in _get_banned_ips():
@@ -3939,7 +3939,8 @@ body{background:var(--mc-bg);color:var(--mc-txt);font-family:var(--mc-font);lett
 .ss-btn.exit:hover{background:rgba(239,68,68,.14);color:#fca5a5;border-color:rgba(239,68,68,.4)}
 .ss-stage{flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;padding:16px;position:relative}
 .ss-stage canvas{max-width:100%;max-height:100%;background:#000;border-radius:10px;border:1px solid var(--mc-line);
-  box-shadow:0 20px 80px rgba(0,0,0,.6);display:block}
+  box-shadow:0 20px 80px rgba(0,0,0,.6);display:block;transition:filter .45s ease}
+.ss-stage canvas.ss-spoiler{filter:blur(26px) saturate(1.25) brightness(.95)}
 .ss-stage canvas.control-live{cursor:crosshair;border-color:rgba(236,72,153,.5)}
 .ss-hint{position:absolute;bottom:24px;left:50%;transform:translateX(-50%);font-size:12px;color:var(--mc-faint);
   background:rgba(10,11,16,.85);padding:7px 15px;border-radius:20px;border:1px solid var(--mc-line);pointer-events:none}
@@ -4263,12 +4264,12 @@ function renderSkinHeads(){
     };image.src=canvas.dataset.skin;
   });
 }
-checkAuth().then(function(ok){
-  if(ok){
-    loadVersions();
-    loadServers();
-  }
-});
+// Kick off data loads immediately (parallel) instead of waiting on auth, so the
+// sidebar fills in one round-trip. If unauthorized, these 401 harmlessly and
+// checkAuth() swaps in the login screen.
+loadVersions();
+loadServers();
+checkAuth();
 function openProps(){
   if(!activeServer)return;
   fetch('/api/mc/properties?name='+encodeURIComponent(activeServer),{credentials:'include'})
@@ -4537,7 +4538,6 @@ function saveProps(){
   </div>
   <div class="ss-stage">
     <canvas id="ssCanvas"></canvas>
-    <div class="ss-offline" id="ssOffline" style="display:none">Waiting for first frame&hellip;</div>
     <div class="ss-hint" id="ssHint">Click the image to start remote control &middot; ESC to exit fullscreen</div>
   </div>
 </div>
@@ -4583,7 +4583,7 @@ function ssConnect(){
         if(!ssCanvas)return;
         if(ssCanvas.width!==img.width||ssCanvas.height!==img.height){ssCanvas.width=img.width;ssCanvas.height=img.height}
         ssCtx.drawImage(img,0,0);
-        var off=document.getElementById('ssOffline');if(off)off.style.display='none';
+        ssCanvas.classList.remove('ss-spoiler');
         var f=document.getElementById('ssFpsInfo');if(f)f.textContent=img.width+'×'+img.height;
         URL.revokeObjectURL(img.src);
       };
@@ -4602,14 +4602,24 @@ function ssSendQuality(){ssSend({type:'quality',quality:document.getElementById(
 function ssSendFps(){ssSend({type:'fps',fps:parseInt(document.getElementById('ssFps').value,10)||15})}
 function ssUpdateRes(){var r=document.getElementById('ssRes');if(r)r.textContent=ssScreenW?ssScreenW+'×'+ssScreenH:'-'}
 
+function ssSeedFromPip(){
+  // Paint the exact thumbnail the user clicked (bottom-right PiP) onto the big
+  // canvas, blurred as a spoiler, so opening feels instant and continuous.
+  var pipImg=document.getElementById('ssPipImg');
+  if(!ssCanvas||!ssCtx||!pipImg||!pipImg.src||!pipImg.complete||!pipImg.naturalWidth)return;
+  ssCanvas.width=pipImg.naturalWidth;ssCanvas.height=pipImg.naturalHeight;
+  ssCtx.drawImage(pipImg,0,0,ssCanvas.width,ssCanvas.height);
+  ssCanvas.classList.add('ss-spoiler');
+}
+
 function openSS(){
   if(!userInfo||!userInfo.mc_admin){toast('Admin only.','error');return}
   document.getElementById('ssOverlay').classList.add('open');
   ssOpen=true;
+  ssSeedFromPip();
   ssConnect();
   ssSend({type:'view',active:true});ssViewing=true;
   ssSendQuality();ssSendFps();
-  var off=document.getElementById('ssOffline');if(off)off.style.display='';
   var pip=document.getElementById('ssPip');if(pip)pip.style.display='none';
   ssStopIdle();
 }
@@ -4717,10 +4727,21 @@ setTimeout(function(){
 </body>
 </html>'''
 
+MC_PAGE_ETAG = '"' + hashlib.md5(MC_PAGE_HTML.encode("utf-8")).hexdigest() + '"'
+
+def _mc_page_response(request):
+    # Instant repeat loads: serve the console with a strong ETag so the browser
+    # gets a cheap 304 Not Modified instead of re-downloading the ~80KB page.
+    # no-cache still revalidates on every visit, so deploys show up immediately.
+    if request.headers.get("If-None-Match") == MC_PAGE_ETAG:
+        return web.Response(status=304, headers={"ETag": MC_PAGE_ETAG, "Cache-Control": "no-cache"})
+    return web.Response(text=MC_PAGE_HTML, content_type="text/html",
+                        headers={"ETag": MC_PAGE_ETAG, "Cache-Control": "no-cache"})
+
 async def handle_mc_page(request):
     # The console moved to its own hostname; keep /mc working via redirect.
     if _request_is_mc_host(request):
-        return web.Response(text=MC_PAGE_HTML, content_type="text/html")
+        return _mc_page_response(request)
     resp = web.Response(status=302)
     resp.headers["Location"] = MC_SITE_URL
     return resp
