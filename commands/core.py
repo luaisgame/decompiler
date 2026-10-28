@@ -3891,7 +3891,7 @@ body{background:var(--mc-bg);color:var(--mc-txt);font-family:var(--mc-font);lett
 @keyframes toastIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none}}
 
 /* ---- CONFIRM MODAL ---- */
-.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:400;padding:20px;
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:600;padding:20px;
   backdrop-filter:blur(4px)}
 .modal-overlay.open{display:flex}
 .modal-card{background:#0c0e14;border:1px solid var(--mc-line);border-radius:16px;padding:26px;width:min(400px,100%);
