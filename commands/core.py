@@ -1295,7 +1295,8 @@ async def handle_auth_me(request):
         return web.json_response({"authenticated": False}, status=401)
     mc_admin = int(user.get("id", 0)) in (BOT_OWNER_ID, MC_OWNER_ID)
     authorized = mc_admin or _mc_has_any_access(str(user.get("id", "")))
-    return web.json_response({"authenticated": True, "mc_authorized": authorized, "mc_admin": mc_admin, **user})
+    return web.json_response({"authenticated": True, "mc_authorized": authorized, "mc_admin": mc_admin,
+                              "mc_owner": int(user.get("id", 0)) == BOT_OWNER_ID, **user})
 
 def _get_user_info(request):
     session_id = request.cookies.get("session_id", "")
@@ -3920,31 +3921,38 @@ body{background:var(--mc-bg);color:var(--mc-txt);font-family:var(--mc-font);lett
 .ss-pip .ss-pip-title .d{width:6px;height:6px;border-radius:50%;background:#ec4899;box-shadow:0 0 7px #ec4899}
 .ss-pip .ss-pip-open{font-size:10.5px;color:var(--mc-faint);font-weight:600}
 
-.ss-overlay{position:fixed;inset:0;z-index:450;background:rgba(3,3,6,.9);display:none;flex-direction:column;
-  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+/* Discord-style viewer: black full-bleed video, floating header + dock */
+.ss-overlay{position:fixed;inset:0;z-index:450;background:#000;display:none;flex-direction:column}
 .ss-overlay.open{display:flex}
-.ss-bar{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 18px;
-  background:rgba(10,11,16,.9);border-bottom:1px solid var(--mc-line);flex-shrink:0;flex-wrap:wrap}
-.ss-bar .ss-title{font-size:14px;font-weight:650;color:#fff;display:flex;align-items:center;gap:9px}
-.ss-bar .ss-title .d{width:8px;height:8px;border-radius:50%;background:#ec4899;box-shadow:0 0 9px #ec4899;animation:blink 1.4s infinite}
-.ss-bar .ss-meta{font-size:12px;color:var(--mc-dim);display:flex;align-items:center;gap:14px;flex-wrap:wrap}
-.ss-bar .ss-ctrl{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.ss-select{padding:7px 11px;border-radius:8px;border:1px solid var(--mc-line);background:rgba(255,255,255,.03);
-  color:var(--mc-txt);font-size:12px;font-family:inherit;font-weight:600;outline:none;cursor:pointer}
-.ss-select option{background:#0c0e14}
-.ss-btn{padding:7px 14px;border-radius:8px;border:1px solid var(--mc-line);background:rgba(255,255,255,.03);
-  color:var(--mc-dim);font-size:12px;font-weight:600;cursor:pointer;transition:all .16s;font-family:inherit}
-.ss-btn:hover{background:rgba(255,255,255,.07);color:#fff;border-color:rgba(255,255,255,.16)}
-.ss-btn.control-on{background:rgba(236,72,153,.16);border-color:rgba(236,72,153,.5);color:#f9a8d4}
-.ss-btn.exit:hover{background:rgba(239,68,68,.14);color:#fca5a5;border-color:rgba(239,68,68,.4)}
-.ss-stage{flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;padding:16px;position:relative}
-.ss-stage canvas{max-width:100%;max-height:100%;background:#000;border-radius:10px;border:1px solid var(--mc-line);
-  box-shadow:0 20px 80px rgba(0,0,0,.6);display:block;transition:filter .45s ease}
+.ss-top{position:absolute;top:0;left:0;right:0;z-index:3;display:flex;align-items:center;gap:12px;padding:16px 20px;
+  background:linear-gradient(to bottom,rgba(0,0,0,.75),rgba(0,0,0,0));pointer-events:none}
+.ss-top>*{pointer-events:auto}
+.ss-live{background:#f23f43;color:#fff;font-size:10.5px;font-weight:800;letter-spacing:.8px;padding:3px 8px;border-radius:5px}
+.ss-top .ss-title{font-size:14px;font-weight:700;color:#fff;display:flex;align-items:center;gap:9px}
+.ss-top .ss-title .d{width:8px;height:8px;border-radius:50%;background:#ec4899;box-shadow:0 0 9px #ec4899;animation:blink 1.4s infinite}
+.ss-top .ss-meta{font-size:12px;color:rgba(255,255,255,.62);display:flex;align-items:center;gap:4px;font-weight:600}
+.ss-spacer{flex:1}
+.ss-x{background:rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.14);color:#fff;width:34px;height:34px;border-radius:50%;
+  font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s}
+.ss-x:hover{background:#f23f43;border-color:#f23f43}
+.ss-dock{position:absolute;bottom:24px;left:50%;transform:translateX(-50%);z-index:3;display:flex;align-items:center;gap:8px;
+  padding:10px 12px;border-radius:16px;background:rgba(24,25,28,.88);border:1px solid rgba(255,255,255,.08);
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);box-shadow:0 16px 48px rgba(0,0,0,.6);
+  max-width:calc(100% - 32px);flex-wrap:wrap;justify-content:center}
+.ss-select{padding:8px 12px;border-radius:8px;border:1px solid rgba(255,255,255,.1);background:rgba(0,0,0,.35);
+  color:#dbdee1;font-size:12.5px;font-family:inherit;font-weight:600;outline:none;cursor:pointer}
+.ss-select option{background:#1e1f22}
+.ss-btn{padding:8px 15px;border-radius:8px;border:1px solid rgba(255,255,255,.1);background:rgba(0,0,0,.35);
+  color:#dbdee1;font-size:12.5px;font-weight:600;cursor:pointer;transition:all .16s;font-family:inherit}
+.ss-btn:hover{background:rgba(255,255,255,.08);color:#fff}
+.ss-btn.control-on{background:#5865f2;border-color:#5865f2;color:#fff}
+.ss-btn.exit:hover{background:#f23f43;color:#fff;border-color:#f23f43}
+.ss-stage{flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;background:#000}
+.ss-stage canvas{max-width:100%;max-height:100%;display:block;transition:filter .45s ease}
 .ss-stage canvas.ss-spoiler{filter:blur(26px) saturate(1.25) brightness(.95)}
-.ss-stage canvas.control-live{cursor:crosshair;border-color:rgba(236,72,153,.5)}
-.ss-hint{position:absolute;bottom:24px;left:50%;transform:translateX(-50%);font-size:12px;color:var(--mc-faint);
-  background:rgba(10,11,16,.85);padding:7px 15px;border-radius:20px;border:1px solid var(--mc-line);pointer-events:none}
-.ss-offline{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--mc-faint);font-size:14px;text-align:center;padding:20px}
+.ss-stage canvas.control-live{cursor:crosshair;outline:2px solid #5865f2;outline-offset:-2px}
+.ss-hint{position:absolute;bottom:88px;left:50%;transform:translateX(-50%);font-size:12px;color:rgba(255,255,255,.75);
+  background:rgba(0,0,0,.6);padding:7px 15px;border-radius:20px;border:1px solid rgba(255,255,255,.1);pointer-events:none}
 </style>
 </head>
 <body>
@@ -4513,34 +4521,32 @@ function saveProps(){
 </div>
 
 <div class="ss-overlay" id="ssOverlay">
-  <div class="ss-bar">
-    <div class="ss-title"><span class="d"></span>Live PC View</div>
-    <div class="ss-meta">
-      <span id="ssRes">-</span>
-      <span id="ssFpsInfo">-</span>
-      <span id="ssViewers"></span>
-    </div>
-    <div class="ss-ctrl">
-      <select class="ss-select" id="ssQuality" onchange="ssSendQuality()">
-        <option value="full">Full quality</option>
-        <option value="720p" selected>720p</option>
-        <option value="480p">480p</option>
-      </select>
-      <select class="ss-select" id="ssFps" onchange="ssSendFps()">
-        <option value="full" selected>Full FPS</option>
-        <option value="30">30 FPS</option>
-        <option value="20">20 FPS</option>
-        <option value="15">15 FPS</option>
-        <option value="10">10 FPS</option>
-        <option value="5">5 FPS</option>
-      </select>
-      <button class="ss-btn" id="ssCtrlBtn" onclick="ssToggleControl()">Enable control</button>
-      <button class="ss-btn exit" onclick="closeSS()">Close</button>
-    </div>
-  </div>
   <div class="ss-stage">
     <canvas id="ssCanvas"></canvas>
-    <div class="ss-hint" id="ssHint">Click the image to start remote control &middot; ESC to exit fullscreen</div>
+    <div class="ss-hint" id="ssHint">Click the image to reveal the live view &middot; ESC to close</div>
+  </div>
+  <div class="ss-top">
+    <span class="ss-live">LIVE</span>
+    <span class="ss-title"><span class="d"></span>PC Screen</span>
+    <span class="ss-meta"><span id="ssRes">-</span>&nbsp;&middot;&nbsp;<span id="ssFpsInfo">-</span>&nbsp;&middot;&nbsp;<span id="ssViewers"></span></span>
+    <span class="ss-spacer"></span>
+    <button class="ss-x" onclick="closeSS()" title="Close (ESC)">&#10005;</button>
+  </div>
+  <div class="ss-dock">
+    <select class="ss-select" id="ssQuality" onchange="ssSendQuality()">
+      <option value="full">Full quality</option>
+      <option value="720p" selected>720p</option>
+      <option value="480p">480p</option>
+    </select>
+    <select class="ss-select" id="ssFps" onchange="ssSendFps()">
+      <option value="full" selected>Full FPS</option>
+      <option value="30">30 FPS</option>
+      <option value="20">20 FPS</option>
+      <option value="15">15 FPS</option>
+      <option value="10">10 FPS</option>
+      <option value="5">5 FPS</option>
+    </select>
+    <button class="ss-btn" id="ssCtrlBtn" onclick="ssToggleControl()" style="display:none">Control this PC</button>
   </div>
 </div>
 
@@ -4637,6 +4643,9 @@ function openSS(){
   ssConnect();
   ssSend({type:'view',active:true});ssViewing=true;
   ssSendQuality();ssSendFps();
+  /* Remote control is owner-only: hide the button for everyone else. */
+  var cb=document.getElementById('ssCtrlBtn');
+  if(cb)cb.style.display=(userInfo&&userInfo.mc_owner)?'':'none';
   var pip=document.getElementById('ssPip');if(pip)pip.style.display='none';
   ssStopIdle();
 }
@@ -4650,6 +4659,7 @@ function closeSS(){
 }
 
 function ssToggleControl(){
+  if(!userInfo||!userInfo.mc_owner){toast('Only the owner can control this PC.','error');return}
   if(!ssControl){
     confirmDialog('Enable remote control?','You will fully control this PC (mouse + keyboard) through the browser. The toolbar stays on top so you can turn it off anytime.',false).then(function(ok){
       if(ok)ssSetControl(true);
@@ -4659,10 +4669,10 @@ function ssToggleControl(){
 function ssSetControl(on){
   ssControl=on;
   var b=document.getElementById('ssCtrlBtn');
-  if(b){b.textContent=on?'Control ON — click image':'Enable control';b.className='ss-btn'+(on?' control-on':'')}
+  if(b){b.textContent=on?'Control ON — ESC to stop':'Control this PC';b.className='ss-btn'+(on?' control-on':'')}
   if(ssCanvas)ssCanvas.classList.toggle('control-live',on);
   var h=document.getElementById('ssHint');
-  if(h)h.textContent=on?'Control is LIVE — mouse & keyboard are being forwarded to the PC':'Click the image to start remote control · ESC to exit fullscreen';
+  if(h)h.textContent=on?'Control is LIVE — mouse & keyboard are being forwarded to the PC':'Click the image to reveal the live view · ESC to close';
 }
 
 /* --- remote input forwarding --- */
@@ -4672,10 +4682,15 @@ function ssCanvasPos(ev){
 }
 function ssBindInput(){
   if(!ssCanvas)return;
-  /* Clicking the image turns control on (matches the hint text). When control is
-     already ON, the click is forwarded to the remote PC instead of toggling. */
+  /* Clicking the image reveals the live view (removes the spoiler blur). Remote
+     control is separate — only the owner gets it, via the toolbar button. */
   ssCanvas.addEventListener('click',function(){
-    if(!ssControl&&ssOpen)ssToggleControl();
+    if(!ssOpen)return;
+    ssCanvas.classList.remove('ss-spoiler');
+    if(ssControl)return;
+    /* Re-kick the stream in case frames haven't started flowing yet. */
+    ssSend({type:'view',active:true});ssViewing=true;
+    ssSendQuality();ssSendFps();
   });
   ssCanvas.addEventListener('contextmenu',function(e){if(ssControl)e.preventDefault()});
   ssCanvas.addEventListener('mousedown',function(e){
@@ -4699,8 +4714,12 @@ function ssBindInput(){
     ssSend({type:'input',kind:'mouse',action:'wheel',x:p.x,y:p.y,dy:e.deltaY<0?3:-3});
   },{passive:false});
   document.addEventListener('keydown',function(e){
-    if(!ssControl||!ssOpen)return;
-    if(e.key==='Escape'){ssSetControl(false);return}
+    if(!ssOpen)return;
+    if(e.key==='Escape'){
+      if(ssControl){ssSetControl(false);return}
+      closeSS();return;
+    }
+    if(!ssControl)return;
     e.preventDefault();
     ssSend({type:'input',kind:'key',action:'down',key:e.key});
   });
@@ -4994,7 +5013,7 @@ async def _screencast_input(msg: dict):
 
 async def _screencast_on_message(ws, msg: dict):
     kind = msg.get("type")
-    meta = screencast_meta.setdefault(ws, {"viewing": False, "quality": "720p", "fps": 15})
+    meta = screencast_meta.setdefault(ws, {"viewing": False, "quality": "720p", "fps": 15, "owner": False})
     if kind == "view":
         was_viewing = meta.get("viewing")
         meta["viewing"] = bool(msg.get("active"))
@@ -5018,6 +5037,9 @@ async def _screencast_on_message(ws, msg: dict):
         except Exception:
             pass
     elif kind == "input":
+        # Remote control is owner-only, enforced server-side (client just hides the button).
+        if not meta.get("owner"):
+            return
         await _screencast_input(msg)
 
 async def screencast_status(request):
@@ -5054,7 +5076,7 @@ async def screencast_ws(request):
     ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024)
     await ws.prepare(request)
     screencast_viewers.add(ws)
-    screencast_meta[ws] = {"viewing": False, "quality": "720p", "fps": 15}
+    screencast_meta[ws] = {"viewing": False, "quality": "720p", "fps": 15, "owner": _is_admin(request)}
     try:
         await ws.send_json({
             "type": "hello",
