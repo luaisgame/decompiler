@@ -16,6 +16,7 @@ CLOUDFLARED_CONFIG = os.path.expanduser(r"~\.cloudflared\config.yml")
 TUNNEL_NAME = "storage"
 TUNNEL_ID = None
 TUNNEL_DOMAIN = "storage.luaisgame.com"
+TUNNEL_DOMAIN_MC = "mc.luaisgame.com"
 
 FILES = [
     "bot.py",
@@ -101,6 +102,10 @@ def ensure_tunnel():
             [cf, "tunnel", "route", "dns", TUNNEL_NAME, TUNNEL_DOMAIN],
             capture_output=True
         )
+        subprocess.run(
+            [cf, "tunnel", "route", "dns", TUNNEL_NAME, TUNNEL_DOMAIN_MC],
+            capture_output=True
+        )
 
     config_dir = os.path.expanduser(r"~\.cloudflared")
     os.makedirs(config_dir, exist_ok=True)
@@ -110,6 +115,8 @@ credentials-file: {cred_file}
 
 ingress:
   - hostname: {TUNNEL_DOMAIN}
+    service: http://127.0.0.1:5000
+  - hostname: {TUNNEL_DOMAIN_MC}
     service: http://127.0.0.1:5000
   - service: http_status:404
 """
@@ -128,7 +135,7 @@ def start_tunnel():
             capture_output=True, text=True
         )
         if "cloudflared.exe" in result.stdout:
-            print(f"[RUNNER] Tunnel already running: https://{TUNNEL_DOMAIN}")
+            print(f"[RUNNER] Tunnel already running: https://{TUNNEL_DOMAIN} + https://{TUNNEL_DOMAIN_MC}")
             return
     except Exception:
         pass
@@ -137,7 +144,7 @@ def start_tunnel():
         creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
-    print(f"[RUNNER] Tunnel started: https://{TUNNEL_DOMAIN}")
+    print(f"[RUNNER] Tunnel started: https://{TUNNEL_DOMAIN} + https://{TUNNEL_DOMAIN_MC}")
 
 def fetch():
     for p in FILES:

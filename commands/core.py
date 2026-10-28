@@ -101,6 +101,17 @@ ips_file = os.path.join(BASE_DIR, "tracked_ips.json")
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "1532820804402806844")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "xN_MmWZKUhswwN3jSe2XnCQKBnBviKti")
 DISCORD_REDIRECT_URI = os.environ.get("DISCORD_REDIRECT_URI", "https://storage.luaisgame.com/api/auth/callback")
+# The MC console lives on its own hostname (mc.luaisgame.com) served by the same
+# web server. Logging in from that host must use its own registered OAuth callback
+# so the session cookie is issued for that domain.
+DISCORD_REDIRECT_URI_MC = os.environ.get("DISCORD_REDIRECT_URI_MC", "https://mc.luaisgame.com/api/auth/callback")
+STORAGE_SITE_URL = os.environ.get("STORAGE_SITE_URL", "https://storage.luaisgame.com/")
+MC_SITE_URL = os.environ.get("MC_SITE_URL", "https://mc.luaisgame.com/")
+
+def _request_is_mc_host(request) -> bool:
+    """True when the request came in on the mc.* hostname."""
+    host = (request.host or "").lower().split(":")[0]
+    return host.startswith("mc.")
 BOT_OWNER_ID = int(os.environ.get("BOT_OWNER_ID", "1293889121374179328"))
 MC_OWNER_ID = 1325914599383498782
 _auth_sessions = {}
@@ -907,6 +918,23 @@ async def get_place_info(place_id: str, cookie: str = None) -> dict:
                                     return result
                                 game_name = game.get("name", game_name)
 
+                # Fallback: the games API can silently return nothing (rate limit, 403,
+                # cookie issues). Without this, embeds would show "Place <id>" instead of
+                # the real game name, so try Roblox's dedicated place-name endpoint.
+                if game_name == f"Place {place_id}":
+                    try:
+                        name_url = f"https://apis.roblox.com/search-api/place-name?placeIds={place_id}"
+                        async with session.get(name_url) as name_resp:
+                            if name_resp.status == 200:
+                                name_data = await name_resp.json()
+                                if isinstance(name_data, list) and name_data and isinstance(name_data[0], dict):
+                                    fetched_name = name_data[0].get("name")
+                                    if isinstance(fetched_name, str) and fetched_name.strip():
+                                        game_name = fetched_name.strip()
+                                        print(f"[DEBUG] Resolved game name via place-name API: {game_name}")
+                    except Exception as e:
+                        print(f"[DEBUG] place-name fallback error: {e}")
+
                 icon_url = None
                 thumb_url = f"https://thumbnails.roblox.com/v1/places/gameicons?placeIds={place_id}&size=512x512&format=Png&isCircular=false"
                 async with session.get(thumb_url) as thumb_resp:
@@ -1180,10 +1208,13 @@ def _track_ip(ip):
 
 async def handle_discord_auth(request):
     state = secrets.token_urlsafe(32)
-    _oauth_states[state] = time.time()
+    # Pick the OAuth callback that matches the host the visitor is on, so the
+    # session cookie lands on the right domain (storage.* vs mc.*).
+    redirect_uri = DISCORD_REDIRECT_URI_MC if _request_is_mc_host(request) else DISCORD_REDIRECT_URI
+    _oauth_states[state] = {"ts": time.time(), "redirect": redirect_uri}
     query = urlencode({
         "client_id": DISCORD_CLIENT_ID,
-        "redirect_uri": DISCORD_REDIRECT_URI,
+        "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": "identify",
         "state": state,
@@ -1196,7 +1227,14 @@ async def handle_discord_auth(request):
 async def handle_discord_callback(request):
     code = request.query.get("code", "")
     state = request.query.get("state", "")
-    state_time = _oauth_states.pop(state, None)
+    state_data = _oauth_states.pop(state, None)
+    # Backward compatible with the old {state: timestamp} format.
+    if isinstance(state_data, dict):
+        state_time = state_data.get("ts", 0)
+        redirect_uri = state_data.get("redirect") or DISCORD_REDIRECT_URI
+    else:
+        state_time = state_data or 0
+        redirect_uri = DISCORD_REDIRECT_URI if not _request_is_mc_host(request) else DISCORD_REDIRECT_URI_MC
     if not code or not state_time or time.time() - state_time > 600:
         return web.Response(text="Invalid or expired Discord login.", status=400)
 
@@ -1205,7 +1243,7 @@ async def handle_discord_callback(request):
         "client_secret": DISCORD_CLIENT_SECRET,
         "grant_type": "authorization_code",
         "code": code,
-        "redirect_uri": DISCORD_REDIRECT_URI,
+        "redirect_uri": redirect_uri,
     }
     async with aiohttp.ClientSession() as session:
         async with session.post(
@@ -1380,6 +1418,9 @@ async def handle_thumbnail(request):
     return web.Response(text="", status=404)
 
 async def handle_index(request):
+    # mc.luaisgame.com is served by this same app: its root shows the MC console.
+    if _request_is_mc_host(request):
+        return web.Response(text=MC_PAGE_HTML, content_type="text/html")
     ip = request.headers.get("X-Forwarded-For", request.remote)
     _track_ip(ip)
     if ip in _get_banned_ips():
@@ -1471,104 +1512,163 @@ async def handle_index(request):
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-* {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{ background:#050508; color:#c9d1d9; font-family:'Inter','SF Pro Display',system-ui,-apple-system,sans-serif; min-height:100vh; padding-bottom:60px; position:relative; }}
-.bg-grid {{ position:fixed; top:0; left:0; width:100%; height:100%; z-index:0; pointer-events:none;
-  background-image: linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px), linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px);
-  background-size:60px 60px; }}
-.bg-glow {{ position:fixed; width:600px; height:600px; border-radius:50%;
-  background:radial-gradient(circle,rgba(0,200,120,.06),transparent 70%);
-  top:50%; left:50%; transform:translate(-50%,-50%); z-index:0; pointer-events:none;
-  animation:pulse 6s ease-in-out infinite alternate; }}
-@keyframes pulse {{ 0%{{opacity:.6;transform:translate(-50%,-50%) scale(1)}} 100%{{opacity:1;transform:translate(-50%,-50%) scale(1.15)}} }}
-.header {{ background:rgba(13,17,23,.85); padding:20px 40px; border-bottom:1px solid rgba(0,220,120,.08); display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:100; backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); }}
-.header-left {{ display:flex; align-items:center; gap:20px; }}
-.header-right {{ display:flex; align-items:center; gap:12px; }}
-.logo {{ font-size:26px; font-weight:700; letter-spacing:-0.5px; display:flex; align-items:center; gap:8px; }}
-.roblox-icon {{ width:32px; height:32px; }}
-.lua {{ color:#58a6ff; }} .is {{ color:#8b949e; }} .game {{ color:#3fb950; }}
-.search {{ background:rgba(13,17,23,.6); border:1px solid rgba(255,255,255,.06); color:#c9d1d9; padding:10px 16px; border-radius:8px; width:320px; font-size:14px; outline:none; transition:border-color 0.2s; }}
-.search:focus {{ border-color:rgba(0,220,120,.3); box-shadow:0 0 0 3px rgba(0,220,120,.08); }}
-.btn {{ padding:10px 20px; border-radius:8px; border:none; font-size:13px; font-weight:600; cursor:pointer; transition:all 0.2s; text-decoration:none; display:inline-flex; align-items:center; gap:6px; }}
-.btn-primary {{ background:#00dc78; color:#050508; }}
-.btn-primary:hover {{ background:#00ff8a; transform:translateY(-1px); }}
-.btn-secondary {{ background:rgba(255,255,255,.04); color:#c9d1d9; border:1px solid rgba(255,255,255,.06); }}
-.btn-secondary:hover {{ background:rgba(255,255,255,.08); }}
-.btn-discord {{ background:rgba(88,101,242,.8); color:#fff; border:1px solid rgba(88,101,242,.3); }}
-.btn-discord:hover {{ background:#5865f2; transform:translateY(-1px); }}
-.btn-minecraft {{ background:rgba(0,220,120,.12); color:#00dc78; border:1px solid rgba(0,220,120,.3); }}
-.btn-minecraft:hover {{ background:rgba(0,220,120,.22); transform:translateY(-1px); }}
-.container {{ max-width:1200px; margin:30px auto; padding:0 20px; position:relative; z-index:1; }}
-.game-card {{ background:rgba(22,27,34,.6); border:1px solid rgba(0,220,120,.08); border-radius:12px; padding:0; margin-bottom:16px; transition:all 0.3s; overflow:hidden; backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); }}
-.game-card:hover {{ border-color:rgba(0,220,120,.25); transform:translateY(-2px); box-shadow:0 8px 24px rgba(0,0,0,0.3); }}
-.game-card-inner {{ display:flex; gap:0; }}
-.game-thumb {{ width:180px; height:180px; object-fit:cover; border-radius:12px 0 0 12px; flex-shrink:0; background:#0d1117; }}
-.game-info {{ padding:20px; flex:1; display:flex; flex-direction:column; justify-content:center; }}
-.game-title {{ font-size:20px; font-weight:600; color:#f0f6fc; margin-bottom:12px; text-decoration:none; display:inline-block; transition:color 0.2s; }}
-.game-title:hover {{ color:#00dc78; }}
-.game-meta {{ font-size:13px; color:#8b949e; margin-bottom:16px; line-height:2; }}
-.label {{ color:#00dc78; font-weight:500; }}
-.value {{ color:#c9d1d9; margin-right:16px; }}
-.download-btn {{ display:inline-block; background:linear-gradient(135deg,#238636,#2ea043); color:#fff; padding:10px 20px; border-radius:8px; text-decoration:none; font-size:13px; font-weight:600; transition:all 0.2s; }}
-.download-btn:hover {{ transform:translateY(-1px); box-shadow:0 4px 12px rgba(35,134,54,0.4); }}
-.game-buttons {{ display:flex; gap:8px; }}
-.copy-btn {{ background:rgba(255,255,255,.04); color:#c9d1d9; border:1px solid rgba(255,255,255,.06); padding:10px 20px; border-radius:8px; font-size:13px; font-weight:600; cursor:pointer; transition:all 0.2s; }}
-.copy-btn:hover {{ background:rgba(255,255,255,.08); border-color:rgba(0,220,120,.2); }}
-.count {{ color:#8b949e; font-size:14px; margin-bottom:20px; }}
-.footer {{ text-align:center; padding:20px; color:#484f58; font-size:13px; border-top:1px solid rgba(0,220,120,.06); position:fixed; bottom:0; left:0; right:0; background:rgba(5,5,8,.85); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); z-index:50; }}
-.footer a {{ color:#58a6ff; text-decoration:none; }}
-@keyframes pulse {{ 0%,100% {{ opacity:1; }} 50% {{ opacity:0.5; }} }}
-@media (max-width:768px) {{
-    .header {{ padding:12px 16px; flex-wrap:wrap; gap:10px; }}
-    .header-left {{ width:100%; justify-content:space-between; }}
-    .header-right {{ width:100%; justify-content:center; flex-wrap:wrap; }}
-    .search {{ width:100%; }}
-    .container {{ padding:0 12px; margin-top:16px; margin-bottom:60px; }}
-    .game-card-inner {{ flex-direction:column; }}
-    .game-thumb {{ width:100%; height:200px; border-radius:12px 12px 0 0; }}
-    .game-info {{ padding:16px; }}
-    .game-title {{ font-size:16px; }}
-    .game-meta {{ font-size:12px; line-height:1.8; }}
-    .value {{ margin-right:8px; }}
-    .game-buttons {{ flex-direction:column; }}
-    .game-buttons .download-btn, .game-buttons .copy-btn {{ text-align:center; }}
-    .btn {{ padding:8px 14px; font-size:12px; }}
-    .admin-panel {{ padding:12px; }}
-    .admin-header {{ flex-direction:column; gap:10px; }}
-    .admin-tabs {{ flex-wrap:wrap; justify-content:center; }}
-    .ip-item {{ flex-direction:column; align-items:flex-start; gap:4px; }}
-    .ban-form {{ flex-direction:column; }}
-    .logo {{ font-size:20px; }}
-    .roblox-icon {{ width:24px; height:24px; }}
+:root {{
+  --bg:#050507; --bg-elev:rgba(18,21,28,.72); --bg-elev-2:rgba(24,28,36,.6);
+  --line:rgba(255,255,255,.07); --line-soft:rgba(255,255,255,.045);
+  --txt:#e6edf3; --txt-dim:#8b949e; --txt-faint:#5a626d;
+  --accent:#00dc78; --accent-soft:rgba(0,220,120,.12); --accent-line:rgba(0,220,120,.28);
+  --blue:#58a6ff; --radius:14px; --radius-sm:9px;
 }}
-.admin-panel {{ background:rgba(22,27,34,.7); border:1px solid rgba(0,220,120,.08); border-radius:12px; padding:20px; margin-bottom:24px; backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px); }}
-.admin-header {{ display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }}
-.admin-title {{ font-size:18px; font-weight:600; color:#f0f6fc; }}
-.admin-tabs {{ display:flex; gap:8px; }}
-.tab {{ padding:8px 16px; border-radius:6px; border:1px solid rgba(255,255,255,.06); background:rgba(13,17,23,.6); color:#8b949e; cursor:pointer; font-size:13px; font-weight:500; transition:all 0.2s; }}
-.tab.active {{ background:rgba(0,220,120,.15); color:#00dc78; border-color:rgba(0,220,120,.3); }}
-.tab:hover:not(.active) {{ border-color:rgba(0,220,120,.2); }}
+* {{ margin:0; padding:0; box-sizing:border-box; }}
+html {{ scroll-behavior:smooth; }}
+body {{
+  background:var(--bg); color:var(--txt);
+  font-family:'Inter','SF Pro Display',system-ui,-apple-system,sans-serif;
+  min-height:100vh; padding-bottom:70px; position:relative;
+  -webkit-font-smoothing:antialiased; letter-spacing:-0.01em;
+}}
+.bg-grid {{ position:fixed; inset:0; z-index:0; pointer-events:none; opacity:.5;
+  background-image:linear-gradient(rgba(255,255,255,.022) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.022) 1px,transparent 1px);
+  background-size:52px 52px;
+  mask-image:radial-gradient(ellipse 90% 60% at 50% 0%,#000 40%,transparent 100%);
+  -webkit-mask-image:radial-gradient(ellipse 90% 60% at 50% 0%,#000 40%,transparent 100%); }}
+.bg-glow {{ position:fixed; width:720px; height:720px; border-radius:50%; z-index:0; pointer-events:none;
+  background:radial-gradient(circle,rgba(0,220,120,.055),transparent 68%);
+  top:-260px; left:50%; transform:translateX(-50%); animation:pulse 9s ease-in-out infinite alternate; }}
+@keyframes pulse {{ 0%{{opacity:.65;transform:translateX(-50%) scale(1)}} 100%{{opacity:1;transform:translateX(-50%) scale(1.12)}} }}
+
+/* ---- header ---- */
+.header {{ position:sticky; top:0; z-index:100; display:flex; align-items:center; justify-content:space-between; gap:20px;
+  padding:14px 32px; background:rgba(8,9,13,.72); border-bottom:1px solid var(--line);
+  backdrop-filter:blur(18px) saturate(160%); -webkit-backdrop-filter:blur(18px) saturate(160%); }}
+.header-left {{ display:flex; align-items:center; gap:22px; min-width:0; }}
+.header-right {{ display:flex; align-items:center; gap:10px; flex-shrink:0; }}
+.logo {{ font-size:21px; font-weight:700; letter-spacing:-0.6px; display:flex; align-items:center; gap:10px; white-space:nowrap; }}
+.roblox-icon {{ width:28px; height:28px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,.4); }}
+.lua {{ color:var(--blue); }} .is {{ color:var(--txt-faint); font-weight:500; }} .game {{ color:var(--accent); }}
+.search {{ background:rgba(255,255,255,.035); border:1px solid var(--line); color:var(--txt);
+  padding:10px 16px 10px 38px; border-radius:10px; width:300px; font-size:13.5px; outline:none;
+  transition:border-color .18s, box-shadow .18s, background .18s;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='15' height='15' viewBox='0 0 24 24' fill='none' stroke='%238b949e' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m21 21-4.3-4.3'/%3E%3C/svg%3E");
+  background-repeat:no-repeat; background-position:13px center; }}
+.search::placeholder {{ color:var(--txt-faint); }}
+.search:focus {{ border-color:var(--accent-line); background-color:rgba(0,220,120,.05); box-shadow:0 0 0 3px rgba(0,220,120,.08); }}
+
+/* ---- buttons ---- */
+.btn {{ padding:9px 17px; border-radius:var(--radius-sm); border:1px solid transparent; font-size:13px; font-weight:600;
+  cursor:pointer; transition:transform .16s, filter .16s, background .18s, border-color .18s; text-decoration:none;
+  display:inline-flex; align-items:center; gap:7px; line-height:1; white-space:nowrap; }}
+.btn:hover {{ transform:translateY(-1px); }}
+.btn:active {{ transform:translateY(0) scale(.985); }}
+.btn-primary {{ background:var(--accent); color:#04140b; box-shadow:0 2px 14px rgba(0,220,120,.22); }}
+.btn-primary:hover {{ filter:brightness(1.08); }}
+.btn-secondary {{ background:rgba(255,255,255,.04); color:var(--txt); border-color:var(--line); }}
+.btn-secondary:hover {{ background:rgba(255,255,255,.075); border-color:rgba(255,255,255,.14); }}
+.btn-discord {{ background:rgba(88,101,242,.16); color:#c3cbff; border-color:rgba(88,101,242,.32); }}
+.btn-discord:hover {{ background:rgba(88,101,242,.26); border-color:rgba(88,101,242,.5); }}
+.btn-minecraft {{ background:rgba(0,220,120,.1); color:var(--accent); border-color:var(--accent-line); }}
+.btn-minecraft:hover {{ background:rgba(0,220,120,.18); }}
+.btn svg {{ flex-shrink:0; }}
+
+/* ---- layout ---- */
+.container {{ max-width:1160px; margin:0 auto; padding:30px 24px; position:relative; z-index:1; }}
+.count {{ color:var(--txt-dim); font-size:13px; margin-bottom:18px; display:flex; align-items:center; gap:8px; }}
+.count::before {{ content:""; width:7px; height:7px; border-radius:50%; background:var(--accent); box-shadow:0 0 9px var(--accent); }}
+
+/* ---- game cards ---- */
+.game-card {{ display:flex; gap:0; background:var(--bg-elev); border:1px solid var(--line); border-radius:var(--radius);
+  margin-bottom:14px; overflow:hidden; transition:transform .22s, border-color .22s, box-shadow .22s;
+  backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); }}
+.game-card:hover {{ border-color:var(--accent-line); transform:translateY(-3px); box-shadow:0 14px 40px rgba(0,0,0,.45); }}
+.game-card-inner {{ display:flex; gap:0; width:100%; }}
+.game-thumb {{ width:148px; height:148px; object-fit:cover; flex-shrink:0; background:#0d1117; }}
+.game-info {{ padding:18px 22px; flex:1; display:flex; flex-direction:column; justify-content:center; min-width:0; }}
+.game-title {{ font-size:19px; font-weight:650; color:#f0f6fc; margin-bottom:12px; text-decoration:none;
+  display:inline-block; transition:color .18s; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }}
+.game-title:hover {{ color:var(--accent); }}
+.game-meta {{ font-size:12.5px; color:var(--txt-dim); margin-bottom:16px; line-height:1.9; }}
+.label {{ color:var(--accent); font-weight:500; }}
+.value {{ color:var(--txt); margin-right:16px; }}
+.game-buttons {{ display:flex; gap:9px; }}
+.download-btn {{ display:inline-flex; align-items:center; gap:7px; background:linear-gradient(135deg,#238636,#2ea043); color:#fff;
+  padding:9px 18px; border-radius:var(--radius-sm); text-decoration:none; font-size:13px; font-weight:600;
+  transition:transform .16s, box-shadow .2s; box-shadow:0 2px 12px rgba(35,134,54,.28); }}
+.download-btn:hover {{ transform:translateY(-1px); box-shadow:0 6px 20px rgba(35,134,54,.42); }}
+.copy-btn {{ background:rgba(255,255,255,.04); color:var(--txt); border:1px solid var(--line); padding:9px 18px;
+  border-radius:var(--radius-sm); font-size:13px; font-weight:600; cursor:pointer; transition:all .16s; }}
+.copy-btn:hover {{ background:rgba(255,255,255,.075); border-color:var(--accent-line); color:var(--accent); }}
+
+/* ---- footer ---- */
+.footer {{ text-align:center; padding:22px; color:var(--txt-faint); font-size:12.5px; border-top:1px solid var(--line-soft);
+  position:fixed; bottom:0; left:0; right:0; background:rgba(5,5,7,.82); backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px); z-index:50; }}
+.footer a {{ color:var(--blue); text-decoration:none; }}
+.footer a:hover {{ text-decoration:underline; }}
+
+/* ---- admin console ---- */
+.admin-panel {{ background:var(--bg-elev); border:1px solid var(--line); border-radius:var(--radius); padding:20px;
+  margin-bottom:24px; backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px); }}
+.admin-header {{ display:flex; align-items:center; justify-content:space-between; gap:14px; margin-bottom:16px; flex-wrap:wrap; }}
+.admin-title {{ font-size:16px; font-weight:650; color:#f0f6fc; display:flex; align-items:center; gap:8px; }}
+.admin-title::before {{ content:""; width:8px; height:8px; border-radius:50%; background:#f85149; box-shadow:0 0 8px #f85149; }}
+.admin-tabs {{ display:flex; gap:7px; flex-wrap:wrap; }}
+.tab {{ padding:7px 14px; border-radius:8px; border:1px solid var(--line); background:rgba(255,255,255,.02);
+  color:var(--txt-dim); cursor:pointer; font-size:12.5px; font-weight:500; transition:all .16s; }}
+.tab.active {{ background:var(--accent-soft); color:var(--accent); border-color:var(--accent-line); }}
+.tab:hover:not(.active) {{ border-color:rgba(255,255,255,.16); color:var(--txt); }}
 .tab-content.hidden {{ display:none; }}
-.admin-section h3 {{ font-size:14px; color:#8b949e; margin-bottom:12px; font-weight:500; }}
+.admin-section h3 {{ font-size:13px; color:var(--txt-dim); margin-bottom:12px; font-weight:500; text-transform:uppercase; letter-spacing:.5px; }}
 .ip-list {{ max-height:300px; overflow-y:auto; }}
-.ip-item {{ display:flex; justify-content:space-between; align-items:center; padding:10px 14px; background:rgba(13,17,23,.6); border:1px solid rgba(255,255,255,.04); border-radius:8px; margin-bottom:8px; font-size:13px; }}
-.ip-item .ip {{ color:#00dc78; font-family:monospace; }}
-.ip-item .meta {{ color:#484f58; font-size:12px; }}
-.console-log {{ background:rgba(13,17,23,.6); border:1px solid rgba(255,255,255,.04); border-radius:8px; padding:12px; max-height:400px; overflow-y:auto; font-family:'Cascadia Code','Fira Code',monospace; font-size:12px; line-height:1.6; color:#8b949e; white-space:pre-wrap; word-break:break-all; }}
+.ip-item {{ display:flex; justify-content:space-between; align-items:center; padding:10px 14px; background:rgba(255,255,255,.02);
+  border:1px solid var(--line-soft); border-radius:var(--radius-sm); margin-bottom:7px; font-size:13px; }}
+.ip-item .ip {{ color:var(--accent); font-family:ui-monospace,monospace; }}
+.ip-item .meta {{ color:var(--txt-faint); font-size:12px; }}
+.console-log {{ background:rgba(255,255,255,.02); border:1px solid var(--line-soft); border-radius:var(--radius-sm); padding:12px;
+  max-height:400px; overflow-y:auto; font-family:ui-monospace,'Cascadia Code','Fira Code',monospace; font-size:12px;
+  line-height:1.6; color:var(--txt-dim); white-space:pre-wrap; word-break:break-all; }}
 .ban-form {{ display:flex; gap:8px; margin-top:12px; }}
-.ban-form input {{ background:rgba(13,17,23,.6); border:1px solid rgba(255,255,255,.06); color:#c9d1d9; padding:8px 12px; border-radius:6px; font-size:13px; outline:none; flex:1; }}
-.ban-form input:focus {{ border-color:rgba(0,220,120,.3); }}
-.btn-ban {{ background:#da3633; color:#fff; padding:8px 16px; border:none; border-radius:6px; cursor:pointer; font-weight:500; font-size:13px; }}
-.btn-ban:hover {{ background:#f85149; }}
-.btn-unban {{ background:#238636; color:#fff; padding:8px 16px; border:none; border-radius:6px; cursor:pointer; font-weight:500; font-size:13px; }}
-.btn-unban:hover {{ background:#2ea043; }}
-.login-overlay {{ position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.8); display:none; align-items:center; justify-content:center; z-index:1000; }}
+.ban-form input {{ background:rgba(255,255,255,.03); border:1px solid var(--line); color:var(--txt); padding:9px 13px;
+  border-radius:var(--radius-sm); font-size:13px; outline:none; flex:1; transition:border-color .16s; }}
+.ban-form input:focus {{ border-color:var(--accent-line); }}
+.btn-ban {{ background:rgba(218,54,51,.16); color:#ff8b88; padding:9px 16px; border:1px solid rgba(218,54,51,.34);
+  border-radius:var(--radius-sm); cursor:pointer; font-weight:600; font-size:13px; transition:all .16s; }}
+.btn-ban:hover {{ background:rgba(218,54,51,.26); }}
+.btn-unban {{ background:rgba(35,134,54,.16); color:#7ee2a8; padding:9px 16px; border:1px solid rgba(35,134,54,.34);
+  border-radius:var(--radius-sm); cursor:pointer; font-weight:600; font-size:13px; transition:all .16s; }}
+.btn-unban:hover {{ background:rgba(35,134,54,.26); }}
+
+.login-overlay {{ position:fixed; inset:0; background:rgba(0,0,0,.8); display:none; align-items:center; justify-content:center; z-index:1000; }}
 .login-overlay.active {{ display:flex; }}
-.login-box {{ background:rgba(22,27,34,.9); border:1px solid rgba(0,220,120,.15); border-radius:12px; padding:32px; width:360px; text-align:center; backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px); }}
+.login-box {{ background:var(--bg-elev); border:1px solid var(--accent-line); border-radius:var(--radius); padding:32px;
+  width:360px; text-align:center; backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px); }}
 .login-box h2 {{ color:#f0f6fc; margin-bottom:20px; font-size:20px; }}
-.login-box input {{ width:100%; background:rgba(13,17,23,.6); border:1px solid rgba(255,255,255,.06); color:#c9d1d9; padding:12px 16px; border-radius:8px; font-size:14px; outline:none; margin-bottom:16px; }}
-.login-box input:focus {{ border-color:rgba(0,220,120,.3); }}
+.login-box input {{ width:100%; background:rgba(255,255,255,.03); border:1px solid var(--line); color:var(--txt);
+  padding:12px 16px; border-radius:var(--radius-sm); font-size:14px; outline:none; margin-bottom:16px; }}
+.login-box input:focus {{ border-color:var(--accent-line); }}
 .login-box .btn {{ width:100%; justify-content:center; }}
+
+@media (max-width:768px) {{
+  .header {{ padding:12px 16px; flex-wrap:wrap; gap:12px; }}
+  .header-left {{ width:100%; justify-content:space-between; gap:12px; }}
+  .header-right {{ width:100%; justify-content:center; flex-wrap:wrap; }}
+  .search {{ width:100%; }}
+  .container {{ padding:20px 14px; margin-bottom:70px; }}
+  .game-card-inner {{ flex-direction:column; }}
+  .game-thumb {{ width:100%; height:180px; }}
+  .game-info {{ padding:16px; }}
+  .game-title {{ font-size:16px; }}
+  .game-meta {{ font-size:12px; line-height:1.8; }}
+  .value {{ margin-right:8px; }}
+  .game-buttons {{ flex-direction:column; }}
+  .game-buttons .download-btn, .game-buttons .copy-btn {{ text-align:center; justify-content:center; }}
+  .btn {{ padding:8px 14px; font-size:12px; }}
+  .admin-panel {{ padding:14px; }}
+  .admin-header {{ flex-direction:column; gap:10px; }}
+  .admin-tabs {{ justify-content:center; }}
+  .ip-item {{ flex-direction:column; align-items:flex-start; gap:4px; }}
+  .ban-form {{ flex-direction:column; }}
+  .logo {{ font-size:18px; }}
+  .roblox-icon {{ width:24px; height:24px; }}
+}}
 </style>
 </head>
 <body>
@@ -1582,7 +1682,7 @@ body {{ background:#050508; color:#c9d1d9; font-family:'Inter','SF Pro Display',
     <div class="header-right">
         <a class="btn btn-primary" href="https://discord.com/api/oauth2/authorize?client_id=1532820804402806844&permissions=8&scope=bot%20applications.commands" target="_blank">Add Bot</a>
         {"<button class='btn btn-secondary' data-action='toggle-console'>Console</button>" if admin else ""}
-        {"<a class='btn btn-minecraft' href='/mc'><svg width='16' height='16' viewBox='0 0 24 24' fill='none' aria-hidden='true'><path d='M4 4h6v6H4V4Zm10 0h6v6h-6V4ZM4 14h6v6H4v-6Zm10 0h6v6h-6v-6ZM10 7h4v3h-4V7Zm0 7h4v3h-4v-3Z' fill='currentColor'/></svg> MC Console</a>" if mc_authorized else ""}
+        {"<a class='btn btn-minecraft' href='" + MC_SITE_URL + "' target='_blank' rel='noopener'><svg width='16' height='16' viewBox='0 0 24 24' fill='none' aria-hidden='true'><path d='M4 4h6v6H4V4Zm10 0h6v6h-6V4ZM4 14h6v6H4v-6Zm10 0h6v6h-6v-6ZM10 7h4v3h-4V7Zm0 7h4v3h-4v-3Z' fill='currentColor'/></svg> MC Console</a>" if mc_authorized else ""}
         {"<a class='btn btn-discord' href='/api/auth/login'><svg width='18' height='14' viewBox='0 0 71 55' fill='none' xmlns='http://www.w3.org/2000/svg'><path d='M60.1 4.9A58.5 58.5 0 0 0 45.4.2a.2.2 0 0 0-.2.1 40.8 40.8 0 0 0-1.8 3.7 54 54 0 0 0-16.2 0 26.5 26.5 0 0 0-1.8-3.7.2.2 0 0 0-.2-.1A58.4 58.4 0 0 0 10.9 4.9a.2.2 0 0 0-.1.1C1.6 18.4-.5 31.7.5 44.8a.2.2 0 0 0 .1.1 58.7 58.7 0 0 0 17.7 9 .2.2 0 0 0 .2-.1 42 42 0 0 0 3.6-5.9.2.2 0 0 0-.1-.3 38.7 38.7 0 0 1-5.5-2.6.2.2 0 0 1 0-.4c.4-.3.7-.6 1.1-.9a.2.2 0 0 1 .2 0c11.5 5.3 24 5.3 35.4 0a.2.2 0 0 1 .2 0l1.1.9a.2.2 0 0 1 0 .4c-1.8 1-3.6 1.9-5.6 2.6a.2.2 0 0 0-.1.3 47.2 47.2 0 0 0 3.7 5.9.2.2 0 0 0 .2.1 58.5 58.5 0 0 0 17.7-9 .2.2 0 0 0 .1-.1c1.2-15-2-28.3-8.5-39.8a.2.2 0 0 0-.1-.1ZM23.7 36.3c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1 6.5 3.2 6.4 7.1-2.8 7.1-6.4 7.1Zm23.6 0c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1 6.5 3.2 6.4 7.1-2.8 7.1-6.4 7.1Z' fill='white'/></svg> " + user_info["username"] + "</a>" if user_info else "<a class='btn btn-discord' href='/api/auth/login'><svg width='18' height='14' viewBox='0 0 71 55' fill='none' xmlns='http://www.w3.org/2000/svg'><path d='M60.1 4.9A58.5 58.5 0 0 0 45.4.2a.2.2 0 0 0-.2.1 40.8 40.8 0 0 0-1.8 3.7 54 54 0 0 0-16.2 0 26.5 26.5 0 0 0-1.8-3.7.2.2 0 0 0-.2-.1A58.4 58.4 0 0 0 10.9 4.9a.2.2 0 0 0-.1.1C1.6 18.4-.5 31.7.5 44.8a.2.2 0 0 0 .1.1 58.7 58.7 0 0 0 17.7 9 .2.2 0 0 0 .2-.1 42 42 0 0 0 3.6-5.9.2.2 0 0 0-.1-.3 38.7 38.7 0 0 1-5.5-2.6.2.2 0 0 1 0-.4c.4-.3.7-.6 1.1-.9a.2.2 0 0 1 .2 0c11.5 5.3 24 5.3 35.4 0a.2.2 0 0 1 .2 0l1.1.9a.2.2 0 0 1 0 .4c-1.8 1-3.6 1.9-5.6 2.6a.2.2 0 0 0-.1.3 47.2 47.2 0 0 0 3.7 5.9.2.2 0 0 0 .2.1 58.5 58.5 0 0 0 17.7-9 .2.2 0 0 0 .1-.1c1.2-15-2-28.3-8.5-39.8a.2.2 0 0 0-.1-.1ZM23.7 36.3c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1 6.5 3.2 6.4 7.1-2.8 7.1-6.4 7.1Zm23.6 0c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1 6.5 3.2 6.4 7.1-2.8 7.1-6.4 7.1Z' fill='white'/></svg> Login with Discord</a>"}
     </div>
 </div>
@@ -3626,6 +3726,224 @@ button:disabled{opacity:.5;cursor:not-allowed}
   .ban-row-info{min-width:calc(100% - 60px)}
   .ban-row .mc-action-btn{margin-left:auto}
 }
+
+/* ============================================================
+   REDESIGN OVERRIDES — cleaner, modern dark UI
+   ============================================================ */
+:root{
+  --mc-bg:#050507; --mc-panel:rgba(16,18,25,.82); --mc-panel-2:rgba(22,25,33,.7);
+  --mc-line:rgba(255,255,255,.07); --mc-line-soft:rgba(255,255,255,.045);
+  --mc-txt:#e6edf3; --mc-dim:#8b949e; --mc-faint:#5a626d;
+  --mc-accent:#00dc78; --mc-accent-soft:rgba(0,220,120,.12); --mc-accent-line:rgba(0,220,120,.28);
+  --mc-blue:#5865f2; --mc-r:14px; --mc-rs:9px;
+  --mc-font:'Inter','SF Pro Display',system-ui,-apple-system,sans-serif;
+}
+body{background:var(--mc-bg);color:var(--mc-txt);font-family:var(--mc-font);letter-spacing:-.01em;-webkit-font-smoothing:antialiased}
+.bg-grid{opacity:.45;background-size:52px 52px;
+  background-image:linear-gradient(rgba(255,255,255,.02) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.02) 1px,transparent 1px);
+  mask-image:radial-gradient(ellipse 80% 60% at 50% 0%,#000 40%,transparent 100%);
+  -webkit-mask-image:radial-gradient(ellipse 80% 60% at 50% 0%,#000 40%,transparent 100%)}
+.bg-glow{width:680px;height:680px;top:-260px;left:50%;transform:translateX(-50%);
+  background:radial-gradient(circle,rgba(0,220,120,.05),transparent 68%);animation:pulse 9s ease-in-out infinite alternate}
+@keyframes pulse{0%{opacity:.6;transform:translateX(-50%) scale(1)}100%{opacity:1;transform:translateX(-50%) scale(1.1)}}
+
+/* topbar */
+.topbar{padding:12px 22px;background:rgba(8,9,13,.72);border-bottom:1px solid var(--mc-line);
+  backdrop-filter:blur(18px) saturate(160%);-webkit-backdrop-filter:blur(18px) saturate(160%)}
+.topbar .logo{font-size:18px;font-weight:700;color:#fff;display:flex;align-items:center;gap:9px;letter-spacing:-.4px}
+.topbar .logo::before{content:"";width:9px;height:9px;border-radius:3px;background:var(--mc-accent);box-shadow:0 0 12px var(--mc-accent)}
+.topbar .user{gap:11px;font-size:13px;color:var(--mc-dim)}
+.topbar .user img{width:30px;height:30px;border-radius:50%;border:1.5px solid var(--mc-accent-line)}
+.topbar .user .name{color:#fff;font-weight:600}
+.topbar .nav-link{padding:7px 13px;border-radius:8px;border:1px solid var(--mc-line);color:var(--mc-dim);
+  text-decoration:none;font-size:12px;font-weight:600;transition:all .16s}
+.topbar .nav-link:hover{background:rgba(255,255,255,.05);color:#fff;border-color:rgba(255,255,255,.16)}
+
+/* sidebar */
+.sidebar{width:236px;background:rgba(10,11,16,.78);border-right:1px solid var(--mc-line);
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+.sidebar .title{padding:16px 16px 10px;font-size:10.5px;text-transform:uppercase;letter-spacing:1.6px;color:var(--mc-faint);font-weight:700}
+.server-list{flex:1;overflow-y:auto;padding:0 10px 10px}
+.server-item{padding:10px 12px;border-radius:11px;margin-bottom:4px;border:1px solid transparent;gap:0}
+.server-item:hover{background:rgba(255,255,255,.035);border-color:var(--mc-line-soft)}
+.server-item.active{background:var(--mc-accent-soft);border-color:var(--mc-accent-line)}
+.server-item .name{font-size:13px;font-weight:550;color:rgba(255,255,255,.82)}
+.server-item .server-icon{width:34px;height:34px;border-radius:9px;margin-right:10px}
+.server-item.active .name{color:#fff}
+.loader-tag{font-size:9.5px;padding:2px 6px;border-radius:5px;background:rgba(255,255,255,.05);color:var(--mc-faint);
+  text-transform:uppercase;letter-spacing:.6px;font-weight:600;margin-left:auto;margin-right:7px}
+.server-item.active .loader-tag{color:var(--mc-dim)}
+.server-item .dot.on{background:#22c55e;box-shadow:0 0 8px rgba(34,197,94,.6)}
+.server-item .dot.off{background:rgba(255,255,255,.14)}
+
+.sidebar-bottom{padding:10px;border-top:1px solid var(--mc-line-soft)}
+.sidebar-bottom input,.sidebar-bottom select{width:100%;padding:9px 11px;border-radius:9px;border:1px solid var(--mc-line);
+  background:rgba(255,255,255,.03);color:#fff;font-size:12px;font-family:inherit;outline:none;margin-bottom:7px;transition:border-color .16s}
+.sidebar-bottom input:focus,.sidebar-bottom select:focus{border-color:var(--mc-accent-line)}
+.sidebar-bottom input::placeholder{color:var(--mc-faint)}
+.sidebar-bottom select option{background:#0d0d14;color:#fff}
+.sidebar-bottom button{width:100%;padding:9px;border-radius:9px;border:1px solid var(--mc-accent-line);background:var(--mc-accent-soft);
+  color:var(--mc-accent);font-size:12px;font-family:inherit;font-weight:600;transition:all .16s}
+.sidebar-bottom button:hover{background:rgba(0,220,120,.16);color:#00ff8a}
+
+/* console header toolbar */
+.console-header{padding:12px 20px;background:rgba(10,11,16,.72);border-bottom:1px solid var(--mc-line);
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);gap:12px;flex-wrap:wrap}
+.console-header .server-name{font-size:16px;font-weight:650;color:#fff;display:flex;align-items:center;gap:9px}
+.console-header .server-name::before{content:"";width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 8px rgba(34,197,94,.6)}
+.console-header .actions{display:flex;gap:7px;flex-wrap:wrap}
+.console-header .actions button{padding:7px 13px;border-radius:8px;border:1px solid var(--mc-line);background:rgba(255,255,255,.02);
+  color:var(--mc-dim);font-size:12px;font-weight:550;transition:all .16s}
+.console-header .actions button:hover{background:rgba(255,255,255,.06);color:#fff;border-color:rgba(255,255,255,.16)}
+.console-header .actions .start{border-color:rgba(34,197,94,.3);color:#4ade80;background:rgba(34,197,94,.07)}
+.console-header .actions .start:hover{background:rgba(34,197,94,.16);border-color:rgba(34,197,94,.5);color:#86efac}
+.console-header .actions .stop{border-color:rgba(239,68,68,.3);color:#f87171;background:rgba(239,68,68,.07)}
+.console-header .actions .stop:hover{background:rgba(239,68,68,.16);border-color:rgba(239,68,68,.5);color:#fca5a5}
+.console-header .actions .props{border-color:var(--mc-accent-line);color:var(--mc-accent);background:var(--mc-accent-soft)}
+.console-header .actions .props:hover{background:rgba(0,220,120,.16);color:#00ff8a}
+.console-header .actions .version{border-color:rgba(168,85,247,.3);color:#c084fc}
+.console-header .actions .version:hover{background:rgba(168,85,247,.12);color:#d8b4fe}
+.console-header .actions .people{border-color:rgba(45,212,191,.3);color:#5eead4}
+.console-header .actions .people:hover{background:rgba(45,212,191,.12);color:#99f6e4}
+.console-header .actions .access{border-color:rgba(251,191,36,.3);color:#fbbf24}
+.console-header .actions .access:hover{background:rgba(251,191,36,.12);color:#fde68a}
+.console-header .actions .delete{border-color:rgba(239,68,68,.28);color:#f87171}
+.console-header .actions .delete:hover{background:rgba(239,68,68,.14);color:#fca5a5}
+.console-header .actions .backup{border-color:rgba(96,165,250,.3);color:#93c5fd}
+.console-header .actions .backup:hover{background:rgba(96,165,250,.12);color:#bfdbfe}
+.console-header .actions .icon-upload{border-color:rgba(88,101,242,.3);color:#8b9cf7}
+.console-header .actions .icon-upload:hover{background:rgba(88,101,242,.12);color:#b7c0ff}
+.console-header .actions .mods{border-color:rgba(88,101,242,.28);color:#7d85f0}
+.console-header .actions .mods:hover,.console-header .actions .mods.active{background:rgba(88,101,242,.14);border-color:rgba(88,101,242,.5)}
+.console-header .actions .live{border-color:rgba(236,72,153,.32);color:#f472b6;background:rgba(236,72,153,.07);display:inline-flex;align-items:center;gap:7px}
+.console-header .actions .live:hover{background:rgba(236,72,153,.16);border-color:rgba(236,72,153,.5);color:#f9a8d4}
+.console-header .actions .live .live-dot{width:7px;height:7px;border-radius:50%;background:#ec4899;box-shadow:0 0 8px #ec4899;animation:blink 1.4s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* mods panel */
+.mods-panel{background:rgba(10,11,16,.9);border-bottom:1px solid rgba(88,101,242,.1);padding:14px 20px;max-height:220px;
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+.mods-panel .mods-title{font-size:11px;color:var(--mc-faint);text-transform:uppercase;letter-spacing:1.1px;margin-bottom:10px}
+.mods-panel .mods-title label{padding:5px 11px;border-radius:7px;border:1px solid rgba(88,101,242,.3);background:rgba(88,101,242,.06);
+  color:#7d85f0;font-size:11px;font-weight:600;text-transform:none;letter-spacing:0;transition:all .16s}
+.mods-panel .mods-title label:hover{background:rgba(88,101,242,.14);border-color:rgba(88,101,242,.5)}
+.mods-panel .mod-item{padding:8px 11px;border-radius:8px;margin-bottom:3px;border:1px solid transparent;transition:all .15s}
+.mods-panel .mod-item:hover{background:rgba(255,255,255,.03);border-color:var(--mc-line-soft)}
+.mods-panel .mod-item .mod-name{font-size:12.5px;color:rgba(255,255,255,.78)}
+.mods-panel .mod-item .mod-size{font-size:11px;color:var(--mc-faint);margin-left:9px}
+.mods-panel .mod-item .mod-del{padding:3px 9px;border-radius:6px;border:1px solid rgba(239,68,68,.24);background:transparent;
+  color:rgba(239,68,68,.6);font-size:10.5px;font-weight:600;transition:all .16s}
+.mods-panel .mod-item .mod-del:hover{background:rgba(239,68,68,.14);color:#f87171;border-color:rgba(239,68,68,.5)}
+.mods-panel .no-mods{font-size:12px;color:var(--mc-faint);padding:8px 0}
+
+/* console output + input */
+.console-output{padding:14px 20px;font-size:12.5px;line-height:1.75;color:rgba(255,255,255,.66);
+  font-family:ui-monospace,'Cascadia Code','Consolas',monospace;background:rgba(5,5,8,.4)}
+.console-output .ts{color:rgba(0,220,120,.4);margin-right:7px}
+.console-output .err{color:rgba(239,68,68,.75)}
+.console-input-wrap{padding:12px 20px;background:rgba(10,11,16,.78);border-top:1px solid var(--mc-line);
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+.console-input-wrap .prompt{color:var(--mc-accent);font-weight:700;margin-right:9px;font-size:13px}
+.console-input-wrap input{flex:1;background:transparent;border:none;color:#fff;font-size:13px;
+  font-family:ui-monospace,'Cascadia Code','Consolas',monospace;outline:none}
+.console-input-wrap input::placeholder{color:var(--mc-faint)}
+.no-servers{color:var(--mc-faint);font-size:14px}
+
+/* scrollbars */
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:4px}
+::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.14)}
+
+/* icon crop modal */
+.icon-crop-card{background:#0c0e14;border:1px solid var(--mc-accent-line);border-radius:16px;padding:22px;box-shadow:0 24px 90px rgba(0,0,0,.65)}
+.icon-crop-card h2{font-size:17px;color:#fff;margin-bottom:6px;font-weight:650}
+.icon-crop-card p{font-size:12.5px;color:var(--mc-dim);margin-bottom:16px}
+.icon-crop-stage{background:#050508;border-radius:12px}
+.icon-crop-actions button{padding:9px 16px;border-radius:9px;border:1px solid var(--mc-line);background:rgba(255,255,255,.04);color:var(--mc-txt);font-weight:600}
+.icon-crop-actions .apply{background:var(--mc-accent);color:#04140b;border-color:var(--mc-accent)}
+
+/* inventory + players + bans */
+.inventory-section h3{color:var(--mc-accent);font-size:12px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:9px}
+.inventory-grid,.inventory-row{background:rgba(255,255,255,.02);border:1px solid var(--mc-line);border-radius:12px}
+.inventory-slot{border:1px solid var(--mc-line);border-radius:8px;background:rgba(13,17,23,.9)}
+.inventory-slot:hover{border-color:var(--mc-accent);background:rgba(0,220,120,.08)}
+.mc-action-btn{border-radius:9px;border:1px solid var(--mc-line);background:rgba(255,255,255,.04);font-weight:600}
+.player-live-status{border:1px solid var(--mc-line);background:rgba(255,255,255,.02);border-radius:9px;color:var(--mc-dim)}
+.player-live-status.is-live{border-color:rgba(34,197,94,.24);background:rgba(34,197,94,.06);color:#86efac}
+.ban-section h3{color:var(--mc-txt);font-size:14px;font-weight:600}
+.ban-section h3 span{background:rgba(255,255,255,.06);color:var(--mc-dim)}
+.ban-row{border:1px solid var(--mc-line);border-radius:12px;background:rgba(255,255,255,.025)}
+.ban-row:hover{border-color:rgba(248,113,113,.22);background:rgba(255,255,255,.045)}
+.ban-row-info strong{color:#f4f4f5}
+.ban-empty{border:1px dashed var(--mc-line);border-radius:11px;color:var(--mc-faint)}
+
+/* full-screen overlay panels (props/people) */
+#propsPanel,#peoplePanel{background:rgba(5,5,8,.96);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);padding:32px}
+
+/* ---- TOASTS ---- */
+#toastWrap{position:fixed;top:16px;right:16px;z-index:500;display:flex;flex-direction:column;gap:9px;pointer-events:none}
+.toast{background:rgba(18,21,28,.96);border:1px solid var(--mc-line);border-left:3px solid var(--mc-accent);color:var(--mc-txt);
+  padding:11px 16px;border-radius:10px;font-size:13px;font-weight:500;box-shadow:0 12px 40px rgba(0,0,0,.5);
+  animation:toastIn .22s ease;max-width:340px;backdrop-filter:blur(12px)}
+.toast.error{border-left-color:#f85149}
+.toast.warn{border-left-color:#fbbf24}
+@keyframes toastIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none}}
+
+/* ---- CONFIRM MODAL ---- */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:400;padding:20px;
+  backdrop-filter:blur(4px)}
+.modal-overlay.open{display:flex}
+.modal-card{background:#0c0e14;border:1px solid var(--mc-line);border-radius:16px;padding:26px;width:min(400px,100%);
+  box-shadow:0 24px 90px rgba(0,0,0,.7)}
+.modal-card h3{color:#fff;font-size:17px;font-weight:650;margin-bottom:10px}
+.modal-card p{color:var(--mc-dim);font-size:13.5px;line-height:1.6;margin-bottom:20px}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end}
+.modal-actions button{padding:9px 18px;border-radius:9px;border:1px solid var(--mc-line);background:rgba(255,255,255,.04);
+  color:var(--mc-txt);font-weight:600;font-size:13px}
+.modal-actions .confirm-danger{background:rgba(239,68,68,.16);border-color:rgba(239,68,68,.4);color:#fca5a5}
+.modal-actions .confirm-danger:hover{background:rgba(239,68,68,.28)}
+.modal-actions .confirm-ok{background:var(--mc-accent);border-color:var(--mc-accent);color:#04140b}
+.modal-actions .confirm-ok:hover{filter:brightness(1.08)}
+
+/* ============================================================
+   SCREENSHARE — live PC view
+   ============================================================ */
+.ss-pip{position:fixed;right:18px;bottom:18px;width:224px;z-index:250;border-radius:14px;overflow:hidden;
+  border:1px solid var(--mc-line);background:#0a0b10;box-shadow:0 18px 60px rgba(0,0,0,.6);cursor:pointer;
+  transition:transform .2s,border-color .2s,box-shadow .2s;display:none}
+.ss-pip:hover{transform:translateY(-3px) scale(1.02);border-color:rgba(236,72,153,.5);box-shadow:0 22px 70px rgba(236,72,153,.25)}
+.ss-pip img{width:100%;height:126px;object-fit:cover;display:block;background:#050508}
+.ss-pip .ss-pip-bar{display:flex;align-items:center;justify-content:space-between;padding:7px 10px;
+  background:rgba(10,11,16,.95);border-top:1px solid var(--mc-line)}
+.ss-pip .ss-pip-title{font-size:11px;font-weight:650;color:var(--mc-txt);display:flex;align-items:center;gap:6px}
+.ss-pip .ss-pip-title .d{width:6px;height:6px;border-radius:50%;background:#ec4899;box-shadow:0 0 7px #ec4899}
+.ss-pip .ss-pip-open{font-size:10.5px;color:var(--mc-faint);font-weight:600}
+
+.ss-overlay{position:fixed;inset:0;z-index:450;background:rgba(3,3,6,.9);display:none;flex-direction:column;
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+.ss-overlay.open{display:flex}
+.ss-bar{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 18px;
+  background:rgba(10,11,16,.9);border-bottom:1px solid var(--mc-line);flex-shrink:0;flex-wrap:wrap}
+.ss-bar .ss-title{font-size:14px;font-weight:650;color:#fff;display:flex;align-items:center;gap:9px}
+.ss-bar .ss-title .d{width:8px;height:8px;border-radius:50%;background:#ec4899;box-shadow:0 0 9px #ec4899;animation:blink 1.4s infinite}
+.ss-bar .ss-meta{font-size:12px;color:var(--mc-dim);display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.ss-bar .ss-ctrl{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.ss-select{padding:7px 11px;border-radius:8px;border:1px solid var(--mc-line);background:rgba(255,255,255,.03);
+  color:var(--mc-txt);font-size:12px;font-family:inherit;font-weight:600;outline:none;cursor:pointer}
+.ss-select option{background:#0c0e14}
+.ss-btn{padding:7px 14px;border-radius:8px;border:1px solid var(--mc-line);background:rgba(255,255,255,.03);
+  color:var(--mc-dim);font-size:12px;font-weight:600;cursor:pointer;transition:all .16s;font-family:inherit}
+.ss-btn:hover{background:rgba(255,255,255,.07);color:#fff;border-color:rgba(255,255,255,.16)}
+.ss-btn.control-on{background:rgba(236,72,153,.16);border-color:rgba(236,72,153,.5);color:#f9a8d4}
+.ss-btn.exit:hover{background:rgba(239,68,68,.14);color:#fca5a5;border-color:rgba(239,68,68,.4)}
+.ss-stage{flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;padding:16px;position:relative}
+.ss-stage canvas{max-width:100%;max-height:100%;background:#000;border-radius:10px;border:1px solid var(--mc-line);
+  box-shadow:0 20px 80px rgba(0,0,0,.6);display:block}
+.ss-stage canvas.control-live{cursor:crosshair;border-color:rgba(236,72,153,.5)}
+.ss-hint{position:absolute;bottom:24px;left:50%;transform:translateX(-50%);font-size:12px;color:var(--mc-faint);
+  background:rgba(10,11,16,.85);padding:7px 15px;border-radius:20px;border:1px solid var(--mc-line);pointer-events:none}
+.ss-offline{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--mc-faint);font-size:14px;text-align:center;padding:20px}
 </style>
 </head>
 <body>
@@ -3633,6 +3951,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
 <div class="bg-glow"></div>
 <div class="topbar">
   <div class="logo"><span class="lua">MC</span> Console</div>
+  <a class="nav-link" href="https://storage.luaisgame.com/" target="_blank" rel="noopener">&#8592; Storage</a>
   <div class="user" id="userInfo"></div>
 </div>
 <div class="main">
@@ -3737,8 +4056,9 @@ function selectServer(name){
       document.getElementById('cmdInput').focus();
       return;
     }
-     wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button><button class="props" onclick="openProps()">Properties</button><button class="people" onclick="openPeople()">People</button><button class="backup" onclick="createBackup()">Backup</button><button class="version" onclick="changeServerVersion()">Version</button><button class="icon-upload" onclick="document.getElementById(\'serverIconInput\').click()">Icon</button><button class="delete" onclick="deleteServer()">Delete</button><button id="accessBtn" class="access" onclick="openPeople()">Access</button><input id="serverIconInput" type="file" accept="image/*" style="display:none" onchange="openIconCrop(this)"></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
+     wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="live" id="ssBtn" onclick="openSS()"><span class="live-dot"></span>Screenshare</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button><button class="props" onclick="openProps()">Properties</button><button class="people" onclick="openPeople()">People</button><button class="backup" onclick="createBackup()">Backup</button><button class="version" onclick="changeServerVersion()">Version</button><button class="icon-upload" onclick="document.getElementById(\'serverIconInput\').click()">Icon</button><button class="delete" onclick="deleteServer()">Delete</button><button id="accessBtn" class="access" onclick="openPeople()">Access</button><input id="serverIconInput" type="file" accept="image/*" style="display:none" onchange="openIconCrop(this)"></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
      var accessBtn=document.getElementById('accessBtn');if(accessBtn&&!userInfo.mc_admin)accessBtn.style.display='none';
+     var ssBtn=document.getElementById('ssBtn');if(ssBtn&&(!userInfo||!userInfo.mc_admin))ssBtn.style.display='none';else if(ssBtn)ssStartIdle();
     out=document.getElementById('consoleOutput');
     out.dataset.server=name;
     out.addEventListener('scroll',function(){
@@ -4169,11 +4489,241 @@ function saveProps(){
 <div id="peoplePanel" style="display:none;position:fixed;inset:0;width:auto;height:auto;flex-direction:column;background:rgba(5,5,8,.98);z-index:200;overflow-y:auto;padding:28px;backdrop-filter:blur(12px)">
   <div id="peopleContent" style="max-width:900px;width:100%;margin:0 auto"></div>
 </div>
+
+<div id="toastWrap"></div>
+
+<div class="modal-overlay" id="confirmModal">
+  <div class="modal-card">
+    <h3 id="confirmTitle">Are you sure?</h3>
+    <p id="confirmText"></p>
+    <div class="modal-actions">
+      <button onclick="confirmResolve(false)">Cancel</button>
+      <button class="confirm-danger" id="confirmOkBtn" onclick="confirmResolve(true)">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<div class="ss-pip" id="ssPip" onclick="openSS()" title="Open live view">
+  <img id="ssPipImg" alt="PC screen">
+  <div class="ss-pip-bar">
+    <span class="ss-pip-title"><span class="d"></span>PC Live</span>
+    <span class="ss-pip-open">Click to open</span>
+  </div>
+</div>
+
+<div class="ss-overlay" id="ssOverlay">
+  <div class="ss-bar">
+    <div class="ss-title"><span class="d"></span>Live PC View</div>
+    <div class="ss-meta">
+      <span id="ssRes">-</span>
+      <span id="ssFpsInfo">-</span>
+      <span id="ssViewers"></span>
+    </div>
+    <div class="ss-ctrl">
+      <select class="ss-select" id="ssQuality" onchange="ssSendQuality()">
+        <option value="full">Full quality</option>
+        <option value="720p" selected>720p</option>
+        <option value="480p">480p</option>
+      </select>
+      <select class="ss-select" id="ssFps" onchange="ssSendFps()">
+        <option value="5">5 FPS</option>
+        <option value="10">10 FPS</option>
+        <option value="15" selected>15 FPS</option>
+        <option value="20">20 FPS</option>
+      </select>
+      <button class="ss-btn" id="ssCtrlBtn" onclick="ssToggleControl()">Enable control</button>
+      <button class="ss-btn exit" onclick="closeSS()">Close</button>
+    </div>
+  </div>
+  <div class="ss-stage">
+    <canvas id="ssCanvas"></canvas>
+    <div class="ss-offline" id="ssOffline" style="display:none">Waiting for first frame&hellip;</div>
+    <div class="ss-hint" id="ssHint">Click the image to start remote control &middot; ESC to exit fullscreen</div>
+  </div>
+</div>
+
+<script>
+/* ============ TOASTS + CONFIRM ============ */
+function toast(msg,type){
+  var w=document.getElementById('toastWrap');if(!w)return;
+  var t=document.createElement('div');t.className='toast'+(type?' '+type:'');t.textContent=msg;
+  w.appendChild(t);setTimeout(function(){t.style.opacity='0';t.style.transition='opacity .35s';setTimeout(function(){t.remove()},380)},3400);
+}
+var confirmResolve=null;
+function confirmDialog(title,text,danger){
+  return new Promise(function(res){
+    document.getElementById('confirmTitle').textContent=title;
+    document.getElementById('confirmText').textContent=text;
+    document.getElementById('confirmOkBtn').className=danger===false?'confirm-ok':'confirm-danger';
+    document.getElementById('confirmModal').classList.add('open');
+    confirmResolve=function(v){document.getElementById('confirmModal').classList.remove('open');confirmResolve=null;res(v)};
+  });
+}
+function confirmResolveFn(v){if(confirmResolve)confirmResolve(v)}
+
+/* ============ SCREENSHARE ============ */
+var ssWS=null,ssViewing=false,ssControl=false,ssOpen=false,ssReconTimer=null,ssIdleTimer=null;
+var ssCanvas=document.getElementById('ssCanvas'),ssCtx=ssCanvas?ssCanvas.getContext('2d'):null;
+var ssScreenW=0,ssScreenH=0;
+
+function ssWSUrl(){var loc=window.location;return (loc.protocol==='https:'?'wss://':'ws://')+loc.host+'/ws/screencast'}
+
+function ssConnect(){
+  if(ssWS&&(ssWS.readyState===0||ssWS.readyState===1))return;
+  try{ssWS=new WebSocket(ssWSUrl())}catch(e){return}
+  ssWS.binaryType='arraybuffer';
+  ssWS.onmessage=function(ev){
+    if(typeof ev.data==='string'){
+      var m;try{m=JSON.parse(ev.data)}catch(e){return}
+      if(m.type==='hello'){if(m.screen){ssScreenW=m.screen.width;ssScreenH=m.screen.height;ssUpdateRes()}}
+      else if(m.type==='viewers'){var v=document.getElementById('ssViewers');if(v)v.textContent=m.count+(m.count===1?' viewer':' viewers')}
+    }else{
+      var img=new Image();
+      img.onload=function(){
+        if(!ssCanvas)return;
+        if(ssCanvas.width!==img.width||ssCanvas.height!==img.height){ssCanvas.width=img.width;ssCanvas.height=img.height}
+        ssCtx.drawImage(img,0,0);
+        var off=document.getElementById('ssOffline');if(off)off.style.display='none';
+        var f=document.getElementById('ssFpsInfo');if(f)f.textContent=img.width+'×'+img.height;
+        URL.revokeObjectURL(img.src);
+      };
+      img.src=URL.createObjectURL(new Blob([ev.data],{type:'image/jpeg'}));
+    }
+  };
+  ssWS.onclose=function(){
+    ssWS=null;ssViewing=false;
+    if(ssOpen)ssReconTimer=setTimeout(ssConnect,2500);
+  };
+  ssWS.onerror=function(){try{ssWS.close()}catch(e){}};
+}
+
+function ssSend(obj){if(ssWS&&ssWS.readyState===1)ssWS.send(JSON.stringify(obj))}
+function ssSendQuality(){ssSend({type:'quality',quality:document.getElementById('ssQuality').value})}
+function ssSendFps(){ssSend({type:'fps',fps:parseInt(document.getElementById('ssFps').value,10)||15})}
+function ssUpdateRes(){var r=document.getElementById('ssRes');if(r)r.textContent=ssScreenW?ssScreenW+'×'+ssScreenH:'-'}
+
+function openSS(){
+  if(!userInfo||!userInfo.mc_admin){toast('Admin only.','error');return}
+  document.getElementById('ssOverlay').classList.add('open');
+  ssOpen=true;
+  ssConnect();
+  ssSend({type:'view',active:true});ssViewing=true;
+  ssSendQuality();ssSendFps();
+  var off=document.getElementById('ssOffline');if(off)off.style.display='';
+  var pip=document.getElementById('ssPip');if(pip)pip.style.display='none';
+  ssStopIdle();
+}
+function closeSS(){
+  document.getElementById('ssOverlay').classList.remove('open');
+  ssOpen=false;ssSetControl(false);
+  ssSend({type:'view',active:false});ssViewing=false;
+  ssStartIdle();
+  if(ssWS){try{ssWS.close()}catch(e){}ssWS=null}
+}
+
+function ssToggleControl(){
+  if(!ssControl){
+    confirmDialog('Enable remote control?','You will fully control this PC (mouse + keyboard) through the browser. The toolbar stays on top so you can turn it off anytime.',false).then(function(ok){
+      if(ok)ssSetControl(true);
+    });
+  }else ssSetControl(false);
+}
+function ssSetControl(on){
+  ssControl=on;
+  var b=document.getElementById('ssCtrlBtn');
+  if(b){b.textContent=on?'Control ON — click image':'Enable control';b.className='ss-btn'+(on?' control-on':'')}
+  if(ssCanvas)ssCanvas.classList.toggle('control-live',on);
+  var h=document.getElementById('ssHint');
+  if(h)h.textContent=on?'Control is LIVE — mouse & keyboard are being forwarded to the PC':'Click the image to start remote control · ESC to exit fullscreen';
+}
+
+/* --- remote input forwarding --- */
+function ssCanvasPos(ev){
+  var r=ssCanvas.getBoundingClientRect();
+  return{x:(ev.clientX-r.left)/r.width,y:(ev.clientY-r.top)/r.height};
+}
+function ssBindInput(){
+  if(!ssCanvas)return;
+  ssCanvas.addEventListener('contextmenu',function(e){if(ssControl)e.preventDefault()});
+  ssCanvas.addEventListener('mousedown',function(e){
+    if(!ssControl)return;e.preventDefault();
+    var p=ssCanvasPos(e);
+    ssSend({type:'input',kind:'mouse',action:'down',x:p.x,y:p.y,button:e.button===2?'right':e.button===1?'middle':'left'});
+  });
+  ssCanvas.addEventListener('mouseup',function(e){
+    if(!ssControl)return;e.preventDefault();
+    var p=ssCanvasPos(e);
+    ssSend({type:'input',kind:'mouse',action:'up',x:p.x,y:p.y,button:e.button===2?'right':e.button===1?'middle':'left'});
+  });
+  ssCanvas.addEventListener('mousemove',function(e){
+    if(!ssControl)return;
+    var p=ssCanvasPos(e);
+    ssSend({type:'input',kind:'mouse',action:'move',x:p.x,y:p.y});
+  });
+  ssCanvas.addEventListener('wheel',function(e){
+    if(!ssControl)return;e.preventDefault();
+    var p=ssCanvasPos(e);
+    ssSend({type:'input',kind:'mouse',action:'wheel',x:p.x,y:p.y,dy:e.deltaY<0?3:-3});
+  },{passive:false});
+  document.addEventListener('keydown',function(e){
+    if(!ssControl||!ssOpen)return;
+    if(e.key==='Escape'){ssSetControl(false);return}
+    e.preventDefault();
+    ssSend({type:'input',kind:'key',action:'down',key:e.key});
+  });
+  document.addEventListener('keyup',function(e){
+    if(!ssControl||!ssOpen)return;
+    e.preventDefault();
+    ssSend({type:'input',kind:'key',action:'up',key:e.key});
+  });
+  /* paste support so you can paste text into the remote PC */
+  document.addEventListener('paste',function(e){
+    if(!ssControl||!ssOpen)return;
+    var txt=(e.clipboardData||window.clipboardData).getData('text');
+    if(txt)ssSend({type:'input',kind:'key',action:'type',text:txt.slice(0,500)});
+  });
+}
+
+/* --- 30s idle thumbnail (pip) --- */
+function ssStartIdle(){
+  ssStopIdle();
+  ssIdleTick();
+  ssIdleTimer=setInterval(ssIdleTick,30000);
+}
+function ssStopIdle(){if(ssIdleTimer){clearInterval(ssIdleTimer);ssIdleTimer=null}}
+function ssIdleTick(){
+  if(ssOpen)return;
+  if(!userInfo||!userInfo.mc_admin)return;
+  fetch('/api/screencast/frame',{credentials:'include',cache:'no-store'}).then(function(r){
+    if(!r.ok)throw 0;return r.blob();
+  }).then(function(b){
+    var img=document.getElementById('ssPipImg'),pip=document.getElementById('ssPip');
+    if(!img)return;
+    img.src=URL.createObjectURL(b);
+    if(pip&&pip.style.display!=='flex')pip.style.display='block';
+  }).catch(function(){});
+}
+
+/* boot */
+ssBindInput();
+setTimeout(function(){
+  if(userInfo&&userInfo.mc_admin){
+    fetch('/api/screencast/status',{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
+      if(d.available)ssStartIdle();
+    }).catch(function(){});
+  }
+},1500);
+</script>
 </body>
 </html>'''
 
 async def handle_mc_page(request):
-    return web.Response(text=MC_PAGE_HTML, content_type="text/html")
+    # The console moved to its own hostname; keep /mc working via redirect.
+    if _request_is_mc_host(request):
+        return web.Response(text=MC_PAGE_HTML, content_type="text/html")
+    resp = web.Response(status=302)
+    resp.headers["Location"] = MC_SITE_URL
+    return resp
 
 
 def _parse_properties(server_dir):
@@ -4234,6 +4784,259 @@ async def mc_api_set_properties(request):
     _save_properties(server_dir, props)
     return web.json_response({"ok": True})
 
+# ==========================================
+#      SCREENCAST (LIVE PC VIEW)
+# ==========================================
+# Streams this PC's primary monitor to the web console.
+#  - While someone is watching (viewing=True) it captures at full resolution and
+#    up to SCREENCAST_MAX_FPS.
+#  - When nobody is watching it takes a single screenshot every 30 seconds so the
+#    preview thumbnail stays fresh without wasting CPU.
+# Admin-only (BOT_OWNER_ID / MC_OWNER_ID).
+
+SCREENCAST_IDLE_INTERVAL = 30.0
+SCREENCAST_MAX_FPS = 20
+SCREENCAST_QUALITIES = {
+    "full": {"max_width": 0, "quality": 72},
+    "720p": {"max_width": 1280, "quality": 68},
+    "480p": {"max_width": 854, "quality": 62},
+}
+_SCREENCAST_QUALITY_RANK = {"full": 3, "720p": 2, "480p": 1}
+
+screencast_viewers = set()      # connected websockets
+screencast_meta = {}            # ws -> {"viewing": bool, "quality": str, "fps": int}
+screencast_latest = {"jpeg": None, "width": 0, "height": 0, "screen_w": 0, "screen_h": 0, "ts": 0}
+screencast_task = None
+screencast_available = None
+
+def _screencast_check_available() -> bool:
+    global screencast_available
+    if screencast_available is None:
+        try:
+            import mss  # noqa: F401
+            from PIL import Image  # noqa: F401
+            screencast_available = True
+        except Exception as e:
+            print(f"[SCREENCAST] Disabled (missing dependency): {e}. Install with: pip install pillow mss")
+            screencast_available = False
+    return screencast_available
+
+_KEY_MAP = {
+    "control": "ctrl", "ctrl": "ctrl", "alt": "alt", "shift": "shift",
+    "meta": "win", "win": "win", "osleft": "win", "osright": "win",
+    "escape": "esc", "esc": "esc", " ": "space", "spacebar": "space", "space": "space",
+    "enter": "enter", "return": "enter", "tab": "tab", "backspace": "backspace",
+    "delete": "delete", "del": "delete", "insert": "insert", "home": "home", "end": "end",
+    "pageup": "pageup", "pagedown": "pagedown", "arrowup": "up", "arrowdown": "down",
+    "arrowleft": "left", "arrowright": "right", "up": "up", "down": "down",
+    "left": "left", "right": "right", "capslock": "capslock",
+}
+
+def _screencast_capture_sync(quality: str):
+    """Grab the primary monitor and JPEG-encode it. Runs in a worker thread."""
+    try:
+        import mss
+        from PIL import Image
+    except Exception:
+        return None, 0, 0, 0, 0
+    cfg = SCREENCAST_QUALITIES.get(quality, SCREENCAST_QUALITIES["full"])
+    try:
+        with mss.mss() as sct:
+            monitors = sct.monitors
+            monitor = monitors[1] if len(monitors) > 1 else monitors[0]
+            screen_w, screen_h = monitor["width"], monitor["height"]
+            shot = sct.grab(monitor)
+            img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+    except Exception as e:
+        print(f"[SCREENCAST] Capture error: {e}")
+        return None, 0, 0, 0, 0
+    if cfg["max_width"] and img.width > cfg["max_width"]:
+        ratio = cfg["max_width"] / img.width
+        img = img.resize((max(1, int(img.width * ratio)), max(1, int(img.height * ratio))), Image.BILINEAR)
+    buf = io.BytesIO()
+    try:
+        img.save(buf, format="JPEG", quality=cfg["quality"], optimize=False, progressive=True)
+    except Exception as e:
+        print(f"[SCREENCAST] Encode error: {e}")
+        return None, 0, 0, 0, 0
+    return buf.getvalue(), img.width, img.height, screen_w, screen_h
+
+async def _screencast_broadcast_viewers():
+    if not screencast_viewers:
+        return
+    payload = {"type": "viewers", "count": len(screencast_viewers)}
+    for ws in list(screencast_viewers):
+        try:
+            await asyncio.wait_for(ws.send_json(payload), timeout=1.0)
+        except Exception:
+            pass
+
+async def _screencast_loop():
+    """Idle: one screenshot every 30s. Watching: full-res stream up to max FPS."""
+    while True:
+        try:
+            active = [ws for ws in screencast_viewers if screencast_meta.get(ws, {}).get("viewing")]
+            if not screencast_viewers or not active:
+                await asyncio.sleep(SCREENCAST_IDLE_INTERVAL)
+                jpeg, w, h, sw, sh = await asyncio.to_thread(_screencast_capture_sync, "720p")
+                if jpeg:
+                    screencast_latest.update({"jpeg": jpeg, "width": w, "height": h,
+                                              "screen_w": sw, "screen_h": sh, "ts": time.time()})
+                continue
+
+            # Use the highest quality / fps any active viewer asked for.
+            quality = max((screencast_meta.get(ws, {}).get("quality", "720p") for ws in active),
+                          key=lambda q: _SCREENCAST_QUALITY_RANK.get(q, 0))
+            fps = min(SCREENCAST_MAX_FPS, max(int(screencast_meta.get(ws, {}).get("fps", 15) or 15) for ws in active))
+
+            jpeg, w, h, sw, sh = await asyncio.to_thread(_screencast_capture_sync, quality)
+            if jpeg:
+                screencast_latest.update({"jpeg": jpeg, "width": w, "height": h,
+                                          "screen_w": sw, "screen_h": sh, "ts": time.time()})
+                for ws in list(active):
+                    try:
+                        await asyncio.wait_for(ws.send_bytes(jpeg), timeout=0.5)
+                    except Exception:
+                        pass
+            await asyncio.sleep(max(0.03, 1.0 / fps))
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            print(f"[SCREENCAST] Loop error: {e}")
+            await asyncio.sleep(1)
+
+async def _screencast_input(msg: dict):
+    """Apply a remote-control event (mouse / keyboard) on this PC."""
+    try:
+        import pyautogui
+    except Exception:
+        return
+    try:
+        pyautogui.FAILSAFE = False
+        kind = msg.get("kind")
+        screen_w = screencast_latest.get("screen_w") or 0
+        screen_h = screencast_latest.get("screen_h") or 0
+        if not screen_w or not screen_h:
+            return
+        if kind == "mouse":
+            x = max(0, min(screen_w - 1, float(msg.get("x", 0)) * screen_w))
+            y = max(0, min(screen_h - 1, float(msg.get("y", 0)) * screen_h))
+            button = {"left": "left", "right": "right", "middle": "middle"}.get(str(msg.get("button", "left")), "left")
+            action = msg.get("action")
+            if action == "move":
+                pyautogui.moveTo(x, y)
+            elif action == "down":
+                pyautogui.mouseDown(x, y, button=button)
+            elif action == "up":
+                pyautogui.mouseUp(x, y, button=button)
+            elif action == "click":
+                pyautogui.click(x, y, button=button)
+            elif action == "wheel":
+                pyautogui.scroll(int(max(-20, min(20, msg.get("dy", 0)))), x, y)
+        elif kind == "key":
+            action = msg.get("action")
+            key = str(msg.get("key", ""))
+            if action == "type":
+                pyautogui.write(str(msg.get("text", ""))[:500], interval=0)
+                return
+            lowered = key.lower()
+            mapped = _KEY_MAP.get(lowered, lowered if len(lowered) > 1 else key)
+            if action == "down":
+                pyautogui.keyDown(mapped)
+            elif action == "up":
+                pyautogui.keyUp(mapped)
+    except Exception as e:
+        print(f"[SCREENCAST] Input error: {e}")
+
+async def _screencast_on_message(ws, msg: dict):
+    kind = msg.get("type")
+    meta = screencast_meta.setdefault(ws, {"viewing": False, "quality": "720p", "fps": 15})
+    if kind == "view":
+        was_viewing = meta.get("viewing")
+        meta["viewing"] = bool(msg.get("active"))
+        if meta["viewing"] and not was_viewing:
+            # Fresh full-res frame immediately instead of waiting a tick.
+            quality = meta.get("quality", "720p")
+            jpeg, w, h, sw, sh = await asyncio.to_thread(_screencast_capture_sync, quality)
+            if jpeg:
+                screencast_latest.update({"jpeg": jpeg, "width": w, "height": h,
+                                          "screen_w": sw, "screen_h": sh, "ts": time.time()})
+                try:
+                    await ws.send_bytes(jpeg)
+                except Exception:
+                    pass
+    elif kind == "quality":
+        q = str(msg.get("quality", "720p"))
+        meta["quality"] = q if q in SCREENCAST_QUALITIES else "720p"
+    elif kind == "fps":
+        try:
+            meta["fps"] = max(1, min(SCREENCAST_MAX_FPS, int(msg.get("fps", 15))))
+        except Exception:
+            pass
+    elif kind == "input":
+        await _screencast_input(msg)
+
+async def screencast_status(request):
+    if not _is_mc_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    return web.json_response({
+        "available": _screencast_check_available(),
+        "screen": {"width": screencast_latest.get("screen_w", 0), "height": screencast_latest.get("screen_h", 0)},
+        "viewers": len(screencast_viewers),
+        "max_fps": SCREENCAST_MAX_FPS,
+    })
+
+async def screencast_frame(request):
+    """Latest screenshot (30s cadence when idle, live frame when someone watches)."""
+    if not _is_mc_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _screencast_check_available():
+        return web.json_response({"error": "Screencast unavailable (install pillow + mss)"}, status=503)
+    if not screencast_latest.get("jpeg") or time.time() - screencast_latest.get("ts", 0) > SCREENCAST_IDLE_INTERVAL:
+        jpeg, w, h, sw, sh = await asyncio.to_thread(_screencast_capture_sync, "720p")
+        if jpeg:
+            screencast_latest.update({"jpeg": jpeg, "width": w, "height": h,
+                                      "screen_w": sw, "screen_h": sh, "ts": time.time()})
+    jpeg = screencast_latest.get("jpeg")
+    if not jpeg:
+        return web.json_response({"error": "No frame captured yet"}, status=503)
+    return web.Response(body=jpeg, content_type="image/jpeg",
+                        headers={"Cache-Control": "no-store", "X-Screen-Width": str(screencast_latest.get("screen_w", 0)),
+                                 "X-Screen-Height": str(screencast_latest.get("screen_h", 0))})
+
+async def screencast_ws(request):
+    if not _is_mc_admin(request):
+        return web.Response(status=403)
+    ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024)
+    await ws.prepare(request)
+    screencast_viewers.add(ws)
+    screencast_meta[ws] = {"viewing": False, "quality": "720p", "fps": 15}
+    try:
+        await ws.send_json({
+            "type": "hello",
+            "available": _screencast_check_available(),
+            "screen": {"width": screencast_latest.get("screen_w", 0), "height": screencast_latest.get("screen_h", 0)},
+            "max_fps": SCREENCAST_MAX_FPS,
+        })
+        await _screencast_broadcast_viewers()
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                except Exception:
+                    continue
+                try:
+                    await _screencast_on_message(ws, data)
+                except Exception as e:
+                    print(f"[SCREENCAST] WS message error: {e}")
+            elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
+                break
+    finally:
+        screencast_viewers.discard(ws)
+        screencast_meta.pop(ws, None)
+        await _screencast_broadcast_viewers()
+    return ws
+
 async def start_local_server(host="127.0.0.1", port=5000):
     app = web.Application()
     app.router.add_post("/decompile", handle_post)
@@ -4274,6 +5077,9 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_post("/api/mc/upload-mod", mc_api_upload_mod)
     app.router.add_post("/api/mc/delete-mod", mc_api_delete_mod)
     app.router.add_get("/ws/mc/{name}", mc_ws_console)
+    app.router.add_get("/api/screencast/status", screencast_status)
+    app.router.add_get("/api/screencast/frame", screencast_frame)
+    app.router.add_get("/ws/screencast", screencast_ws)
     app.router.add_get("/api/mc/properties", mc_api_properties)
     app.router.add_post("/api/mc/properties", mc_api_set_properties)
     app.router.add_get("/{filename}", handle_download)
