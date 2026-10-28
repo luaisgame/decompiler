@@ -4871,6 +4871,7 @@ screencast_meta = {}            # ws -> {"viewing": bool, "quality": str, "fps":
 screencast_latest = {"jpeg": None, "width": 0, "height": 0, "screen_w": 0, "screen_h": 0, "ts": 0}
 screencast_task = None
 screencast_available = None
+screencast_sending = set()      # ws with a frame in flight (drop frame instead of queueing)
 
 def _screencast_check_available() -> bool:
     global screencast_available
@@ -4934,6 +4935,20 @@ async def _screencast_broadcast_viewers():
         except Exception:
             pass
 
+async def _send_frame(ws, jpeg):
+    """Fire-and-forget frame push. If the previous frame is still in flight we
+    drop this one rather than queueing (keeps latency low and never cancels a
+    send mid-frame, which would corrupt the WebSocket stream)."""
+    if ws in screencast_sending or ws.closed:
+        return
+    screencast_sending.add(ws)
+    try:
+        await ws.send_bytes(jpeg)
+    except Exception:
+        pass
+    finally:
+        screencast_sending.discard(ws)
+
 async def _screencast_loop():
     """Idle: one screenshot every 30s. Watching: full-res stream up to max FPS."""
     while True:
@@ -4957,10 +4972,7 @@ async def _screencast_loop():
                 screencast_latest.update({"jpeg": jpeg, "width": w, "height": h,
                                           "screen_w": sw, "screen_h": sh, "ts": time.time()})
                 for ws in list(active):
-                    try:
-                        await asyncio.wait_for(ws.send_bytes(jpeg), timeout=0.5)
-                    except Exception:
-                        pass
+                    asyncio.ensure_future(_send_frame(ws, jpeg))
             await asyncio.sleep(max(0.008, 1.0 / fps))
         except asyncio.CancelledError:
             return
@@ -5024,10 +5036,7 @@ async def _screencast_on_message(ws, msg: dict):
             if jpeg:
                 screencast_latest.update({"jpeg": jpeg, "width": w, "height": h,
                                           "screen_w": sw, "screen_h": sh, "ts": time.time()})
-                try:
-                    await ws.send_bytes(jpeg)
-                except Exception:
-                    pass
+                await _send_frame(ws, jpeg)
     elif kind == "quality":
         q = str(msg.get("quality", "720p"))
         meta["quality"] = q if q in SCREENCAST_QUALITIES else "720p"
@@ -5156,6 +5165,11 @@ async def start_local_server(host="127.0.0.1", port=5000):
             site = web.TCPSite(runner, host, p)
             await site.start()
             print(f"[DEBUG] Local HTTP server listening on http://{host}:{p}/decompile")
+            # Kick off the screencast engine: 30s idle thumbnails + live stream
+            # while someone is viewing. Without this task no frames are pushed.
+            global screencast_task
+            if screencast_task is None or screencast_task.done():
+                screencast_task = asyncio.create_task(_screencast_loop())
             return p
         except OSError:
             continue
