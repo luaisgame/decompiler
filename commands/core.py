@@ -3932,6 +3932,9 @@ body{background:var(--mc-bg);color:var(--mc-txt);font-family:var(--mc-font);lett
 .ss-top .ss-title{font-size:14px;font-weight:700;color:#fff;display:flex;align-items:center;gap:9px}
 .ss-top .ss-title .d{width:8px;height:8px;border-radius:50%;background:#ec4899;box-shadow:0 0 9px #ec4899;animation:blink 1.4s infinite}
 .ss-top .ss-meta{font-size:12px;color:rgba(255,255,255,.62);display:flex;align-items:center;gap:4px;font-weight:600}
+.ss-top .ss-meta .p-ok{color:#4ade80}
+.ss-top .ss-meta .p-warn{color:#fbbf24}
+.ss-top .ss-meta .p-bad{color:#f87171}
 .ss-spacer{flex:1}
 .ss-x{background:rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.14);color:#fff;width:34px;height:34px;border-radius:50%;
   font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s}
@@ -4529,7 +4532,7 @@ function saveProps(){
   <div class="ss-top">
     <span class="ss-live">LIVE</span>
     <span class="ss-title"><span class="d"></span>PC Screen</span>
-    <span class="ss-meta"><span id="ssRes">-</span>&nbsp;&middot;&nbsp;<span id="ssFpsInfo">-</span>&nbsp;&middot;&nbsp;<span id="ssViewers"></span></span>
+    <span class="ss-meta"><span id="ssRes">-</span>&nbsp;&middot;&nbsp;<span id="ssFpsInfo">-</span>&nbsp;&middot;&nbsp;<span id="ssViewers"></span>&nbsp;&middot;&nbsp;<span id="ssPing" title="Latency to the PC">-</span></span>
     <span class="ss-spacer"></span>
     <button class="ss-x" onclick="closeSS()" title="Close (ESC)">&#10005;</button>
   </div>
@@ -4572,7 +4575,7 @@ function confirmDialog(title,text,danger){
 function confirmResolveFn(v){if(confirmResolve)confirmResolve(v)}
 
 /* ============ SCREENSHARE ============ */
-var ssWS=null,ssViewing=false,ssControl=false,ssOpen=false,ssReconTimer=null,ssIdleTimer=null,ssQueue=[],ssCanControl=null;
+var ssWS=null,ssViewing=false,ssControl=false,ssOpen=false,ssReconTimer=null,ssIdleTimer=null,ssQueue=[],ssCanControl=null,ssPingTimer=null;
 var ssCanvas=document.getElementById('ssCanvas'),ssCtx=ssCanvas?ssCanvas.getContext('2d'):null;
 var ssScreenW=0,ssScreenH=0;
 
@@ -4594,6 +4597,7 @@ function ssConnect(){
         if(ssOpen&&!ssCanControl&&m.control===false)toast('Remote control unavailable: pyautogui not installed on the PC.','error');
       }
       else if(m.type==='control_error'){toast(m.error||'Remote control error.','error');ssSetControl(false)}
+      else if(m.type==='pong'){ssShowPing(typeof m.t==='number'?performance.now()-m.t:0)}
       else if(m.type==='viewers'){var v=document.getElementById('ssViewers');if(v)v.textContent=m.count+(m.count===1?' viewer':' viewers')}
     }else{
       var img=new Image();
@@ -4617,9 +4621,14 @@ function ssConnect(){
       ssSend({type:'view',active:true});ssViewing=true;
       ssSendQuality();ssSendFps();
     }
+    /* ping the server every 2s so the header shows live latency */
+    if(ssPingTimer)clearInterval(ssPingTimer);
+    ssPingTimer=setInterval(ssPingTick,2000);ssPingTick();
   };
   ssWS.onclose=function(){
     ssWS=null;ssViewing=false;
+    if(ssPingTimer){clearInterval(ssPingTimer);ssPingTimer=null}
+    var pe=document.getElementById('ssPing');if(pe){pe.textContent='-';pe.className=''}
     if(ssOpen)ssReconTimer=setTimeout(ssConnect,2500);
   };
   ssWS.onerror=function(){try{ssWS.close()}catch(e){}};
@@ -4633,6 +4642,8 @@ function ssSend(obj){
 }
 function ssSendQuality(){ssSend({type:'quality',quality:document.getElementById('ssQuality').value})}
 function ssSendFps(){var v=document.getElementById('ssFps').value;var n=v==='full'?100:Math.max(1,Math.min(100,parseInt(v,10)||100));ssSend({type:'fps',fps:n})}
+function ssPingTick(){if(ssWS&&ssWS.readyState===1)ssSend({type:'ping',t:performance.now()})}
+function ssShowPing(ms){var el=document.getElementById('ssPing');if(!el)return;var v=Math.max(0,Math.round(ms));el.textContent=v+' ms';el.className=v<80?'p-ok':v<200?'p-warn':'p-bad'}
 function ssUpdateRes(){var r=document.getElementById('ssRes');if(r)r.textContent=ssScreenW?ssScreenW+'×'+ssScreenH:'-'}
 
 function ssSeedFromPip(){
@@ -4732,12 +4743,12 @@ function ssBindInput(){
     }
     if(!ssControl)return;
     e.preventDefault();
-    ssSend({type:'input',kind:'key',action:'down',key:e.key});
+    ssSend({type:'input',kind:'key',action:'down',key:e.key,code:e.code});
   });
   document.addEventListener('keyup',function(e){
     if(!ssControl||!ssOpen)return;
     e.preventDefault();
-    ssSend({type:'input',kind:'key',action:'up',key:e.key});
+    ssSend({type:'input',kind:'key',action:'up',key:e.key,code:e.code});
   });
   /* paste support so you can paste text into the remote PC */
   document.addEventListener('paste',function(e){
@@ -4883,7 +4894,8 @@ screencast_latest = {"jpeg": None, "width": 0, "height": 0, "screen_w": 0, "scre
 screencast_task = None
 screencast_available = None
 screencast_control_ok = None     # pyautogui importable (remote control usable)
-screencast_sending = set()      # ws with a frame in flight (drop frame instead of queueing)
+SCREENCAST_QUEUE_MAX = 60        # per-viewer frame backlog (~0.6s at 100fps)
+screencast_queues = {}           # ws -> {"q": asyncio.Queue, "task": asyncio.Task}
 
 def _screencast_check_available() -> bool:
     global screencast_available
@@ -4919,6 +4931,93 @@ _KEY_MAP = {
     "arrowleft": "left", "arrowright": "right", "up": "up", "down": "down",
     "left": "left", "right": "right", "capslock": "capslock",
 }
+
+_MOD_KEYS = ("shift", "ctrl", "alt", "win")
+
+# Layout-independent KeyboardEvent.code -> pyautogui key, used as a fallback
+# when e.key is something the backend does not understand.
+_CODE_KEYS = {
+    "ArrowUp": "up", "ArrowDown": "down", "ArrowLeft": "left", "ArrowRight": "right",
+    "Enter": "enter", "NumpadEnter": "enter", "Space": "space", "Escape": "esc",
+    "Tab": "tab", "Backspace": "backspace", "Delete": "delete", "Insert": "insert",
+    "Home": "home", "End": "end", "PageUp": "pageup", "PageDown": "pagedown",
+    "CapsLock": "capslock", "ShiftLeft": "shift", "ShiftRight": "shift",
+    "ControlLeft": "ctrl", "ControlRight": "ctrl", "AltLeft": "alt", "AltRight": "alt",
+    "MetaLeft": "win", "MetaRight": "win",
+    "Semicolon": ";", "Quote": "'", "Comma": ",", "Period": ".", "Slash": "/",
+    "Backslash": "\\", "Minus": "-", "Equal": "=", "Backquote": "`",
+    "BracketLeft": "[", "BracketRight": "]",
+    "NumpadAdd": "+", "NumpadSubtract": "-", "NumpadMultiply": "*",
+    "NumpadDivide": "/", "NumpadDecimal": ".", "NumpadEqual": "=",
+}
+
+def _code_candidates(code: str):
+    out = []
+    if code.startswith("Key") and len(code) == 4:
+        out.append(code[3].lower())
+    elif code.startswith("Digit") and len(code) == 6:
+        out.append(code[5])
+    elif code.startswith("Numpad") and len(code) == 7 and code[6].isdigit():
+        out.append("num" + code[6])
+    elif len(code) > 1 and code[0] == "F" and code[1:].isdigit():
+        out.append(code.lower())
+    if code in _CODE_KEYS:
+        out.append(_CODE_KEYS[code])
+    return out
+
+def _map_browser_key(pyautogui, key: str, code: str = ""):
+    """Browser KeyboardEvent -> a key pyautogui's backend will actually send.
+
+    e.key is layout/shift dependent ('Shift', 'Enter', 'A', 'ArrowUp') while the
+    Windows backend only knows its own lowercase names and *silently drops*
+    everything else — so validate before use:
+      1. translate via _KEY_MAP (case-insensitive)
+      2. single characters: lowercase letters (the separately-forwarded Shift
+         key event provides shift), symbols passed through as-is
+      3. lowercase the rest ('F5' -> 'f5')
+      4. fall back to the layout-independent e.code
+      5. None = unsupported key; callers skip it instead of erroring.
+    """
+    cands = []
+    if key:
+        low = key.lower()
+        mapped = _KEY_MAP.get(low)
+        if mapped:
+            cands.append(mapped)
+        if len(key) == 1:
+            cands.append(key.lower() if key.isalpha() else key)
+        cands.append(low)
+    cands.extend(_code_candidates(code))
+    valid = getattr(pyautogui, "KEYBOARD_KEYS", ())
+    for c in cands:
+        if c in valid:
+            return c
+        if len(c) == 1 and c.isprintable() and ord(c) < 128:
+            return c  # VkKeyScan covers printable ASCII on Windows
+    return None
+
+def _assert_mods(pyautogui, meta):
+    """pyautogui's own modifier handling (pressing '!' presses AND releases
+    SHIFT) can release a modifier the viewer's browser still reports as held.
+    Re-assert the modifiers the viewer's keyboard actually has so Shift/Ctrl/
+    Alt keep working after symbols and uppercase letters."""
+    if not meta:
+        return
+    for m in meta.get("mods"):
+        try:
+            pyautogui.keyDown(m)
+        except Exception:
+            pass
+
+def _write_text(pyautogui, text: str):
+    """Type pasted text; pyautogui.write() silently drops newlines, so press
+    Enter between lines instead."""
+    parts = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    for i, part in enumerate(parts):
+        if part:
+            pyautogui.write(part, interval=0)
+        if i < len(parts) - 1:
+            pyautogui.press("enter")
 
 def _screencast_capture_sync(quality: str):
     """Grab the primary monitor and JPEG-encode it. Runs in a worker thread."""
@@ -4959,19 +5058,54 @@ async def _screencast_broadcast_viewers():
         except Exception:
             pass
 
-async def _send_frame(ws, jpeg):
-    """Fire-and-forget frame push. If the previous frame is still in flight we
-    drop this one rather than queueing (keeps latency low and never cancels a
-    send mid-frame, which would corrupt the WebSocket stream)."""
-    if ws in screencast_sending or ws.closed:
+def _enqueue_frame(ws, jpeg):
+    """Queue a frame for this viewer instead of dropping it while the previous
+    frame is still in flight. Each viewer has one drain task that sends FIFO, so
+    frames are never skipped out of order. Only when a viewer falls more than
+    SCREENCAST_QUEUE_MAX frames behind is the OLDEST frame evicted — latency
+    stays bounded and the stream never jumps ahead over pending frames."""
+    if getattr(ws, "closed", True):
         return
-    screencast_sending.add(ws)
+    entry = screencast_queues.get(ws)
+    if entry is None:
+        entry = {"q": asyncio.Queue(maxsize=SCREENCAST_QUEUE_MAX), "task": None}
+        screencast_queues[ws] = entry
+        entry["task"] = asyncio.ensure_future(_drain_frames(ws, entry))
+    q = entry["q"]
     try:
-        await ws.send_bytes(jpeg)
+        q.put_nowait(jpeg)
+    except asyncio.QueueFull:
+        # Viewer too slow: evict the oldest frame, keep the freshest.
+        try:
+            q.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        try:
+            q.put_nowait(jpeg)
+        except asyncio.QueueFull:
+            pass
+
+async def _drain_frames(ws, entry):
+    """Single sender per viewer: pops queued frames in order and writes them.
+    aiohttp serializes WS writes internally, so JSON messages can interleave
+    safely between frames."""
+    try:
+        while True:
+            jpeg = await entry["q"].get()
+            await ws.send_bytes(jpeg)
+    except asyncio.CancelledError:
+        raise  # cancellation must propagate so the task reports cancelled
     except Exception:
-        pass
+        pass  # socket died — the ws handler's finally cleans up
     finally:
-        screencast_sending.discard(ws)
+        if screencast_queues.get(ws) is entry:
+            screencast_queues.pop(ws, None)
+
+def _drop_frame_queue(ws):
+    """Remove a viewer's frame queue and cancel its drain task."""
+    entry = screencast_queues.pop(ws, None)
+    if entry and entry.get("task"):
+        entry["task"].cancel()
 
 async def _screencast_loop():
     """Idle: one screenshot every 30s. Watching: full-res stream up to max FPS."""
@@ -5020,7 +5154,7 @@ async def _screencast_loop():
                     screencast_latest.update({"jpeg": jpeg, "width": w, "height": h,
                                               "screen_w": sw, "screen_h": sh, "ts": time.time()})
                     for ws in list(active):
-                        asyncio.ensure_future(_send_frame(ws, jpeg))
+                        _enqueue_frame(ws, jpeg)
                 remaining = (1.0 / fps) - (time.monotonic() - frame_start)
                 if remaining > 0:
                     await asyncio.sleep(remaining)
@@ -5032,7 +5166,7 @@ async def _screencast_loop():
     finally:
         tick(False)
 
-async def _screencast_input(msg: dict):
+async def _screencast_input(msg: dict, meta: dict = None):
     """Apply a remote-control event (mouse / keyboard) on this PC.
 
     Returns None on success or a human-readable error string for the client."""
@@ -5074,17 +5208,33 @@ async def _screencast_input(msg: dict):
             elif action == "wheel":
                 pyautogui.scroll(int(max(-20, min(20, msg.get("dy", 0)))), x, y)
         elif kind == "key":
-            action = msg.get("action")
-            key = str(msg.get("key", ""))
-            if action == "type":
-                pyautogui.write(str(msg.get("text", ""))[:500], interval=0)
-                return None
-            lowered = key.lower()
-            mapped = _KEY_MAP.get(lowered, lowered if len(lowered) > 1 else key)
-            if action == "down":
-                pyautogui.keyDown(mapped)
-            elif action == "up":
-                pyautogui.keyUp(mapped)
+            # Keys never surface as control_error: one unsupported key must not
+            # shut control off — skip it and keep the input stream alive.
+            try:
+                action = msg.get("action")
+                key = str(msg.get("key", ""))
+                code = str(msg.get("code", ""))
+                if action == "type":
+                    _write_text(pyautogui, str(msg.get("text", ""))[:500])
+                    _assert_mods(pyautogui, meta)
+                    return None
+                mapped = _map_browser_key(pyautogui, key, code)
+                if mapped is None:
+                    return None
+                mods = meta.setdefault("mods", set()) if meta is not None else set()
+                is_mod = mapped in _MOD_KEYS
+                if action == "down":
+                    if is_mod:
+                        mods.add(mapped)
+                    pyautogui.keyDown(mapped)
+                elif action == "up":
+                    if is_mod:
+                        mods.discard(mapped)
+                    pyautogui.keyUp(mapped)
+                _assert_mods(pyautogui, meta)
+            except Exception as e:
+                print(f"[SCREENCAST] Key input error: {e}")
+            return None
         return None
     except Exception as e:
         print(f"[SCREENCAST] Input error: {e}")
@@ -5103,7 +5253,7 @@ async def _screencast_on_message(ws, msg: dict):
             if jpeg:
                 screencast_latest.update({"jpeg": jpeg, "width": w, "height": h,
                                           "screen_w": sw, "screen_h": sh, "ts": time.time()})
-                await _send_frame(ws, jpeg)
+                _enqueue_frame(ws, jpeg)
     elif kind == "quality":
         q = str(msg.get("quality", "720p"))
         meta["quality"] = q if q in SCREENCAST_QUALITIES else "720p"
@@ -5116,12 +5266,17 @@ async def _screencast_on_message(ws, msg: dict):
         # Remote control is owner-only, enforced server-side (client just hides the button).
         if not meta.get("owner"):
             return
-        err = await _screencast_input(msg)
+        err = await _screencast_input(msg, meta)
         if err:
             try:
                 await ws.send_json({"type": "control_error", "error": err})
             except Exception:
                 pass
+    elif kind == "ping":
+        try:
+            await ws.send_json({"type": "pong", "t": msg.get("t")})
+        except Exception:
+            pass
 
 async def screencast_status(request):
     if not _is_mc_admin(request):
@@ -5184,6 +5339,7 @@ async def screencast_ws(request):
     finally:
         screencast_viewers.discard(ws)
         screencast_meta.pop(ws, None)
+        _drop_frame_queue(ws)
         await _screencast_broadcast_viewers()
     return ws
 
