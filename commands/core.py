@@ -4527,10 +4527,12 @@ function saveProps(){
         <option value="480p">480p</option>
       </select>
       <select class="ss-select" id="ssFps" onchange="ssSendFps()">
-        <option value="5">5 FPS</option>
-        <option value="10">10 FPS</option>
-        <option value="15" selected>15 FPS</option>
+        <option value="full" selected>Full FPS</option>
+        <option value="30">30 FPS</option>
         <option value="20">20 FPS</option>
+        <option value="15">15 FPS</option>
+        <option value="10">10 FPS</option>
+        <option value="5">5 FPS</option>
       </select>
       <button class="ss-btn" id="ssCtrlBtn" onclick="ssToggleControl()">Enable control</button>
       <button class="ss-btn exit" onclick="closeSS()">Close</button>
@@ -4599,7 +4601,7 @@ function ssConnect(){
 
 function ssSend(obj){if(ssWS&&ssWS.readyState===1)ssWS.send(JSON.stringify(obj))}
 function ssSendQuality(){ssSend({type:'quality',quality:document.getElementById('ssQuality').value})}
-function ssSendFps(){ssSend({type:'fps',fps:parseInt(document.getElementById('ssFps').value,10)||15})}
+function ssSendFps(){var v=document.getElementById('ssFps').value;var n=v==='full'?60:Math.max(1,Math.min(60,parseInt(v,10)||15));ssSend({type:'fps',fps:n})}
 function ssUpdateRes(){var r=document.getElementById('ssRes');if(r)r.textContent=ssScreenW?ssScreenW+'×'+ssScreenH:'-'}
 
 function ssSeedFromPip(){
@@ -4654,6 +4656,11 @@ function ssCanvasPos(ev){
 }
 function ssBindInput(){
   if(!ssCanvas)return;
+  /* Clicking the image turns control on (matches the hint text). When control is
+     already ON, the click is forwarded to the remote PC instead of toggling. */
+  ssCanvas.addEventListener('click',function(){
+    if(!ssControl&&ssOpen)ssToggleControl();
+  });
   ssCanvas.addEventListener('contextmenu',function(e){if(ssControl)e.preventDefault()});
   ssCanvas.addEventListener('mousedown',function(e){
     if(!ssControl)return;e.preventDefault();
@@ -4816,7 +4823,7 @@ async def mc_api_set_properties(request):
 # Admin-only (BOT_OWNER_ID / MC_OWNER_ID).
 
 SCREENCAST_IDLE_INTERVAL = 30.0
-SCREENCAST_MAX_FPS = 20
+SCREENCAST_MAX_FPS = 60
 SCREENCAST_QUALITIES = {
     "full": {"max_width": 0, "quality": 72},
     "720p": {"max_width": 1280, "quality": 68},
@@ -4919,7 +4926,7 @@ async def _screencast_loop():
                         await asyncio.wait_for(ws.send_bytes(jpeg), timeout=0.5)
                     except Exception:
                         pass
-            await asyncio.sleep(max(0.03, 1.0 / fps))
+            await asyncio.sleep(max(0.008, 1.0 / fps))
         except asyncio.CancelledError:
             return
         except Exception as e:
