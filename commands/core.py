@@ -4564,7 +4564,7 @@ function confirmDialog(title,text,danger){
 function confirmResolveFn(v){if(confirmResolve)confirmResolve(v)}
 
 /* ============ SCREENSHARE ============ */
-var ssWS=null,ssViewing=false,ssControl=false,ssOpen=false,ssReconTimer=null,ssIdleTimer=null;
+var ssWS=null,ssViewing=false,ssControl=false,ssOpen=false,ssReconTimer=null,ssIdleTimer=null,ssQueue=[];
 var ssCanvas=document.getElementById('ssCanvas'),ssCtx=ssCanvas?ssCanvas.getContext('2d'):null;
 var ssScreenW=0,ssScreenH=0;
 
@@ -4592,6 +4592,16 @@ function ssConnect(){
       img.src=URL.createObjectURL(new Blob([ev.data],{type:'image/jpeg'}));
     }
   };
+  ssWS.onopen=function(){
+    // Flush anything queued while the socket was still connecting, then re-sync
+    // view state so frames start immediately — one click on the PiP is enough.
+    var q=ssQueue.splice(0);
+    for(var i=0;i<q.length;i++){try{ssWS.send(JSON.stringify(q[i]))}catch(e){}}
+    if(ssOpen){
+      ssSend({type:'view',active:true});ssViewing=true;
+      ssSendQuality();ssSendFps();
+    }
+  };
   ssWS.onclose=function(){
     ssWS=null;ssViewing=false;
     if(ssOpen)ssReconTimer=setTimeout(ssConnect,2500);
@@ -4599,7 +4609,12 @@ function ssConnect(){
   ssWS.onerror=function(){try{ssWS.close()}catch(e){}};
 }
 
-function ssSend(obj){if(ssWS&&ssWS.readyState===1)ssWS.send(JSON.stringify(obj))}
+function ssSend(obj){
+  if(ssWS&&ssWS.readyState===1){try{ssWS.send(JSON.stringify(obj))}catch(e){}return}
+  // Socket still connecting (or closed): queue instead of silently dropping.
+  ssQueue.push(obj);
+  if(ssQueue.length>32)ssQueue.shift();
+}
 function ssSendQuality(){ssSend({type:'quality',quality:document.getElementById('ssQuality').value})}
 function ssSendFps(){var v=document.getElementById('ssFps').value;var n=v==='full'?60:Math.max(1,Math.min(60,parseInt(v,10)||15));ssSend({type:'fps',fps:n})}
 function ssUpdateRes(){var r=document.getElementById('ssRes');if(r)r.textContent=ssScreenW?ssScreenW+'×'+ssScreenH:'-'}
@@ -4628,6 +4643,7 @@ function openSS(){
 function closeSS(){
   document.getElementById('ssOverlay').classList.remove('open');
   ssOpen=false;ssSetControl(false);
+  ssQueue.length=0;
   ssSend({type:'view',active:false});ssViewing=false;
   ssStartIdle();
   if(ssWS){try{ssWS.close()}catch(e){}ssWS=null}
