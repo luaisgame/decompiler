@@ -22,6 +22,7 @@ FILES = [
     "bot.py",
     "commands/__init__.py",
     "commands/core.py",
+    "commands/assets.py",
     "commands/setup.py",
     "commands/blacklist.py",
     "commands/blacklistuser.py",
@@ -29,6 +30,10 @@ FILES = [
     "commands/cookie.py",
     "commands/decompile.py",
     "commands/help.py",
+    "commands/mc.py",
+    "commands/support.py",
+    "decompile_client.luau",
+    "minecraft_setup.py",
 ]
 
 def ensure_cloudflared():

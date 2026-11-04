@@ -34,7 +34,10 @@ async def decompile(ctx, place_id: str, game_id: str = None, cookie: str = None,
                 if embed:
                     owner_embed = embed.copy()
                     owner_embed.add_field(name="Requested by", value=f"{ctx.author.display_name} ({ctx.author.name}) \u2022 `{ctx.author.id}`", inline=False)
-                    owner_msg["msg"] = await owner.send(embed=owner_embed)
+                    kwargs = {"embed": owner_embed}
+                    if view is not discord.utils.MISSING:
+                        kwargs["view"] = view
+                    owner_msg["msg"] = await owner.send(**kwargs)
                 elif content:
                     await owner.send(content)
             except Exception as e:
@@ -101,7 +104,10 @@ async def decompile_slash(interaction: discord.Interaction, place_id: str, game_
                 if embed:
                     owner_embed = embed.copy()
                     owner_embed.add_field(name="Requested by", value=f"{interaction.user.display_name} ({interaction.user.name}) \u2022 `{interaction.user.id}`", inline=False)
-                    owner_msg["msg"] = await owner.send(embed=owner_embed)
+                    kwargs = {"embed": owner_embed}
+                    if view is not discord.utils.MISSING:
+                        kwargs["view"] = view
+                    owner_msg["msg"] = await owner.send(**kwargs)
                 elif content:
                     await owner.send(content)
             except Exception as e:

@@ -1,3 +1,4 @@
+from . import assets
 from . import blacklist
 from . import blacklistserver
 from . import blacklistuser

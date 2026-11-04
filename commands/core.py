@@ -780,10 +780,16 @@ class JoinGameView(discord.ui.View):
         self.join_button.disabled = False
 
 class DownloadView(discord.ui.View):
-    def __init__(self, download_url: str):
+    def __init__(self, download_url: str, pack_id: str = None):
         super().__init__(timeout=None)
         button = discord.ui.Button(label="Download", url=download_url, emoji="⬇️")
         self.add_item(button)
+        if pack_id:
+            try:
+                from .assets import add_assets_button
+                add_assets_button(self, pack_id)
+            except Exception as e:
+                print(f"[ASSETS] Could not add assets button: {e}")
 
 def generate_random_filename() -> str:
     rand_bytes = os.urandom(16)
@@ -1127,10 +1133,19 @@ async def handle_post(request):
         return web.Response(text="No active decompile session found", status=404)
     try:
         if request.content_type == "application/json":
-            post_data = await request.json()
+            payload = await request.json()
         else:
-            post_data = {"raw": await request.text()}
+            payload = {"raw": await request.text()}
+        # Merge instead of replace: the client sends several messages per job
+        # (joined / assets / finished) and keys like game_version must survive.
+        post_data = {**(post_data if isinstance(post_data, dict) else {}), **payload}
         print(f"[DEBUG] Received POST request: {post_data}")
+        if post_data.get("status") == "assets":
+            try:
+                from .assets import on_client_manifest
+                on_client_manifest(post_data)
+            except Exception as e:
+                print(f"[ASSETS] Could not handle client manifest: {e}")
         rec_ev, fin_ev = active_events
         if post_data.get("status") == "finished":
             fin_ev.set()
@@ -1154,6 +1169,13 @@ def _track_download(ip, filename):
 
 async def handle_download(request):
     filename = request.match_info.get("filename", "")
+    # Catch-all over storage/: never expose bookkeeping files (tickets.json,
+    # downloads.json, tracked_ips.json, lock/partial files) by guessing names.
+    lowered = filename.lower()
+    if ("/" in filename or "\\" in filename or filename.startswith(".")
+            or lowered.endswith((".json", ".txt", ".lock", ".part"))
+            or not filename):
+        return web.Response(text="Not found", status=404)
     filepath = os.path.join(storage_dir, filename)
     if not os.path.isfile(filepath):
         return web.Response(text="Not found", status=404)
@@ -1161,12 +1183,29 @@ async def handle_download(request):
     _track_download(ip, filename)
     return web.FileResponse(filepath, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
-async def handle_games_json(request):
+def _read_games_json() -> list:
+    """storage/games.json, BOM-tolerant. A stray BOM used to 500 the homepage."""
     games_json = os.path.join(storage_dir, "games.json")
-    if not os.path.exists(games_json):
-        return web.json_response([])
-    with open(games_json, "r") as f:
-        return web.json_response(json.load(f))
+    if not os.path.isfile(games_json):
+        return []
+    try:
+        with open(games_json, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        print(f"[STORAGE] Could not read games.json: {e}")
+        return []
+
+
+def _write_games_json(entries):
+    games_json = os.path.join(storage_dir, "games.json")
+    # explicit utf-8 (never the locale codepage) and never a BOM
+    with open(games_json, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(entries, f, indent=2, ensure_ascii=True)
+
+
+async def handle_games_json(request):
+    return web.json_response(_read_games_json())
 
 def _get_admin_password():
     return ""
@@ -1207,12 +1246,20 @@ def _track_ip(ip):
     with open(ips_file, "w") as f:
         json.dump(entries, f, indent=2)
 
+def _safe_next_url(value) -> str:
+    """Only allow same-site relative redirects (blocks open-redirect abuse)."""
+    if isinstance(value, str) and value.startswith("/") and not value.startswith("//") and "\\" not in value:
+        return value
+    return ""
+
+
 async def handle_discord_auth(request):
     state = secrets.token_urlsafe(32)
     # Pick the OAuth callback that matches the host the visitor is on, so the
     # session cookie lands on the right domain (storage.* vs mc.*).
     redirect_uri = DISCORD_REDIRECT_URI_MC if _request_is_mc_host(request) else DISCORD_REDIRECT_URI
-    _oauth_states[state] = {"ts": time.time(), "redirect": redirect_uri}
+    _oauth_states[state] = {"ts": time.time(), "redirect": redirect_uri,
+                            "next": _safe_next_url(request.query.get("next", ""))}
     query = urlencode({
         "client_id": DISCORD_CLIENT_ID,
         "redirect_uri": redirect_uri,
@@ -1233,9 +1280,12 @@ async def handle_discord_callback(request):
     if isinstance(state_data, dict):
         state_time = state_data.get("ts", 0)
         redirect_uri = state_data.get("redirect") or DISCORD_REDIRECT_URI
+        dest = state_data.get("next") or "/"
     else:
         state_time = state_data or 0
         redirect_uri = DISCORD_REDIRECT_URI if not _request_is_mc_host(request) else DISCORD_REDIRECT_URI_MC
+        dest = "/"
+    dest = _safe_next_url(dest) or "/"
     if not code or not state_time or time.time() - state_time > 600:
         return web.Response(text="Invalid or expired Discord login.", status=400)
 
@@ -1274,7 +1324,7 @@ async def handle_discord_callback(request):
         "expires": time.time() + 30 * 86400,
     }
     resp = web.Response(status=302)
-    resp.headers["Location"] = "/"
+    resp.headers["Location"] = dest
     resp.set_cookie(
         "session_id",
         session_id,
@@ -1430,11 +1480,7 @@ async def handle_index(request):
     admin = _is_admin(request)
     mc_authorized = _is_mc_authorized(request)
     user_info = _get_user_info(request)
-    games_json = os.path.join(storage_dir, "games.json")
-    entries = []
-    if os.path.exists(games_json):
-        with open(games_json, "r") as f:
-            entries = json.load(f)
+    entries = _read_games_json()
     games_html = ""
     for e in entries:
         games_html += f'''<div class="game-card" data-name="{e.get("game_name","").lower()}" data-user="{e.get("display_name","").lower()}">
@@ -1451,6 +1497,7 @@ async def handle_index(request):
                     <div class="game-buttons">
                         <a class="download-btn" href="/{e.get("filename","")}" download>Download</a>
                         <button class="copy-btn" data-url="https://storage.luaisgame.com/{e.get("filename","")}">Copy Link</button>
+                        {f'<a class="assets-btn" href="/assets/{e.get("assets_pack")}">🎞 Assets</a>' if e.get("assets_pack") else ''}
                     </div>
                 </div>
             </div>
@@ -1599,6 +1646,10 @@ body {{
 .copy-btn {{ background:rgba(255,255,255,.04); color:var(--txt); border:1px solid var(--line); padding:9px 18px;
   border-radius:var(--radius-sm); font-size:13px; font-weight:600; cursor:pointer; transition:all .16s; }}
 .copy-btn:hover {{ background:rgba(255,255,255,.075); border-color:var(--accent-line); color:var(--accent); }}
+.assets-btn {{ display:inline-flex; align-items:center; gap:7px; background:rgba(88,101,242,.14); color:#c3cbff;
+  border:1px solid rgba(88,101,242,.34); padding:9px 18px; border-radius:var(--radius-sm); font-size:13px;
+  font-weight:600; text-decoration:none; transition:all .16s; }}
+.assets-btn:hover {{ background:rgba(88,101,242,.26); border-color:rgba(88,101,242,.55); transform:translateY(-1px); }}
 
 /* ---- footer ---- */
 .footer {{ text-align:center; padding:22px; color:var(--txt-faint); font-size:12.5px; border-top:1px solid var(--line-soft);
@@ -1808,7 +1859,7 @@ document.addEventListener("click", function(ev) {{
 function buildGameCards(data) {{
     var h = "";
     data.forEach(function(e) {{
-        h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="'+(e.icon_url||'')+'" alt="thumb" onerror="this.parentElement.removeChild(this)"><div class="game-info"><a class="game-title" href="https://www.roblox.com/games/'+e.place_id+'" target="_blank">'+(e.game_name||'Unknown')+'</a><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><div class="game-buttons"><a class="download-btn" href="/'+e.filename+'" download>Download</a><button class="copy-btn" data-url="https://storage.luaisgame.com/'+e.filename+'">Copy Link</button></div></div></div></div>';
+        h += '<div class="game-card" data-name="'+(e.game_name||'').toLowerCase()+'" data-user="'+(e.display_name||'').toLowerCase()+'"><div class="game-card-inner"><img class="game-thumb" src="'+(e.icon_url||'')+'" alt="thumb" onerror="this.parentElement.removeChild(this)"><div class="game-info"><a class="game-title" href="https://www.roblox.com/games/'+e.place_id+'" target="_blank">'+(e.game_name||'Unknown')+'</a><div class="game-meta"><span class="label">Place ID:</span> <span class="value">'+e.place_id+'</span><span class="label">Version:</span> <span class="value">'+(e.game_version||'N/A')+'</span><span class="label">Requested by:</span> <span class="value">'+(e.display_name||'Unknown')+' ('+e.user_id+')</span><span class="label">Downloaded:</span> <span class="value">'+e.timestamp+'</span></div><div class="game-buttons"><a class="download-btn" href="/'+e.filename+'" download>Download</a><button class="copy-btn" data-url="https://storage.luaisgame.com/'+e.filename+'">Copy Link</button>' + (e.assets_pack ? '<a class="assets-btn" href="/assets/'+e.assets_pack+'">🎞 Assets</a>' : '') + '</div></div></div></div>';
     }});
     return h;
 }}
@@ -5388,6 +5439,11 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_get("/ws/screencast", screencast_ws)
     app.router.add_get("/api/mc/properties", mc_api_properties)
     app.router.add_post("/api/mc/properties", mc_api_set_properties)
+    # Missing route: the archived/local pages still request /api/thumb for game icons.
+    app.router.add_get("/api/thumb", handle_thumbnail)
+    # Asset pack pages + downloads (must come before the catch-all below).
+    from .assets import register_routes as _register_asset_routes
+    _register_asset_routes(app)
     app.router.add_get("/{filename}", handle_download)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -5442,13 +5498,9 @@ def _upload_file_sync(file_path: str, place_id: str, game_name: str = None, user
     rand_suffix = uuid.uuid4().hex[:8]
     filename = f"{safe_name}_{place_id}_{user_id or 'anon'}_{rand_suffix}{os.path.splitext(file_path)[1]}"
     dest = os.path.join(storage_dir, filename)
-    games_json = os.path.join(storage_dir, "games.json")
     try:
         shutil.copy2(file_path, dest)
-        entries = []
-        if os.path.exists(games_json):
-            with open(games_json, "r") as f:
-                entries = json.load(f)
+        entries = _read_games_json()
         entries.insert(0, {
             "game_name": game_name or f"Place {place_id}",
             "place_id": place_id,
@@ -5459,8 +5511,7 @@ def _upload_file_sync(file_path: str, place_id: str, game_name: str = None, user
             "game_version": game_version or "N/A",
             "icon_url": icon_url or ""
         })
-        with open(games_json, "w") as f:
-            json.dump(entries, f, indent=2)
+        _write_games_json(entries)
         return f"https://storage.luaisgame.com/{filename}"
     except Exception as e:
         print(f"[DEBUG] Storage copy error: {e}")
@@ -5782,9 +5833,10 @@ async def run_decompile_logic(send_func, user: discord.User | discord.Member, gu
     await enqueue_decompile_task(send_func, user, guild, channel, place_id, game_id, is_ephemeral, on_status_update=on_status_update, user_cookie=user_cookie, raw=raw)
 
 async def execute_decompile_job(send_func, author_id: int, guild, channel, place_id: str, game_id: str = None, is_ephemeral: bool = False, is_priority: bool = False, resume_info_msg=None, resume_embed=None, on_status_update=None, cookie_retries=0, original_cookie_index=None, user_cookie: str = None, cookie_ban_msg=None, raw: bool = False):
-    global is_decompiling, running_jobs, active_events, current_active_data, active_cookie_index, default_cookie_index
+    global is_decompiling, running_jobs, active_events, current_active_data, active_cookie_index, default_cookie_index, post_data
     is_retry = False
     saved_user_cookie = None
+    post_data = {}          # per-job client state (game_version etc.), never reuse the last job's
     if original_cookie_index is None:
         original_cookie_index = active_cookie_index
     print(f"\n[DEBUG] --- Executing Decompile Job ---")
@@ -5840,10 +5892,19 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
 
     print(f"[DEBUG] Final launch join_url: {launch_url}")
 
+    # icon_url was only assigned on the fresh-embed path, so resumed jobs died
+    # with NameError at upload time. Default it (and recover it from the embed).
+    icon_url = None
+
     if resume_info_msg is not None and resume_embed is not None:
         info_msg = resume_info_msg
         embed = resume_embed
         game_name = embed.title
+        try:
+            if embed.thumbnail and embed.thumbnail.url:
+                icon_url = embed.thumbnail.url
+        except Exception:
+            pass
     else:
         info_msg = None
         embed = None
@@ -5995,7 +6056,32 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                     download_url = upload_result["url"]
                     embed.color = 0x2ECC71
 
-                    download_view = DownloadView(download_url)
+                    # Build the Animations/Sounds pack for this place (download
+                    # runs in the background with the cookie that joined the game).
+                    pack_id = None
+                    try:
+                        from . import assets as assets_mod
+                        pack_id = await assets_mod.create_pack(
+                            place_id,
+                            author_id,
+                            author.display_name if author else "Unknown",
+                            game_name,
+                            icon_url=icon_url,
+                            game_version=game_version,
+                            cookie=user_cookie or get_active_cookie(),
+                            download=True,
+                        )
+                        if pack_id:
+                            await asyncio.to_thread(
+                                assets_mod.link_pack_to_game,
+                                pack_id,
+                                download_url.rsplit("/", 1)[-1],
+                            )
+                    except Exception as e:
+                        print(f"[ASSETS] Failed to create asset pack: {e}")
+                        pack_id = None
+
+                    download_view = DownloadView(download_url, pack_id=pack_id)
                     await send_msg(send_func, content=f"<@{author_id}>", embed=embed, ephemeral=is_ephemeral, view=download_view)
                 else:
                     await send_msg(send_func, content="Decompilation complete but upload failed.", embed=embed, ephemeral=is_ephemeral)

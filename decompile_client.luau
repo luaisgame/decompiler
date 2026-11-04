@@ -92,6 +92,75 @@ local response = request({
     })
 })
 
+--// Asset harvest: every Sound + Animation in the place, kept with its real
+--// instance path and name so the site can label each downloaded file.
+local MAX_ASSETS = 5000
+
+local function parseAssetId(raw)
+    if typeof(raw) ~= "string" then return nil end
+    local id = raw:match("rbxassetid://(%d+)")
+        or raw:match("[?&]id=(%d+)")
+        or raw:match("roblox%.com/asset/%?(%d+)")
+        or raw:match("^%d+$")
+    if id and tonumber(id) and tonumber(id) > 0 then return id end
+    return nil
+end
+
+local function cap(t)
+    if #t <= MAX_ASSETS then return t end
+    local out = {}
+    for i = 1, MAX_ASSETS do out[i] = t[i] end
+    return out
+end
+
+local function scanAssets()
+    local sounds, animations = {}, {}
+    local function push(list, obj, id)
+        if not id then return end
+        local ok, full = pcall(function() return obj:GetFullName() end)
+        table.insert(list, {
+            id = id,
+            name = tostring(obj.Name or ""),
+            path = ok and tostring(full) or tostring(obj.Name or ""),
+        })
+    end
+    pcall(function()
+        for _, obj in ipairs(game:GetDescendants()) do
+            local cls = obj.ClassName
+            if cls == "Sound" then
+                push(sounds, obj, parseAssetId(obj.SoundId))
+            elseif cls == "Animation" then
+                push(animations, obj, parseAssetId(obj.AnimationId))
+            end
+        end
+    end)
+    return cap(sounds), cap(animations)
+end
+
+local okScan, scanSounds, scanAnimations = pcall(scanAssets)
+local assetSounds, assetAnimations = {}, {}
+if okScan then
+    assetSounds, assetAnimations = scanSounds or {}, scanAnimations or {}
+else
+    warn("[decompile] asset scan failed: " .. tostring(scanSounds))
+end
+
+pcall(function()
+    request({
+        Url = "http://127.0.0.1:5000/decompile",
+        Method = "POST",
+        Headers = {
+            ["Content-Type"] = "application/json"
+        },
+        Body = game:GetService("HttpService"):JSONEncode({
+            status = "assets",
+            place_id = game.PlaceId,
+            sounds = assetSounds,
+            animations = assetAnimations,
+        })
+    })
+end)
+
 local Params = {
  RepoURL = "https://raw.githubusercontent.com/luau/UniversalSynSaveInstance/main/",
  SSI = "saveinstance",
@@ -124,6 +193,8 @@ request({
         ["Content-Type"] = "application/json"
     },
     Body = game:GetService("HttpService"):JSONEncode({
-        status = "finished"
+        status = "finished",
+        -- the site's "Version:" row was always N/A because nothing sent this
+        game_version = game.PlaceVersion
     })
 })

@@ -30,6 +30,7 @@ RAW_VERSION = "1b6b942"
 
 GITHUB_FILES = [
     "commands/core.py",
+    "commands/assets.py",
     "commands/setup.py",
     "commands/support.py",
     "commands/blacklist.py",
@@ -257,6 +258,12 @@ async def on_ready():
     for ticket_id in TICKETS:
         bot.add_view(PersistentClaimView(ticket_id))
     print(f"[DEBUG] Registered {len(TICKETS)} persistent ticket views.")
+
+    try:
+        from commands.assets import register_persistent_views
+        register_persistent_views(bot)
+    except Exception as e:
+        print(f"[ASSETS] Failed to register asset views: {e}")
 
     try:
         from minecraft_setup import run_minecraft_setup

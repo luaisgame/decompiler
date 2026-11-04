@@ -24,3 +24,10 @@ server_err.txt
 # generated HTML dumps
 live_page*.html
 page_output.html
+
+# local test/preview scratch (asset pack feature)
+_smoke_*.py
+_test_*.py
+_make_preview.py
+_preview_*.html
+_shot_*.png
