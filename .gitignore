@@ -15,3 +15,12 @@ storage/
 prod/.last_commit
 banned_ips.txt
 tracked_ips.json
+
+# scratch logs
+stdout.txt
+stderr.txt
+server_err.txt
+
+# generated HTML dumps
+live_page*.html
+page_output.html
