@@ -41,7 +41,7 @@ PENDING_DIR = os.path.join(ASSETS_DIR, "_pending")
 SITE_URL = core.STORAGE_SITE_URL.rstrip("/") + "/"
 
 ASSETS_MAX_BYTES = 10 * 1024 * 1024 * 1024   # 10 GB budget for asset packs
-MAX_PER_KIND = 5000                           # safety cap sent by the client
+MAX_PER_KIND = 1000000                           # safety cap sent by the client
 
 PACK_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,90}$")
 SAFE_FILE_RE = re.compile(r"^[^\\/:*?\"<>|\x00-\x1f]{1,160}$")
