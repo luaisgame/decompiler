@@ -15,6 +15,8 @@ storage/
 prod/.last_commit
 banned_ips.txt
 tracked_ips.json
+# credential pools — never commit .ROBLOSECURITY values
+cookies.txt
 
 # scratch logs
 stdout.txt
@@ -31,3 +33,8 @@ _test_*.py
 _make_preview.py
 _preview_*.html
 _shot_*.png
+# one-off probe/verification scripts (live Roblox experiments)
+_probe_*.py
+_fetch_*.py
+_live_*.py
+_verify_*.py

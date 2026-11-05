@@ -20,6 +20,7 @@ import asyncio
 import html
 import json
 import os
+import random
 import re
 import shutil
 import time
@@ -179,6 +180,7 @@ def on_client_manifest(payload: dict):
         anims = []
     data = {
         "place_id": place_id,
+        "universe_id": str(payload.get("universe_id") or "").strip(),
         "received": time.strftime("%Y-%m-%d %H:%M:%S"),
         "sounds": sounds[:MAX_PER_KIND],
         "animations": anims[:MAX_PER_KIND],
@@ -210,6 +212,48 @@ def _pop_pending(place_id: str):
 # --------------------------------------------------------------------------
 # pack creation
 # --------------------------------------------------------------------------
+# asset ids referenced anywhere in a place file: Sound/Animation properties,
+# rbxassetid:// strings in script source, Luau string constants inside the
+# saved bytecode, XML <url> nodes — including ids the injected client scan
+# never saw because the asset is only referenced, not instantiated.
+_ASSET_REF_RES = (
+    re.compile(rb"rbxassetid://(\d{1,20})", re.I),
+    re.compile(rb"roblox\.com/asset/?\?id=(\d{1,20})", re.I),
+    re.compile(rb"roblox\.com/asset/(\d{1,20})", re.I),
+)
+SCAN_MAX_IDS = 3000
+SCAN_CHUNK = 4 * 1024 * 1024       # stream the file, never load it whole
+SCAN_OVERLAP = 64                  # keep pattern tails across chunk borders
+
+
+def scan_place_file(path: str) -> list[str]:
+    """Harvest every asset id referenced in a place file (binary or XML).
+
+    Streams the file in chunks so multi-hundred-MB places stay cheap.
+    Returns digit ids, deduped, positives only; never raises."""
+    found: dict = {}
+    try:
+        with open(path, "rb") as f:
+            prev = b""
+            while True:
+                chunk = f.read(SCAN_CHUNK)
+                if not chunk:
+                    break
+                data = prev + chunk
+                for rx in _ASSET_REF_RES:
+                    for m in rx.finditer(data):
+                        aid = m.group(1).decode("ascii", "ignore")
+                        if aid and int(aid) > 0 and aid not in found:
+                            found[aid] = None
+                            if len(found) >= SCAN_MAX_IDS:
+                                return list(found)
+                prev = data[-SCAN_OVERLAP:]
+    except OSError as e:
+        print(f"[ASSETS] scan_place_file({path}) failed: {e}")
+        return []
+    return list(found)
+
+
 def _collect(pending: dict, kind: str, raw_key: str):
     """Group raw instance rows by asset id -> {id: entry}."""
     rows = pending.get(raw_key) or []
@@ -251,17 +295,36 @@ def _unique_file_names(entries):
 
 async def create_pack(place_id: str, author_id, display_name_: str, game_name: str,
                       icon_url: str = None, game_version: str = None,
-                      cookie: str = None, download: bool = True):
-    """Turn the client scan into a downloadable pack. Returns pack_id or None."""
+                      cookie: str = None, download: bool = True,
+                      scanned_ids=None):
+    """Turn the client scan into a downloadable pack. Returns pack_id or None.
+
+    ``scanned_ids`` are asset ids harvested from the place file binary (see
+    :func:`scan_place_file`); they are typed and merged by the download worker
+    so assets the injected client scan missed still end up in the pack."""
     _ensure_dirs()
     pending = _pop_pending(str(place_id))
-    if not pending:
+    if not pending and not (scanned_ids or []):
         print(f"[ASSETS] No asset scan stored for place {place_id}; skipping pack.")
         return None
+    if not pending:
+        # client manifest never arrived, but the place file had references
+        pending = {"place_id": str(place_id), "universe_id": "",
+                   "sounds": [], "animations": []}
 
     animations = list(_collect(pending, "animation", "animations").values())
     sounds = list(_collect(pending, "sound", "sounds").values())
-    if not animations and not sounds:
+
+    known_ids = {e["id"] for e in animations} | {e["id"] for e in sounds}
+    scanned = []
+    for aid in (scanned_ids or []):
+        aid = str(aid).strip()
+        if aid.isdigit() and int(aid) > 0 and aid not in known_ids and aid not in scanned:
+            scanned.append(aid)
+            if len(scanned) >= SCAN_MAX_IDS:
+                break
+
+    if not animations and not sounds and not scanned:
         print(f"[ASSETS] Place {place_id} has no animations/sounds; skipping pack.")
         return None
 
@@ -278,6 +341,8 @@ async def create_pack(place_id: str, author_id, display_name_: str, game_name: s
     manifest = {
         "pack_id": pack_id,
         "place_id": str(place_id),
+        "universe_id": str(pending.get("universe_id") or ""),
+        "scanned_ids": scanned,
         "game_name": game_name or f"Place {place_id}",
         "icon_url": icon_url or "",
         "game_version": game_version or "N/A",
@@ -317,6 +382,246 @@ def link_pack_to_game(pack_id: str, filename: str):
 # --------------------------------------------------------------------------
 # downloading
 # --------------------------------------------------------------------------
+# Multi-cookie pool: every Roblox API call is round-robined across the cookies
+# in cookies.txt (+ ROBLOX_COOKIE env + the cookie that joined the game), each
+# with its own session, concurrency semaphore and kartFr-style fixed-window
+# rate limiter. Failover on 401 (cookie dead) / 403 / 409 (this account can't
+# see the asset -> next cookie) / 429 (pause that cookie, next cookie takes
+# over), so the aggregate throughput is N cookies x limit per window.
+STUDIO_UA = "RobloxStudio/WinInet"          # what Studio (and kartFr) sends
+BATCH_URL = "https://assetdelivery.roblox.com/v2/assets/batch"
+BATCH_SIZE = 50                              # API hard limit per batch request
+
+API_RATE_LIMIT = int(os.getenv("ASSETS_RATE_LIMIT", "40") or 40)   # req/window/cookie
+API_RATE_WINDOW = float(os.getenv("ASSETS_RATE_WINDOW", "5") or 5)  # seconds
+SLOT_CONCURRENCY = 8                         # parallel requests per cookie
+CDN_CONCURRENCY = 16                         # parallel CDN downloads (cookie-free)
+NAME_CONCURRENCY = 32                        # parallel catalog name lookups
+
+
+class _FixedWindow:
+    """Fixed-window limiter: at most `limit` acquisitions per `window` seconds.
+
+    Mirrors kartFr/Asset-Reuploader's internal/taskqueue/fixedwindow.go — when
+    the window is exhausted the caller sleeps until the next window opens
+    instead of erroring, so N cookies give N x limit requests per window.
+    """
+
+    def __init__(self, limit: int, window: float):
+        self.limit = max(1, int(limit))
+        self.window = max(0.1, float(window))
+        self.start = time.monotonic()
+        self.count = 0
+        self._lock = asyncio.Lock()
+
+    async def acquire(self):
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                if now - self.start >= self.window:
+                    self.start = now
+                    self.count = 0
+                if self.count < self.limit:
+                    self.count += 1
+                    return
+                wait = self.window - (now - self.start)
+            await asyncio.sleep(min(max(wait, 0.02) + random.uniform(0, 0.05), self.window))
+
+
+class CookieSlot:
+    """One .ROBLOSECURITY cookie: its session, semaphore and rate window."""
+
+    def __init__(self, index: int, cookie: str, label: str):
+        self.index = index
+        self.cookie = cookie
+        self.label = label
+        self.session: aiohttp.ClientSession | None = None
+        self.sem = asyncio.Semaphore(SLOT_CONCURRENCY)
+        self.window = _FixedWindow(API_RATE_LIMIT, API_RATE_WINDOW)
+        self.invalid = False          # saw a 401: cookie is dead
+        self.disabled_until = 0.0     # saw a 429: paused until then
+        self.requests = 0
+
+    def pause(self, seconds: float):
+        self.disabled_until = max(self.disabled_until,
+                                  time.monotonic() + min(float(seconds), 120))
+
+    def mark_invalid(self, reason: str):
+        if not self.invalid:
+            self.invalid = True
+            print(f"[ASSETS] Cookie '{self.label}' disabled: {reason}")
+
+
+class CookiePool:
+    """Round-robin pool of cookie sessions with failover across accounts."""
+
+    def __init__(self, extra_cookie: str = None, place_id=None, universe_id=None,
+                 use_cookies: bool = True):
+        self.place_id = str(place_id or "").strip() or None
+        self.universe_id = str(universe_id or "").strip() or None
+        self.slots: list[CookieSlot] = []
+        self._rr = 0
+        self.anon: aiohttp.ClientSession | None = None
+        self.cdn_sem = asyncio.Semaphore(CDN_CONCURRENCY)
+        self._owns_sessions = True
+        if use_cookies:
+            seen = set()
+            candidates = []
+            if extra_cookie:
+                candidates.append((extra_cookie, "job"))
+            try:
+                candidates += [(c, f"cookies.txt[{i}]")
+                               for i, c in enumerate(core.load_cookies())]
+            except Exception:
+                pass
+            if getattr(core, "ROBLOX_COOKIE", ""):
+                candidates.append((core.ROBLOX_COOKIE, "env"))
+            try:
+                active = core.get_active_cookie()
+                if active:
+                    candidates.append((active, "active"))
+            except Exception:
+                pass
+            for cookie, label in candidates:
+                cookie = (cookie or "").strip()
+                if not cookie or cookie in seen:
+                    continue
+                seen.add(cookie)
+                self.slots.append(CookieSlot(len(self.slots), cookie, label))
+        if not self.slots:
+            # no cookies at all: open sources still fetch public assets
+            self.slots.append(CookieSlot(0, "", "anonymous"))
+
+    @classmethod
+    def from_session(cls, session: aiohttp.ClientSession, place_id=None) -> "CookiePool":
+        """Wrap an existing session (tests / one-off scripts) as a 1-slot pool."""
+        pool = cls(use_cookies=False, place_id=place_id)
+        slot = CookieSlot(0, "session" if session.headers.get("Cookie") else "", "wrapped")
+        slot.session = session
+        slot.window = _FixedWindow(10_000, 1.0)   # caller owns its own pacing
+        pool.slots = [slot]
+        pool.anon = session
+        pool._owns_sessions = False
+        return pool
+
+    @property
+    def has_cookie(self) -> bool:
+        return any(s.cookie for s in self.slots)
+
+    async def __aenter__(self):
+        for slot in self.slots:
+            if slot.session is None:
+                headers = {"User-Agent": UA, "Accept": "*/*"}
+                if slot.cookie:
+                    headers["Cookie"] = f".ROBLOSECURITY={slot.cookie}"
+                slot.session = aiohttp.ClientSession(
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=45),
+                    connector=aiohttp.TCPConnector(limit=32, ttl_dns_cache=300))
+        if self.anon is None:
+            self.anon = aiohttp.ClientSession(
+                headers={"User-Agent": UA, "Accept": "*/*"},
+                timeout=aiohttp.ClientTimeout(total=60),
+                connector=aiohttp.TCPConnector(limit=32, ttl_dns_cache=300))
+        return self
+
+    async def __aexit__(self, *exc):
+        if not self._owns_sessions:
+            return
+        for slot in self.slots:
+            if slot.session is not None:
+                try:
+                    await slot.session.close()
+                except Exception:
+                    pass
+        if self.anon is not None:
+            try:
+                await self.anon.close()
+            except Exception:
+                pass
+
+    async def checkout(self, rate_limited: bool = True) -> CookieSlot | None:
+        """Next healthy slot; acquires its semaphore (+ rate window when limited).
+        Returns None only when every cookie is invalid or the wait timed out."""
+        n = len(self.slots)
+        deadline = time.monotonic() + 20
+        while True:
+            for _ in range(n):
+                slot = self.slots[self._rr % n]
+                self._rr += 1
+                if slot.invalid or slot.disabled_until > time.monotonic():
+                    continue
+                await slot.sem.acquire()
+                paused = slot.disabled_until - time.monotonic()
+                if paused > 0:
+                    await asyncio.sleep(paused)
+                if rate_limited:
+                    await slot.window.acquire()
+                slot.requests += 1
+                return slot
+            if all(s.invalid for s in self.slots):
+                return None
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(0.25)
+
+    async def cdn_get(self, url: str, timeout: int = 60):
+        """Signed CDN location fetch: anonymous, never rate limited.
+        Returns (status, bytes, error)."""
+        if self.anon is None:
+            self.anon = aiohttp.ClientSession(headers={"User-Agent": UA, "Accept": "*/*"})
+        async with self.cdn_sem:
+            try:
+                async with self.anon.get(url, timeout=aiohttp.ClientTimeout(total=timeout),
+                                         allow_redirects=True) as r:
+                    return r.status, await r.read(), None
+            except asyncio.TimeoutError:
+                return None, None, "timed out"
+            except Exception as e:
+                return None, None, str(e)[:160]
+
+    def stats(self) -> str:
+        return ", ".join(f"{s.label}={s.requests}req" for s in self.slots)
+
+
+async def _send(slot: CookieSlot, url: str, headers: dict, method: str = "GET",
+                json_body=None, timeout: int = 45, max_bytes: int = None):
+    """One request on an already-checked-out slot.
+    Returns (status, body, headers, error). Caller releases the slot."""
+    try:
+        kwargs = {"headers": headers,
+                  "timeout": aiohttp.ClientTimeout(total=timeout),
+                  "allow_redirects": True}
+        if json_body is not None:
+            kwargs["json"] = json_body
+        async with slot.session.request(method, url, **kwargs) as r:
+            body = await r.content.read(max_bytes) if max_bytes else await r.read()
+            return r.status, body, dict(r.headers), None
+    except asyncio.TimeoutError:
+        return None, None, {}, "timed out"
+    except Exception as e:
+        return None, None, {}, str(e)[:160]
+
+
+def _retry_after(headers: dict, default: float = 5.0) -> float:
+    try:
+        v = headers.get("Retry-After")
+        if v:
+            return min(float(v), 120.0)
+    except (TypeError, ValueError):
+        pass
+    return default
+
+
+def _cache_write(cache: str, data: bytes):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(cache, "wb") as f:
+            f.write(data)
+    except Exception:
+        pass
+
+
 def _sniff_ext(data: bytes, kind: str):
     if not data or len(data) < 8:
         return None
@@ -348,22 +653,19 @@ def _sniff_ext(data: bytes, kind: str):
 def _kind_ok(ext: str, kind: str) -> bool:
     if kind == "sound":
         return ext in AUDIO_EXTS
+    if kind == "scan":
+        # place-file harvested ids: either folder is acceptable until typed
+        return ext in AUDIO_EXTS or ext in MODEL_EXTS
     return ext in MODEL_EXTS
 
 
 def _source_urls(asset_id: str, has_cookie: bool):
-    """Ordered fetch sources. The cookie-authenticated ones are tried first —
-    Roblox's /asset/ endpoint returns its HTML error page when logged out."""
-    authed = [
-        f"https://www.roblox.com/asset/?id={asset_id}",
-        f"https://assetdelivery.roblox.com/v1/asset/?id={asset_id}",
-        f"https://apis.roblox.com/assets/v1/assets/{asset_id}/contents",
-    ]
-    open_sources = [
-        f"https://www.roblox.com/asset/?id={asset_id}",
-        f"https://assetdelivery.roproxy.com/v1/asset/?id={asset_id}",
-    ]
-    order = (authed + open_sources) if has_cookie else (open_sources + authed)
+    """Ordered fetch sources. assetdelivery serves the real bytes; roproxy is a
+    mirror of it. www.roblox.com/asset/ only ever returns an HTML 404 page, so
+    it is left out — it used to mask real 403/409 refusals as '404'."""
+    assetdelivery = f"https://assetdelivery.roblox.com/v1/asset/?id={asset_id}"
+    roproxy = f"https://assetdelivery.roproxy.com/v1/asset/?id={asset_id}"
+    order = [assetdelivery, roproxy] if has_cookie else [roproxy, assetdelivery]
     return list(dict.fromkeys(order))
 
 
@@ -371,85 +673,83 @@ def _cache_path(asset_id: str) -> str:
     return os.path.join(CACHE_DIR, f"{asset_id}.bin")
 
 
-async def _resolve_names(session, ids, has_cookie=False):
-    """Best effort catalog names; never raises. Falls back to instance names."""
+_NAME_CACHE: dict = {}      # asset id -> catalog name (None = known missing)
+_NAME_UNSET = object()
+
+
+def _og_title(body: bytes):
+    """Proper item name from a catalog page (every JSON name API is dead)."""
+    m = re.search(rb'property="og:title" content="([^"]+)"', body)
+    if not m:
+        m = re.search(rb"<title[^>]*>(.*?)</title>", body[:120000], re.S | re.I)
+    if not m:
+        return None
+    text = html.unescape(m.group(1).decode("utf-8", "replace")).strip()
+    text = text.replace(" - Roblox", "").strip()
+    return text[:120] or None
+
+
+async def _resolve_names(target, ids, has_cookie=False):
+    """Best effort proper names; never raises. Falls back to instance names.
+
+    Every Roblox JSON name endpoint is dead (404), so read the catalog page's
+    og:title instead — works for public items, private/unsellable ids simply
+    keep their instance name. Lookups run through the cookie pool."""
     names = {}
     if not ids:
         return names
+    pool = target if isinstance(target, CookiePool) else CookiePool.from_session(target)
 
-    # 1) batch lookup (cheap: a couple of calls for the whole pack)
-    for i in range(0, len(ids), 50):
-        chunk = ids[i:i + 50]
-        for url in (
-            "https://apis.roblox.com/assets/v1/assets?assetIds=" + ",".join(chunk),
-            "https://apis.roblox.com/marketplace-api/v1/items?assetIds=" + ",".join(chunk),
-        ):
+    missing = []
+    for aid in dict.fromkeys(str(i) for i in ids):
+        cached = _NAME_CACHE.get(aid, _NAME_UNSET)
+        if cached is _NAME_UNSET:
+            missing.append(aid)
+        elif cached:
+            names[aid] = cached
+    if not missing:
+        print(f"[ASSETS] Resolved {len(names)}/{len(ids)} catalog name(s) (cached).")
+        return names
+
+    gate = asyncio.Semaphore(NAME_CONCURRENCY)
+
+    async def one(aid):
+        async with gate:
+            slot = await pool.checkout()
+            if slot is None:
+                return
             try:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                    if r.status == 200:
-                        data = await r.json()
-                        if isinstance(data, dict):
-                            data = data.get("data") or data.get("assets") or []
-                        if isinstance(data, list):
-                            for item in data:
-                                if isinstance(item, dict):
-                                    key = (item.get("assetId") or item.get("targetId")
-                                           or item.get("id") or item.get("assetId") )
-                                    nm = item.get("name") or item.get("Name")
-                                    if key and nm:
-                                        names[str(key)] = str(nm)
-                            if names:
-                                break
-            except Exception as e:
-                print(f"[ASSETS] name batch lookup failed: {e}")
-            await asyncio.sleep(0.1)
+                status, body, hdrs, _err = await _send(
+                    slot, f"https://www.roblox.com/catalog/{aid}",
+                    {"Accept": "text/html,*/*"}, timeout=20, max_bytes=200_000)
+            finally:
+                slot.sem.release()
+            if status == 401:
+                slot.mark_invalid("HTTP 401 (expired)")
+                return
+            if status == 429:
+                slot.pause(_retry_after(hdrs))
+                return
+            if status != 200 or not body:
+                _NAME_CACHE[aid] = None      # 404/private: no catalog page
+                return
+            name = _og_title(body)
+            _NAME_CACHE[aid] = name
+            if name:
+                names[aid] = name
 
-    # 2) per-id metadata (works when the decompile cookie is attached)
-    missing = [i for i in ids if i not in names]
-    for aid in missing[:500]:
-        try:
-            async with session.get(
-                f"https://apis.roblox.com/assets/v1/assets/{aid}",
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    if isinstance(data, dict) and data.get("name"):
-                        names[aid] = str(data["name"])
-                        continue
-                if r.status == 429:
-                    await asyncio.sleep(2)
-                    continue
-        except Exception:
-            pass
-        await asyncio.sleep(0.06)
-
-    # 3) legacy marketplace endpoint as a last resort
-    missing = [i for i in ids if i not in names]
-    for aid in missing[:200]:
-        try:
-            async with session.get(
-                f"https://api.roblox.com/marketplace/productinfo?assetId={aid}",
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    if isinstance(data, dict) and data.get("Name"):
-                        names[aid] = str(data["Name"])
-                        continue
-                if r.status == 429:
-                    await asyncio.sleep(2)
-                    continue
-        except Exception:
-            pass
-        await asyncio.sleep(0.06)
-
+    await asyncio.gather(*(one(a) for a in missing))
     print(f"[ASSETS] Resolved {len(names)}/{len(ids)} catalog name(s).")
     return names
 
 
-async def _fetch_asset(session, asset_id: str, kind: str):
-    """Return (bytes, ext) or (None, reason)."""
+async def _fetch_asset(target, asset_id: str, kind: str, place_id: str = None):
+    """Return (bytes, ext, from_cache) or (None, reason, False).
+
+    `target` is a CookiePool (failover across cookies) or a plain session.
+    For each source the trusted-place header is tried first (an asset that is
+    "not trusted for this place" 403s without it), then the plain request —
+    every healthy cookie gets a turn before moving on."""
     cache = _cache_path(asset_id)
     if os.path.isfile(cache):
         try:
@@ -461,52 +761,259 @@ async def _fetch_asset(session, asset_id: str, kind: str):
         except Exception:
             pass
 
+    pool = target if isinstance(target, CookiePool) else CookiePool.from_session(target, place_id)
+    if place_id and not pool.place_id:
+        pool.place_id = str(place_id)
+
     last_error = "no source returned usable content"
-    has_cookie = bool(session.headers.get("Cookie"))
-    for url in _source_urls(asset_id, has_cookie):
-        for attempt in range(3):
-            try:
-                async with session.get(
-                    url,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                    allow_redirects=True,
-                    headers={"Accept": "*/*"},
-                ) as r:
-                    if r.status == 429:
-                        wait = float(r.headers.get("Retry-After", 2) or 2)
-                        await asyncio.sleep(min(wait, 10))
-                        continue
-                    if r.status in (403, 404):
-                        last_error = f"HTTP {r.status} (deleted or private)"
-                        break
-                    if r.status != 200:
-                        last_error = f"HTTP {r.status}"
-                        break
-                    data = await r.read()
-                    ext = _sniff_ext(data, kind)
-                    if not data:
-                        last_error = "empty response"
-                        break
-                    if not ext:
-                        last_error = "unrecognised content"
-                        break
-                    if not _kind_ok(ext, kind):
-                        last_error = f"unexpected content type ({ext})"
-                        break
-                    try:
-                        os.makedirs(CACHE_DIR, exist_ok=True)
-                        with open(cache, "wb") as f:
-                            f.write(data)
-                    except Exception:
-                        pass
-                    return data, ext, False
-            except asyncio.TimeoutError:
-                last_error = "timed out"
-            except Exception as e:
-                last_error = str(e)[:120]
-            await asyncio.sleep(0.3)
-        await asyncio.sleep(0.15)
+    place_hdr = {"Roblox-Place-Id": pool.place_id} if pool.place_id else {}
+    for url in _source_urls(asset_id, pool.has_cookie):
+        for hdr_extra in ([place_hdr, {}] if place_hdr else [{}]):
+            tried = set()
+            while True:
+                slot = await pool.checkout()
+                if slot is None:
+                    return None, last_error if last_error != "no source returned usable content" \
+                        else "no usable cookie (all cookies invalid)", False
+                if slot.index in tried:
+                    slot.sem.release()      # every healthy cookie already tried here
+                    break
+                tried.add(slot.index)
+                try:
+                    status, body, hdrs, err = await _send(
+                        slot, url, {"Accept": "*/*", **hdr_extra})
+                finally:
+                    slot.sem.release()
+                if status is None:
+                    last_error = err or "request failed"
+                    continue                # network error -> next cookie
+                if status == 401:
+                    slot.mark_invalid("HTTP 401 (expired)")
+                    last_error = "HTTP 401 (cookie expired)"
+                    continue
+                if status == 429:
+                    slot.pause(_retry_after(hdrs))
+                    last_error = "HTTP 429 (rate limited)"
+                    continue                # this cookie cools down, next one takes over
+                if status in (403, 409):
+                    # per-account / per-place refusal: another cookie may have access
+                    last_error = f"HTTP {status} (not authorized for this account/place)"
+                    continue
+                if status == 404:
+                    last_error = "HTTP 404 (deleted)"
+                    break                   # account independent -> next source
+                if status != 200:
+                    last_error = f"HTTP {status}"
+                    break
+                data = body or b""
+                ext = _sniff_ext(data, kind)
+                if not data:
+                    last_error = "empty response"
+                    break
+                if not ext:
+                    last_error = "unrecognised content"
+                    break
+                if not _kind_ok(ext, kind):
+                    last_error = f"unexpected content type ({ext})"
+                    break
+                _cache_write(cache, data)
+                return data, ext, False
     return None, last_error, False
+
+
+async def _batch_once(pool: CookiePool, body: list, hdrs: dict):
+    """POST /v2/assets/batch, failing over cookies.
+
+    A 200 response can still carry per-row authorization errors (access is
+    per-account: one cookie's refusal doesn't mean the asset is gone), so
+    rows without a location are re-sent on the next cookie until every id
+    has a location or every healthy cookie has been tried. Returns the
+    merged response rows, or None when nothing came back at all."""
+    tried = set()
+    merged: dict = {}        # requestId -> row (locations are authoritative)
+    pending = list(body)
+    while pending:
+        slot = await pool.checkout()
+        if slot is None:
+            break
+        if slot.index in tried:
+            slot.sem.release()      # every healthy cookie already answered
+            break
+        tried.add(slot.index)
+        try:
+            status, resp, rhdrs, _err = await _send(
+                slot, BATCH_URL, hdrs, method="POST", json_body=pending, timeout=60)
+        finally:
+            slot.sem.release()
+        if status == 401:
+            slot.mark_invalid("HTTP 401 (expired)")
+            continue
+        if status == 429:
+            slot.pause(_retry_after(rhdrs))
+            continue
+        if status != 200 or not resp:
+            continue                # other status -> next cookie
+        try:
+            rows = json.loads(resp.decode("utf-8", "replace"))
+        except Exception:
+            continue
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            rid = str(row.get("requestId") or "")
+            if not rid:
+                continue
+            if row.get("locations"):
+                merged[rid] = row   # locations are authoritative
+            elif rid not in merged:
+                merged[rid] = row   # keep first error row for reporting
+        pending = [r for r in body
+                   if not (merged.get(str(r.get("requestId") or "")) or {}
+                           ).get("locations")]
+    return list(merged.values()) or None
+
+
+async def _pull_cached(pool: CookiePool, aid: str, kind: str, url: str):
+    """Download a signed CDN location (cookie-free, not rate limited).
+    Serves from the asset cache when an earlier phase already fetched it."""
+    cache = _cache_path(aid)
+    if os.path.isfile(cache):
+        try:
+            with open(cache, "rb") as f:
+                data = f.read()
+            ext = _sniff_ext(data, kind)
+            if ext and _kind_ok(ext, kind):
+                return aid, (data, ext)
+        except Exception:
+            pass
+    status, data, err = await pool.cdn_get(url)
+    if status != 200 or not data:
+        return aid, (None, err or f"HTTP {status} from CDN")
+    ext = _sniff_ext(data, kind)
+    if not ext or not _kind_ok(ext, kind):
+        return aid, (None, f"unexpected content type ({ext})" if ext else "unrecognised content")
+    _cache_write(cache, data)
+    return aid, (data, ext)
+
+
+async def _batch_fetch(pool: CookiePool, items, types_out: dict = None,
+                       type_filter: set = None):
+    """kartFr-style bulk download: POST /v2/assets/batch (<=50 ids per request)
+    with the trusted-place header, then a second pass without it for assets
+    that aren't trusted for this place. Locations are signed CDN URLs that
+    download anonymously, so bulk traffic barely touches the cookie budget.
+
+    items: [(asset_id, kind), ...] -> {id: (bytes, ext) | (None, reason)}.
+    ``types_out`` receives Roblox's assetTypeId per id; when ``type_filter``
+    is set, ids whose type is known and not in the filter are never even
+    downloaded (used for place-file harvested ids of unknown purpose)."""
+    out = {}
+    if not items:
+        return out
+    place = pool.place_id if str(pool.place_id or "").isdigit() else None
+    universe = pool.universe_id if str(pool.universe_id or "").isdigit() else None
+    remaining = list(dict.fromkeys((str(a), k) for a, k in items if str(a).isdigit()))
+
+    for pass_hdr in ([True, False] if place else [False]):
+        if not remaining:
+            break
+        still = []
+        for i in range(0, len(remaining), BATCH_SIZE):
+            chunk = remaining[i:i + BATCH_SIZE]
+            body = []
+            for aid, _kind in chunk:
+                row = {"assetId": int(aid), "requestId": aid,
+                       "clientInsert": False, "scriptInsert": False}
+                if place and pass_hdr:
+                    row["placeId"] = int(place)
+                if universe:
+                    row["universeId"] = int(universe)
+                body.append(row)
+            hdrs = {"User-Agent": STUDIO_UA, "Content-Type": "application/json"}
+            if pass_hdr:
+                hdrs["Roblox-Place-Id"] = place
+            data = await _batch_once(pool, body, hdrs)
+            if data is None:
+                still.extend(chunk)         # transport failure -> retry next pass
+                continue
+            locs = {}
+            for row in data:
+                rid = str(row.get("requestId") or "")
+                ls = row.get("locations") or []
+                if types_out is not None:
+                    types_out[rid] = row.get("assetTypeId") or 0
+                if ls and isinstance(ls[0], dict) and ls[0].get("location"):
+                    locs[rid] = ls[0]["location"]
+            fetch_jobs = []
+            for aid, kind in chunk:
+                if aid in locs:
+                    if type_filter is not None:
+                        t = types_out.get(aid, 0) if types_out else 0
+                        if t and t not in type_filter:
+                            out[aid] = (None, f"asset type {t} skipped")
+                            continue        # known wrong type: don't even fetch
+                    fetch_jobs.append((aid, kind, locs[aid]))
+                else:
+                    still.append((aid, kind))
+            if fetch_jobs:
+                got = await asyncio.gather(
+                    *[_pull_cached(pool, aid, kind, url) for aid, kind, url in fetch_jobs])
+                out.update(dict(got))
+        remaining = still
+
+    for aid, kind in remaining:
+        out.setdefault(aid, (None, "not available via batch"))
+    ok = sum(1 for v in out.values() if v[0])
+    print(f"[ASSETS] Batch: {len(out)} id(s) -> {ok} via /v2/assets/batch.")
+    return out
+
+
+async def _integrate_scanned(pool: CookiePool, manifest: dict) -> int:
+    """Type the ids harvested from the place file with one batch call and turn
+    the audio/animation ones into real pack entries — assets the injected
+    client scan never saw (only referenced in scripts/properties).
+    Returns how many entries were added; never raises."""
+    scanned = [str(i) for i in (manifest.get("scanned_ids") or [])]
+    scanned = [i for i in dict.fromkeys(scanned) if i.isdigit() and int(i) > 0]
+    known = {str(e.get("id"))
+             for e in (manifest.get("animations") or []) + (manifest.get("sounds") or [])}
+    scanned = [i for i in scanned if i not in known]
+    if not scanned:
+        return 0
+
+    types = {}
+    try:
+        # 3 = audio, 24/61 = animation (legacy vs current type ids)
+        res = await _batch_fetch(pool, [(i, "scan") for i in scanned],
+                                 types_out=types, type_filter={3, 24, 61})
+    except Exception as e:
+        print(f"[ASSETS] Scanned-id batch failed: {e}")
+        return 0
+
+    added = 0
+    for aid in scanned:
+        r = res.get(aid)
+        if not r or not r[0]:
+            continue                        # inaccessible, deleted or wrong type
+        data, ext = r
+        t = types.get(aid, 0)
+        if ext in AUDIO_EXTS:
+            kind, key = "sound", "sounds"
+        elif t in (24, 61) and ext in MODEL_EXTS:
+            kind, key = "animation", "animations"
+        else:
+            continue
+        manifest.setdefault(key, []).append({
+            "id": aid, "kind": kind, "name": f"Asset{aid}",
+            "paths": ["(referenced in place file)"], "catalog": None,
+            "file": None, "size": 0, "status": "queued", "error": None,
+        })
+        added += 1
+    if added:
+        for key in ("animations", "sounds"):
+            _unique_file_names(manifest.get(key) or [])
+        print(f"[ASSETS] Place-file scan added {added} asset(s) the client scan missed.")
+    return added
 
 
 async def _download_worker(pack_id: str, cookie: str = None):
@@ -514,24 +1021,8 @@ async def _download_worker(pack_id: str, cookie: str = None):
     if not manifest:
         return
     path = pack_dir(pack_id)
-    entries = [(e, "Animations") for e in manifest.get("animations", [])]
-    entries += [(e, "Sounds") for e in manifest.get("sounds", [])]
-    pending = [(e, folder) for e, folder in entries
-               if e.get("status") in ("queued", "downloading")]
-    if not pending:
-        manifest["status"] = "done"
-        save_manifest(pack_id, manifest)
-        return
-
-    todo = [e for e, _ in pending]
-    for e in todo:
-        e["status"] = "downloading"
-    manifest["status"] = "downloading"
-    save_manifest(pack_id, manifest)
-
-    headers = {"User-Agent": UA, "Accept": "*/*"}
-    if cookie:
-        headers["Cookie"] = f".ROBLOSECURITY={cookie}"
+    place_id = str(manifest.get("place_id") or "")
+    universe_id = str(manifest.get("universe_id") or "")
 
     sem = asyncio.Semaphore(4)
     flush_lock = asyncio.Lock()
@@ -545,13 +1036,35 @@ async def _download_worker(pack_id: str, cookie: str = None):
                 await asyncio.to_thread(save_manifest, pack_id, manifest)
 
     try:
-        conn = aiohttp.TCPConnector(limit=8, ttl_dns_cache=300)
-        timeout = aiohttp.ClientTimeout(total=45)
-        async with aiohttp.ClientSession(headers=headers, connector=conn, timeout=timeout) as session:
-            ids = [e["id"] for e in todo]
-            has_cookie = bool(session.headers.get("Cookie"))
+        async with CookiePool(cookie, place_id=place_id,
+                              universe_id=universe_id) as pool:
+            # place-file harvested ids first: they may add entries to the
+            # manifest, so pending has to be computed after integration
+            # (this also makes scanned-only packs downloadable).
             try:
-                names = await _resolve_names(session, ids, has_cookie)
+                await _integrate_scanned(pool, manifest)
+                await flush(force=True)
+            except Exception as e:
+                print(f"[ASSETS] Scanned-id integration error: {e}")
+
+            entries = [(e, "Animations") for e in manifest.get("animations", [])]
+            entries += [(e, "Sounds") for e in manifest.get("sounds", [])]
+            pending = [(e, folder) for e, folder in entries
+                       if e.get("status") in ("queued", "downloading")]
+            if not pending:
+                manifest["status"] = "done"
+                save_manifest(pack_id, manifest)
+                return
+
+            todo = [e for e, _ in pending]
+            for e in todo:
+                e["status"] = "downloading"
+            manifest["status"] = "downloading"
+            save_manifest(pack_id, manifest)
+
+            ids = [e["id"] for e in todo]
+            try:
+                names = await _resolve_names(pool, ids, pool.has_cookie)
             except Exception as e:
                 print(f"[ASSETS] Name resolution error: {e}")
                 names = {}
@@ -566,11 +1079,31 @@ async def _download_worker(pack_id: str, cookie: str = None):
                 _unique_file_names(manifest.get(key) or [])
             await flush(force=True)
 
+            # bulk pass: 50 ids per request, CDN locations are cookie-free
+            try:
+                batched = await _batch_fetch(pool, [(e["id"], e["kind"]) for e in todo])
+            except Exception as e:
+                print(f"[ASSETS] Batch fetch error: {e}")
+                batched = {}
+
             async def work(entry, folder):
                 async with sem:
                     try:
-                        await asyncio.sleep(0.12)
-                        data, ext, from_cache = await _fetch_asset(session, entry["id"], entry["kind"])
+                        data, ext, from_cache = None, None, False
+                        res = batched.get(entry["id"])
+                        if res and res[0]:
+                            data, ext = res
+                        elif res and res[1] and str(res[1]).startswith(
+                                ("unexpected content type", "unrecognised")):
+                            # the CDN already served the real bytes and they do
+                            # not fit this folder — retrying through the pool
+                            # would only burn requests on identical content
+                            data, ext = None, res[1]
+                        else:
+                            # per-asset failover: trusted-place header first,
+                            # then every cookie, then the open mirrors
+                            data, ext, from_cache = await _fetch_asset(
+                                pool, entry["id"], entry["kind"], place_id=place_id)
                         if not data:
                             entry["status"] = "failed"
                             entry["error"] = str(ext)
@@ -594,6 +1127,7 @@ async def _download_worker(pack_id: str, cookie: str = None):
                     await flush()
 
             await asyncio.gather(*(work(e, folder) for e, folder in pending))
+            print(f"[ASSETS] Pool usage for {pack_id}: {pool.stats()}")
     except Exception as e:
         print(f"[ASSETS] Download worker failed for {pack_id}: {e}")
         manifest["status"] = "failed"

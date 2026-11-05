@@ -1069,6 +1069,53 @@ async def _safe_json(resp):
     except Exception:
         return {}
 
+async def resolve_place_or_universe(raw_id: str, cookie: str = None) -> str:
+    """Return a joinable place id for a numeric id.
+
+    Accepts a place id (returned unchanged) or a universe id, which is
+    resolved to the universe's root place — so private experiences can be
+    decompiled straight from their universe id as well as their place id.
+    Never raises; on any doubt the original id is returned so the normal
+    error path handles it."""
+    raw_id = str(raw_id).strip()
+    if not raw_id.isdigit():
+        return raw_id
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+    }
+    use_cookie = cookie or get_active_cookie()
+    if use_cookie:
+        headers["Cookie"] = f".ROBLOSECURITY={use_cookie}"
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            # a valid place id answers this with a real universe id
+            # (a universe id passed here answers 200 with universeId: null!)
+            async with session.get(
+                f"https://apis.roblox.com/universes/v1/places/{raw_id}/universe",
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 200:
+                    data = await _safe_json(resp)
+                    if data.get("universeId"):
+                        return raw_id
+            # otherwise: maybe it is a universe id -> its root place
+            async with session.get(
+                f"https://games.roblox.com/v1/games?universeIds={raw_id}",
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 200:
+                    data = await _safe_json(resp)
+                    games = (data or {}).get("data") or []
+                    if games and isinstance(games, list) and isinstance(games[0], dict):
+                        root = str(games[0].get("rootPlaceId") or "").strip()
+                        if root.isdigit():
+                            print(f"[DEBUG] Universe {raw_id} -> root place {root}")
+                            return root
+    except Exception as e:
+        print(f"[DEBUG] resolve_place_or_universe({raw_id}) error: {e}")
+    return raw_id
+
 async def resolve_game_by_name(name: str):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -5820,6 +5867,9 @@ async def run_decompile_logic(send_func, user: discord.User | discord.Member, gu
             await send_msg(send_func, f"Could not find a game matching `{place_id}`.", ephemeral=is_ephemeral)
             return
         place_id = resolved["place_id"]
+    else:
+        # numeric id: may be a place id or a universe id -> normalize to place
+        place_id = await resolve_place_or_universe(place_id, cookie=user_cookie)
 
     blacklisted_games = load_blacklisted_games()
     if str(place_id).strip() in blacklisted_games:
@@ -6061,6 +6111,14 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                     pack_id = None
                     try:
                         from . import assets as assets_mod
+                        # harvest rbxassetid:// references from the place file
+                        # binary too — assets only referenced in scripts or
+                        # properties never show up in the live client scan.
+                        scanned_ids = []
+                        for _p in (file_path, game_file):
+                            if _p and os.path.isfile(_p):
+                                scanned_ids += await asyncio.to_thread(
+                                    assets_mod.scan_place_file, _p)
                         pack_id = await assets_mod.create_pack(
                             place_id,
                             author_id,
@@ -6070,6 +6128,7 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
                             game_version=game_version,
                             cookie=user_cookie or get_active_cookie(),
                             download=True,
+                            scanned_ids=scanned_ids,
                         )
                         if pack_id:
                             await asyncio.to_thread(

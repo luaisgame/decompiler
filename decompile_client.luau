@@ -155,6 +155,7 @@ pcall(function()
         Body = game:GetService("HttpService"):JSONEncode({
             status = "assets",
             place_id = game.PlaceId,
+            universe_id = game.GameId,
             sounds = assetSounds,
             animations = assetAnimations,
         })
