@@ -326,9 +326,10 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-LOCAL_APP_DATA = os.environ.get("APPDATA", "")
+LOCAL_APP_DATA = os.environ.get("LOCALAPPDATA", "")
+ROAMING_APP_DATA = os.environ.get("APPDATA", "")
 WORKSPACE_NAME = os.getenv("WORKSPACE_NAME", "Volt")
-WORKSPACE_DIR = os.path.join(LOCAL_APP_DATA, WORKSPACE_NAME, "workspace")
+WORKSPACE_DIR = os.path.join(ROAMING_APP_DATA, WORKSPACE_NAME, "workspace")
 SKIP_PROCESSFILE = os.getenv("SKIP_PROCESSFILE", "0").lower() in ("1", "true", "yes")
 
 ONE_MB = 1024 * 1024
