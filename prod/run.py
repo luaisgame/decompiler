@@ -17,6 +17,7 @@ TUNNEL_NAME = "storage"
 TUNNEL_ID = None
 TUNNEL_DOMAIN = "storage.luaisgame.com"
 TUNNEL_DOMAIN_MC = "mc.luaisgame.com"
+TUNNEL_DOMAIN_DM = "dm.luaisgame.com"
 
 FILES = [
     "bot.py",
@@ -106,7 +107,7 @@ def ensure_tunnel():
 
     # Route DNS for BOTH hostnames on every startup (idempotent), so a hostname
     # added later (mc.luaisgame.com) gets its CNAME without manual intervention.
-    for domain in (TUNNEL_DOMAIN, TUNNEL_DOMAIN_MC):
+    for domain in (TUNNEL_DOMAIN, TUNNEL_DOMAIN_MC, TUNNEL_DOMAIN_DM):
         subprocess.run(
             [cf, "tunnel", "route", "dns", TUNNEL_NAME, domain],
             capture_output=True
@@ -122,6 +123,8 @@ ingress:
   - hostname: {TUNNEL_DOMAIN}
     service: http://127.0.0.1:5000
   - hostname: {TUNNEL_DOMAIN_MC}
+    service: http://127.0.0.1:5000
+  - hostname: {TUNNEL_DOMAIN_DM}
     service: http://127.0.0.1:5000
   - service: http_status:404
 """
@@ -167,14 +170,14 @@ def start_tunnel():
                 pass
             time.sleep(2)
         else:
-            print(f"[RUNNER] Tunnel already running: https://{TUNNEL_DOMAIN} + https://{TUNNEL_DOMAIN_MC}")
+            print(f"[RUNNER] Tunnel already running: https://{TUNNEL_DOMAIN} + https://{TUNNEL_DOMAIN_MC} + https://{TUNNEL_DOMAIN_DM}")
             return
     subprocess.Popen(
         [cf, "tunnel", "run", TUNNEL_NAME],
         creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
-    print(f"[RUNNER] Tunnel started: https://{TUNNEL_DOMAIN} + https://{TUNNEL_DOMAIN_MC}")
+    print(f"[RUNNER] Tunnel started: https://{TUNNEL_DOMAIN} + https://{TUNNEL_DOMAIN_MC} + https://{TUNNEL_DOMAIN_DM}")
 
 def fetch():
     for p in FILES:
