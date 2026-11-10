@@ -96,7 +96,9 @@ server_blacklisted_file = os.path.join(BASE_DIR, "blacklistedservers.txt")
 channels_file = os.path.join(BASE_DIR, "allowed_channels.txt")
 cookies_file = os.path.join(BASE_DIR, "cookies.txt")
 storage_dir = os.path.join(BASE_DIR, "storage")
-STORAGE_MAX_BYTES = 25 * 1024 * 1024 * 1024
+# 10 GB uploads on dm.* need headroom, and the old 25 GB ceiling started
+# evicting files far too quickly.
+STORAGE_MAX_BYTES = 100 * 1024 * 1024 * 1024
 banned_ips_file = os.path.join(BASE_DIR, "banned_ips.txt")
 ips_file = os.path.join(BASE_DIR, "tracked_ips.json")
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "1532820804402806844")
@@ -115,9 +117,25 @@ def _request_is_mc_host(request) -> bool:
     return host.startswith("mc.")
 BOT_OWNER_ID = int(os.environ.get("BOT_OWNER_ID", "1293889121374179328"))
 MC_OWNER_ID = 1325914599383498782
+DISCORD_REDIRECT_URI_DM = os.environ.get("DISCORD_REDIRECT_URI_DM",
+                                         "https://dm.luaisgame.com/api/auth/callback")
+
+# Sessions and OAuth states used to live in these dicts, which meant every
+# restart signed everybody out and dropped half-finished logins. They now live
+# in accounts.db (see commands/dm/auth.py) and survive restarts.
 _auth_sessions = {}
 _oauth_states = {}
 MC_PERMISSIONS_FILE = os.path.join(BASE_DIR, "mc_permissions.json")
+
+from .dm import auth as dm_auth            # noqa: E402
+from .dm import api as dm_api              # noqa: E402
+from .dm import web as dm_web              # noqa: E402
+
+
+def _request_is_dm_host(request) -> bool:
+    """True when the request came in on the dm.* hostname."""
+    host = (request.host or "").lower().split(":")[0]
+    return host.startswith("dm.")
 
 def _cleanup_storage():
     try:
@@ -742,14 +760,59 @@ class CookieBannedView(discord.ui.View):
         for child in self.children:
             child.disabled = True
 
+# Discord only routes a button click back to a view it still knows about. Views
+# sent in this process are remembered by message id, but anything sent before a
+# restart is gone — so interactive decompile buttons carry a fixed custom_id and
+# the state they need (the join URL) is mirrored to disk.
+JOIN_URLS_FILE = os.path.join(BASE_DIR, "join_urls.json")
+_join_urls: dict = {}
+
+
+def _load_join_urls() -> None:
+    global _join_urls
+    try:
+        with open(JOIN_URLS_FILE, "r") as f:
+            data = json.load(f)
+        _join_urls = {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    except Exception:
+        _join_urls = {}
+
+
+def _save_join_urls() -> None:
+    try:
+        with open(JOIN_URLS_FILE, "w") as f:
+            json.dump(_join_urls, f)
+    except Exception as e:
+        print(f"[DECOMPILE] Could not persist join urls: {e}")
+
+
+def remember_join_url(message_id, join_url: str) -> None:
+    if not message_id or not join_url:
+        return
+    _join_urls[str(message_id)] = join_url
+    if len(_join_urls) > 1000:            # keep the file bounded
+        for stale in list(_join_urls)[:-1000]:
+            _join_urls.pop(stale, None)
+    _save_join_urls()
+
+
+def lookup_join_url(message_id) -> str:
+    return _join_urls.get(str(message_id or ""), "")
+
+
+_load_join_urls()
+
+
 class JoinGameView(discord.ui.View):
-    def __init__(self, join_url: str = None):
+    def __init__(self, join_url: str = None, message_id: int = None):
         super().__init__(timeout=None)
         self.join_url = join_url
+        self.message_id = message_id
         btn = discord.ui.Button(
             label="Bot has not joined yet" if not join_url else "Copy Join URL",
             style=discord.ButtonStyle.secondary,
             disabled=not join_url,
+            custom_id="decompile:join_url",   # stable -> survives restarts
         )
         btn.callback = self._join_callback
         self.add_item(btn)
@@ -770,8 +833,11 @@ class JoinGameView(discord.ui.View):
         self.add_item(firefox)
 
     async def _join_callback(self, interaction: discord.Interaction):
-        if self.join_url:
-            await interaction.response.send_message(f"**Join URL (copy this):**\n```\n{self.join_url}\n```", ephemeral=True)
+        # After a restart the live view is a freshly registered template, so the
+        # URL always comes from the persisted map keyed by this message id.
+        url = lookup_join_url(getattr(interaction.message, "id", None)) or self.join_url
+        if url:
+            await interaction.response.send_message(f"**Join URL (copy this):**\n```\n{url}\n```", ephemeral=True)
         else:
             await interaction.response.send_message("Bot has not joined the game yet.", ephemeral=True)
 
@@ -779,6 +845,8 @@ class JoinGameView(discord.ui.View):
         self.join_url = join_url
         self.join_button.label = "Copy Join URL"
         self.join_button.disabled = False
+        if self.message_id:
+            remember_join_url(self.message_id, join_url)
 
 class DownloadView(discord.ui.View):
     def __init__(self, download_url: str, pack_id: str = None):
@@ -1302,86 +1370,47 @@ def _safe_next_url(value) -> str:
 
 
 async def handle_discord_auth(request):
-    state = secrets.token_urlsafe(32)
-    # Pick the OAuth callback that matches the host the visitor is on, so the
-    # session cookie lands on the right domain (storage.* vs mc.*).
-    redirect_uri = DISCORD_REDIRECT_URI_MC if _request_is_mc_host(request) else DISCORD_REDIRECT_URI
-    _oauth_states[state] = {"ts": time.time(), "redirect": redirect_uri,
-                            "next": _safe_next_url(request.query.get("next", ""))}
-    query = urlencode({
-        "client_id": DISCORD_CLIENT_ID,
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "scope": "identify",
-        "state": state,
-    })
+    # One OAuth entry point for every hostname: the redirect URI (and therefore
+    # the domain the session cookie lands on) is chosen from the host header.
+    next_url = _safe_next_url(request.query.get("next", ""))
     resp = web.Response(status=302)
-    resp.headers["Location"] = f"https://discord.com/api/oauth2/authorize?{query}"
+    resp.headers["Location"] = dm_auth.discord_auth_url(request, next_url or "/")
     return resp
 
 
 async def handle_discord_callback(request):
     code = request.query.get("code", "")
     state = request.query.get("state", "")
-    state_data = _oauth_states.pop(state, None)
-    # Backward compatible with the old {state: timestamp} format.
-    if isinstance(state_data, dict):
-        state_time = state_data.get("ts", 0)
-        redirect_uri = state_data.get("redirect") or DISCORD_REDIRECT_URI
-        dest = state_data.get("next") or "/"
-    else:
-        state_time = state_data or 0
-        redirect_uri = DISCORD_REDIRECT_URI if not _request_is_mc_host(request) else DISCORD_REDIRECT_URI_MC
-        dest = "/"
-    dest = _safe_next_url(dest) or "/"
-    if not code or not state_time or time.time() - state_time > 600:
+    state_data = dm_auth.consume_oauth_state(state)
+    if not code or not state_data:
         return web.Response(text="Invalid or expired Discord login.", status=400)
 
-    token_data = {
-        "client_id": DISCORD_CLIENT_ID,
-        "client_secret": DISCORD_CLIENT_SECRET,
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": redirect_uri,
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "https://discord.com/api/oauth2/token",
-            data=token_data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        ) as token_resp:
-            if token_resp.status != 200:
-                return web.Response(text="Discord authentication failed.", status=401)
-            token = await token_resp.json()
-        access_token = token.get("access_token")
-        if not access_token:
-            return web.Response(text="Discord authentication failed.", status=401)
-        async with session.get(
-            "https://discord.com/api/users/@me",
-            headers={"Authorization": f"Bearer {access_token}"},
-        ) as user_resp:
-            if user_resp.status != 200:
-                return web.Response(text="Could not read Discord account.", status=401)
-            user_data = await user_resp.json()
+    redirect_uri = state_data.get("redirect") or dm_auth.redirect_for_host(
+        dm_auth.request_host(request))
+    dest = _safe_next_url(state_data.get("next") or "") or "/"
+    link_user = int(state_data.get("link_user") or 0)
 
-    session_id = secrets.token_urlsafe(48)
-    _auth_sessions[session_id] = {
-        "id": str(user_data.get("id", "")),
-        "username": user_data.get("username", ""),
-        "avatar": user_data.get("avatar", ""),
-        "expires": time.time() + 30 * 86400,
-    }
+    user_data = await dm_auth.exchange_discord_code(code, redirect_uri)
+    if not user_data:
+        return web.Response(text="Discord authentication failed.", status=401)
+
+    if link_user:
+        ok, message = dm_auth.link_discord(link_user, user_data)
+        if not ok:
+            return web.Response(text=message, status=400)
+        user = dm_auth.get_user(link_user)
+    else:
+        user = dm_auth.login_or_link_discord(user_data)
+    if not user:
+        return web.Response(text="Could not read Discord account.", status=401)
+    if user.get("banned"):
+        return web.Response(text="This account is banned.", status=403)
+
+    token = dm_auth.create_session(user["id"], request.remote or "",
+                                   request.headers.get("User-Agent", ""))
     resp = web.Response(status=302)
     resp.headers["Location"] = dest
-    resp.set_cookie(
-        "session_id",
-        session_id,
-        max_age=30 * 86400,
-        httponly=True,
-        secure=True,
-        samesite="Lax",
-        path="/",
-    )
+    dm_auth.set_session_cookie(resp, token, dm_auth.request_host(request))
     return resp
 
 
@@ -1398,14 +1427,12 @@ async def handle_auth_me(request):
                               "mc_owner": int(user.get("id", 0)) in (BOT_OWNER_ID, MC_OWNER_ID), **user})
 
 def _get_user_info(request):
-    session_id = request.cookies.get("session_id", "")
-    session = _auth_sessions.get(session_id)
-    if not session:
-        return None
-    if session.get("expires", 0) <= time.time():
-        _auth_sessions.pop(session_id, None)
-        return None
-    return session
+    """Signed-in user for any luaisgame.com host, backed by accounts.db.
+
+    ``id`` stays the Discord snowflake (or "0") so every existing storage/mc
+    permission check keeps working; ``uid`` is the internal account id.
+    """
+    return dm_auth.request_user_public(request)
 
 def _is_admin(request):
     user = _get_user_info(request)
@@ -1518,6 +1545,9 @@ async def handle_thumbnail(request):
     return web.Response(text="", status=404)
 
 async def handle_index(request):
+    # dm.luaisgame.com is the chat platform: same app, different HTML shell.
+    if _request_is_dm_host(request):
+        return await dm_web.index_page(request)
     # mc.luaisgame.com is served by this same app: its root shows the MC console.
     if _request_is_mc_host(request):
         return _mc_page_response(request)
@@ -1781,6 +1811,7 @@ body {{
         <input class="search" type="text" placeholder="Search games..." id="search">
     </div>
     <div class="header-right">
+        <a class="btn btn-primary" href="https://dm.luaisgame.com/" target="_blank" rel="noopener">💬 Chat</a>
         <a class="btn btn-primary" href="https://discord.com/api/oauth2/authorize?client_id=1532820804402806844&permissions=8&scope=bot%20applications.commands" target="_blank">Add Bot</a>
         {"<button class='btn btn-secondary' data-action='toggle-console'>Console</button>" if admin else ""}
         {"<a class='btn btn-minecraft' href='" + MC_SITE_URL + "' target='_blank' rel='noopener'><svg width='16' height='16' viewBox='0 0 24 24' fill='none' aria-hidden='true'><path d='M4 4h6v6H4V4Zm10 0h6v6h-6V4ZM4 14h6v6H4v-6Zm10 0h6v6h-6v-6ZM10 7h4v3h-4V7Zm0 7h4v3h-4v-3Z' fill='currentColor'/></svg> MC Console</a>" if mc_authorized else ""}
@@ -4064,6 +4095,7 @@ body{background:var(--mc-bg);color:var(--mc-txt);font-family:var(--mc-font);lett
 <div class="topbar">
   <div class="logo"><span class="lua">MC</span> Console</div>
   <a class="nav-link" href="https://storage.luaisgame.com/" target="_blank" rel="noopener">&#8592; Storage</a>
+  <a class="nav-link" href="https://dm.luaisgame.com/" target="_blank" rel="noopener">💬 DM</a>
   <div class="user" id="userInfo"></div>
 </div>
 <div class="main">
@@ -5442,8 +5474,19 @@ async def screencast_ws(request):
         await _screencast_broadcast_viewers()
     return ws
 
+async def handle_fallback(request):
+    path = request.path or "/"
+    if path.startswith("/api/") or path.startswith("/ws/"):
+        return web.json_response({"error": "not found"}, status=404)
+    if _request_is_dm_host(request):
+        return await dm_web.index_page(request)
+    return web.Response(text="Not found", status=404)
+
+
 async def start_local_server(host="127.0.0.1", port=5000):
-    app = web.Application()
+    # 64 MB lets a single upload chunk land without tripping aiohttp's default
+    # 1 MB request cap (dm.* sends 16 MB chunks).
+    app = web.Application(client_max_size=64 * 1024 * 1024)
     app.router.add_post("/decompile", handle_post)
     app.router.add_get("/games.json", handle_games_json)
     app.router.add_get("/api/auth/login", handle_discord_auth)
@@ -5492,7 +5535,19 @@ async def start_local_server(host="127.0.0.1", port=5000):
     # Asset pack pages + downloads (must come before the catch-all below).
     from .assets import register_routes as _register_asset_routes
     _register_asset_routes(app)
+    # dm.luaisgame.com: shared accounts + chat platform routes.
+    dm_auth.init(BASE_DIR, BOT_OWNER_ID, DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, {
+        "storage.luaisgame.com": DISCORD_REDIRECT_URI,
+        "mc.luaisgame.com": DISCORD_REDIRECT_URI_MC,
+        "dm.luaisgame.com": DISCORD_REDIRECT_URI_DM,
+    })
+    dm_api.set_paths(BASE_DIR)
+    dm_api.register(app)
+    dm_web.register(app)
     app.router.add_get("/{filename}", handle_download)
+    # Deep links (/settings/profile, /servers/1/...) belong to the dm SPA; every
+    # other host keeps a plain 404.
+    app.router.add_get("/{rest:.*}", handle_fallback)
     runner = web.AppRunner(app)
     await runner.setup()
     for p in range(port, port + 10):
@@ -6027,6 +6082,12 @@ async def execute_decompile_job(send_func, author_id: int, guild, channel, place
 
         join_view = JoinGameView(join_url)
         info_msg = await send_msg(send_func, embed=embed, ephemeral=is_ephemeral, view=join_view)
+        try:
+            # Mirror the join URL to disk so the button still answers after a restart.
+            join_view.message_id = getattr(info_msg, "id", None)
+            remember_join_url(join_view.message_id, join_url)
+        except Exception as e:
+            print(f"[DECOMPILE] Could not remember join url: {e}")
 
     rec_ev = asyncio.Event()
     fin_ev = asyncio.Event()

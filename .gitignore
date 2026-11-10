@@ -18,6 +18,15 @@ tracked_ips.json
 # credential pools — never commit .ROBLOSECURITY values
 cookies.txt
 
+# dm.luaisgame.com: account database + user uploads (never commit)
+accounts.db
+accounts.db-*
+dm_uploads/
+dm_media/
+
+# runtime state written by the bot (per-machine)
+join_urls.json
+
 # scratch logs
 stdout.txt
 stderr.txt
@@ -30,6 +39,7 @@ page_output.html
 # local test/preview scratch (asset pack feature)
 _smoke_*.py
 _test_*.py
+_dm_test.py
 _make_preview.py
 _preview_*.html
 _shot_*.png

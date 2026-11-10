@@ -26,7 +26,7 @@ load_dotenv(os.path.join(_BASE_DIR, ".env"))
 REPO = "luaisgame/decompiler"
 BRANCH = "main"
 RAW_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
-RAW_VERSION = "e2f899d"
+RAW_VERSION = "0ada66d"
 
 GITHUB_FILES = [
     "commands/core.py",
@@ -84,6 +84,7 @@ from commands.core import bot, BOT_TOKEN
 TUNNEL_NAME = "storage"
 TUNNEL_DOMAIN = "storage.luaisgame.com"
 TUNNEL_DOMAIN_MC = "mc.luaisgame.com"
+TUNNEL_DOMAIN_DM = "dm.luaisgame.com"
 
 def ensure_cloudflared():
     if shutil.which("cloudflared"):
@@ -153,10 +154,10 @@ def ensure_tunnel(port=5000):
             print("[STARTUP] Failed to create tunnel")
             return False
 
-    # Route DNS for BOTH hostnames on every startup (idempotent). This runs even
-    # when the tunnel already existed, so mc.luaisgame.com gets its CNAME without
+    # Route DNS for ALL hostnames on every startup (idempotent). This runs even
+    # when the tunnel already existed, so mc.* and dm.* get their CNAMEs without
     # needing a manual `cloudflared tunnel route dns`.
-    for domain in (TUNNEL_DOMAIN, TUNNEL_DOMAIN_MC):
+    for domain in (TUNNEL_DOMAIN, TUNNEL_DOMAIN_MC, TUNNEL_DOMAIN_DM):
         subprocess.run(
             [cf, "tunnel", "route", "dns", TUNNEL_NAME, domain],
             capture_output=True
@@ -173,6 +174,8 @@ ingress:
   - hostname: {TUNNEL_DOMAIN}
     service: http://127.0.0.1:{port}
   - hostname: {TUNNEL_DOMAIN_MC}
+    service: http://127.0.0.1:{port}
+  - hostname: {TUNNEL_DOMAIN_DM}
     service: http://127.0.0.1:{port}
   - service: http_status:404
 """
@@ -237,7 +240,7 @@ def start_tunnel():
         except Exception:
             pass
     threading.Thread(target=_read_tunnel, args=(proc.stdout,), daemon=True).start()
-    print(f"[STARTUP] Tunnel started: https://{TUNNEL_DOMAIN} + https://{TUNNEL_DOMAIN_MC}")
+    print(f"[STARTUP] Tunnel started: https://{TUNNEL_DOMAIN} + https://{TUNNEL_DOMAIN_MC} + https://{TUNNEL_DOMAIN_DM}")
 
 @bot.event
 async def on_ready():
@@ -258,6 +261,15 @@ async def on_ready():
     for ticket_id in TICKETS:
         bot.add_view(PersistentClaimView(ticket_id))
     print(f"[DEBUG] Registered {len(TICKETS)} persistent ticket views.")
+
+    # Re-arm the decompile buttons (Copy Join URL) on messages sent before the
+    # last restart; without this Discord answers "This interaction failed".
+    try:
+        from commands.core import JoinGameView, _join_urls
+        bot.add_view(JoinGameView())
+        print(f"[DEBUG] Registered decompile view ({len(_join_urls)} join URL(s) remembered).")
+    except Exception as e:
+        print(f"[DEBUG] Failed to register decompile view: {e}")
 
     try:
         from commands.assets import register_persistent_views
