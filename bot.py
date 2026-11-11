@@ -1,7 +1,6 @@
 import asyncio
 import os
 import sys
-import types
 import urllib.request
 import json
 import shutil
@@ -29,6 +28,7 @@ RAW_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
 RAW_VERSION = "77feb16"
 
 GITHUB_FILES = [
+    "commands/__init__.py",
     "commands/core.py",
     "commands/assets.py",
     "commands/setup.py",
@@ -40,46 +40,105 @@ GITHUB_FILES = [
     "commands/decompile.py",
     "commands/help.py",
     "commands/mc.py",
-    "commands/__init__.py",
+    "commands/dm/__init__.py",
+    "commands/dm/db.py",
+    "commands/dm/auth.py",
+    "commands/dm/api.py",
+    "commands/dm/realtime.py",
+    "commands/dm/web.py",
     "minecraft_setup.py",
 ]
+
+# The dm SPA's static assets aren't Python: with no checkout on disk they are
+# written next to bot.py and handed to dm.web.set_static_dir() below.
+GITHUB_STATIC = {
+    "commands/dm/static/app.js": "app.js",
+    "commands/dm/static/style.css": "style.css",
+}
 
 HAS_LOCAL = os.path.isdir(os.path.join(_BASE_DIR, "commands"))
 
 if not HAS_LOCAL:
     print("[STARTUP] No local commands folder found, fetching from GitHub...")
-    pkg = types.ModuleType("commands")
-    pkg.__path__ = []
-    pkg.__package__ = "commands"
-    sys.modules["commands"] = pkg
-    for path in GITHUB_FILES:
+    import importlib.abc
+    import importlib.util
+
+    def _fetch(path: str) -> bytes:
+        url = f"{RAW_URL}/{path}?v={RAW_VERSION}"
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            return resp.read()
+
+    _sources = {}
+    for _path in GITHUB_FILES:
         try:
-            url = f"{RAW_URL}/{path}?v={RAW_VERSION}"
-            with urllib.request.urlopen(url, timeout=15) as resp:
-                code = resp.read().decode()
+            _sources[_path] = _fetch(_path).decode()
         except Exception as e:
-            print(f"[STARTUP] Failed to fetch {path}: {e}")
+            print(f"[STARTUP] Failed to fetch {_path}: {e}")
             sys.exit(1)
-        mn = path.replace("/", ".").replace(".py", "")
-        if mn.endswith(".__init__"):
-            mn = mn[:-9]
-        if mn in sys.modules:
-            m = sys.modules[mn]
-        else:
-            m = types.ModuleType(mn)
-            sys.modules[mn] = m
-        m.__file__ = f"<github:{mn}>"
-        m.__loader__ = None
-        if mn == "commands" or mn.startswith("commands."):
-            m.__package__ = "commands"
-        else:
-            m.__package__ = None
-        exec(compile(code, f"<github:{mn}>", "exec"), m.__dict__)
+
+    # module name -> source, plus which of them are packages
+    _code = {}
+    _packages = set()
+    for _path, _src in _sources.items():
+        _name = _path[:-3].replace("/", ".")
+        if _name.endswith(".__init__"):
+            _name = _name[:-9]
+            _packages.add(_name)
+        _code[_name] = _src
+
+    class _GitHubLoader(importlib.abc.Loader):
+        """Compiles GitHub-fetched source into a normal module object."""
+
+        def __init__(self, fullname):
+            self.fullname = fullname
+
+        def create_module(self, spec):
+            return None
+
+        def exec_module(self, module):
+            # spec_from_loader() doesn't give a module __file__, and the dm web
+            # shell reads it to locate its static folder.
+            module.__file__ = f"<github:{self.fullname}>"
+            exec(compile(_code[self.fullname], f"<github:{self.fullname}>", "exec"),
+                 module.__dict__)
+
+    class _GitHubFinder(importlib.abc.MetaPathFinder):
+        """Resolves commands.* from the fetched sources.
+
+        Going through the import system (instead of exec'ing files in list
+        order) is what makes the nested packages work: relative imports inside
+        commands.dm.* resolve to commands.dm, __package__/__path__ are set
+        correctly, and a module is only compiled when something imports it.
+        """
+
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname not in _code:
+                return None
+            return importlib.util.spec_from_loader(
+                fullname, _GitHubLoader(fullname),
+                origin=f"<github:{fullname}>",
+                is_package=fullname in _packages)
+
+    sys.meta_path.insert(0, _GitHubFinder())
+
+    _static_dir = os.path.join(_BASE_DIR, "dm_static")
+    os.makedirs(_static_dir, exist_ok=True)
+    for _path, _name in GITHUB_STATIC.items():
+        try:
+            with open(os.path.join(_static_dir, _name), "wb") as _fh:
+                _fh.write(_fetch(_path))
+        except Exception as e:
+            print(f"[STARTUP] Failed to fetch {_path}: {e}")
+            sys.exit(1)
     print("[STARTUP] All files loaded from GitHub.")
 else:
     print("[STARTUP] Local commands folder found.")
 
 from commands.core import bot, BOT_TOKEN
+
+if not HAS_LOCAL:
+    from commands.dm import web as _dm_web
+    _dm_web.set_static_dir(_static_dir)
 
 TUNNEL_NAME = "storage"
 TUNNEL_DOMAIN = "storage.luaisgame.com"

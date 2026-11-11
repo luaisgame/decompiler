@@ -23,6 +23,8 @@ accounts.db
 accounts.db-*
 dm_uploads/
 dm_media/
+# dm SPA assets staged by bot.py when everything is fetched from GitHub
+dm_static/
 
 # runtime state written by the bot (per-machine)
 join_urls.json
