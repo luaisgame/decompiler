@@ -48,3 +48,4 @@ _probe_*.py
 _fetch_*.py
 _live_*.py
 _verify_*.py
+_diag_*.py

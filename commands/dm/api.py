@@ -269,9 +269,16 @@ def _message_payload(msg: dict) -> dict:
         attachments = json.loads(msg.get("attachments") or "[]")
     except Exception:
         attachments = []
+    # timestamps are stored in seconds; the frontend formats milliseconds.
+    def _ms(v):
+        try:
+            v = float(v or 0)
+        except Exception:
+            return 0
+        return int(v * 1000) if v else 0
     return {"id": msg["id"], "channel": msg["channel_id"], "author": _user_brief(msg["author_id"]),
             "content": msg["content"], "attachments": attachments,
-            "created_at": msg["created_at"], "edited_at": msg["edited_at"]}
+            "created_at": _ms(msg["created_at"]), "edited_at": _ms(msg["edited_at"])}
 
 
 def _server_brief(server: dict, user: dict) -> dict:
@@ -706,7 +713,8 @@ async def api_delete_channel(request):
     db.run("DELETE FROM messages WHERE channel_id=?", (cid,))
     db.run("DELETE FROM channels WHERE id=?", (cid,))
     await realtime.broadcast_server(server["id"], "channel.delete",
-                                    {"server_id": server["id"], "channel_id": cid})
+                                    {"server_id": server["id"], "channel_id": cid,
+                                     "channel": {"id": cid}})
     return web.json_response({"ok": True})
 
 
@@ -961,7 +969,7 @@ async def api_send_message(request):
         db.run("UPDATE attachments SET message_id=? WHERE id=?", (mid, att["id"]))
     msg = db.row("SELECT * FROM messages WHERE id=?", (mid,))
     out = _message_payload(msg)
-    await realtime.broadcast_channel(channel["id"], "message.create", out)
+    await realtime.broadcast_channel(channel["id"], "message.create", {"message": out})
     return web.json_response({"message": out})
 
 
@@ -983,7 +991,7 @@ async def api_edit_message(request):
         return _err("Message can't be empty.")
     db.run("UPDATE messages SET content=?, edited_at=? WHERE id=?", (content, time.time(), mid))
     out = _message_payload(db.row("SELECT * FROM messages WHERE id=?", (mid,)))
-    await realtime.broadcast_channel(channel["id"], "message.update", out)
+    await realtime.broadcast_channel(channel["id"], "message.update", {"message": out})
     return web.json_response({"message": out})
 
 

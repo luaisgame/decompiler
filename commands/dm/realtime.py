@@ -291,6 +291,7 @@ async def _join_room(ws, meta, room: str):
     if not _may_join(meta, room):
         return
     meta["rooms"].add(room)
+    is_new = room not in calls
     call = calls.setdefault(room, {"channel_id": 0, "kind": "voice", "host": None,
                                    "started_at": time.time(), "mode": "p2p", "members": set()})
     call["members"].add(meta["uid"])
@@ -299,6 +300,22 @@ async def _join_room(ws, meta, room: str):
     await ws.send_json({"t": "call.state", "call": _call_state(room),
                         "you": {"uid": meta["uid"], "is_host": call["host"] == meta["uid"]}})
     await _room_event(room, "call.update", _call_state(room), exclude_ws=ws)
+    # A brand-new DM call: ring the people on the other end (Discord-style).
+    if is_new and room[:1] == "d":
+        try:
+            channel_id = int(room[1:])
+        except Exception:
+            channel_id = 0
+        caller = meta.get("user") or {}
+        for uid in channel_member_ids(channel_id):
+            if uid == meta["uid"]:
+                continue
+            await send_to_user(uid, {"t": "event", "op": "call.ring",
+                                     "data": {"room": room, "channel_id": channel_id,
+                                              "from": meta["uid"],
+                                              "caller_name": caller.get("display_name")
+                                              or caller.get("username") or "Someone",
+                                              "caller_username": caller.get("username") or ""}})
 
 
 def _may_join(meta, room: str) -> bool:

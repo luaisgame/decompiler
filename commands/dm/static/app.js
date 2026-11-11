@@ -153,6 +153,14 @@ function relTime(ts) {
   return new Date(ts).toLocaleDateString();
 }
 
+/** Message timestamps: normalize seconds -> ms (older servers send seconds). */
+function normMsg(m) {
+  if (!m) return m;
+  if (m.created_at && m.created_at < 1e12) m.created_at *= 1000;
+  if (m.edited_at && m.edited_at < 1e12) m.edited_at *= 1000;
+  return m;
+}
+
 function uidKey(u) { return String(u); }
 
 /* ================= 2. state ================= */
@@ -177,6 +185,8 @@ const state = {
   ws: null, wsReady: false, reconnectDelay: 1000, latency: 0,
   shellMounted: false,
   draft: {},
+  uploadQueue: [],           // attachments waiting in the composer strip
+  ring: null,                // incoming call being rang for us
 };
 
 try {
@@ -535,6 +545,9 @@ function dispatchEvent(op, data) {
     case "channel.update": onChannelEvent("update", data); break;
     case "channel.delete": onChannelEvent("delete", data); break;
     case "server.update": onServerUpdate(data); break;
+    case "role.create":
+    case "role.update":
+    case "role.delete": onRoleEvent(op, data); break;
     case "member.join":
     case "member.leave":
     case "member.update": onMemberEvent(op, data); break;
@@ -566,6 +579,7 @@ function dispatchEvent(op, data) {
     case "webrtc.signal": onWebRTCSignal(data); break;
     case "call.update": onCallUpdate(data); break;
     case "call.ended": onCallEnded(data); break;
+    case "call.ring": onCallRing(data); break;
     default: break;
   }
 }
@@ -1044,8 +1058,15 @@ function renderChatArea() {
   }
 
   const isVoice = state.currentChannel.kind === "voice";
+  const isDM = !state.currentServer;
+  const inCallHere = !!state.activeRoom &&
+    state.activeRoom === callRoomFor(state.currentChannel.id);
+  const placeholder = isVoice
+    ? "Message this voice channel"
+    : (isDM ? "Message @" + esc(dmTitle(state.currentChannel) || "conversation")
+            : "Message #" + esc(state.currentChannel.name || "channel"));
   col.innerHTML = `
-    ${isVoice ? `<div id="voicePanel"></div>` : ""}
+    ${isVoice || inCallHere ? `<div id="voicePanel"></div>` : ""}
     <div class="msg-scroll" id="msgScroll"><div class="msg-scroll-inner" id="msgList"></div></div>
     <div class="typing" id="typing"></div>
     <div class="upload-strip" id="uploadStrip"></div>
@@ -1053,7 +1074,7 @@ function renderChatArea() {
       <div class="drop-overlay" id="dropOverlay" style="display:none">Drop files to upload (up to 10 GB each)</div>
       <div class="composer-box">
         <button class="attach-btn" id="attachBtn" title="Upload a file" aria-label="Upload a file">＋</button>
-        <textarea id="composerText" rows="1" placeholder="${isVoice ? "Message this voice channel" : "Message #" + esc(state.currentChannel.name || "conversation")}" maxlength="4000"></textarea>
+        <textarea id="composerText" rows="1" placeholder="${placeholder}" maxlength="4000"></textarea>
         <button class="send-btn" id="sendBtn" title="Send" aria-label="Send">➤</button>
       </div>
       <input type="file" id="fileInput" multiple hidden>
@@ -1100,11 +1121,12 @@ async function sendDraft() {
   const ta = $("#composerText");
   if (!ta || !state.currentChannel) return;
   const content = ta.value.trim();
-  const attachments = state.uploadQueue
+  const queue = state.uploadQueue || [];
+  const attachments = queue
     .filter((u) => u.status === "done" && u.attachment)
     .map((u) => u.attachment.id);
   if (!content && !attachments.length) return;
-  if (state.uploadQueue.some((u) => u.status === "uploading")) {
+  if (queue.some((u) => u.status === "uploading")) {
     toast("Wait for the upload to finish, or cancel it.", "warn");
     return;
   }
@@ -1191,11 +1213,11 @@ function messageHTML(msg, prev) {
       ${(msg.attachments && msg.attachments.length) ? `<div class="attachments">${msg.attachments.map(attachmentHTML).join("")}</div>` : ""}
       ${msg.edited_at ? `<span class="edited">(edited)</span>` : ""}
     </div>
-    ${canManage ? `<div class="msg-actions">
+    <div class="msg-actions">
       <button data-act="copy">Copy text</button>
       ${mine ? `<button data-act="edit">Edit</button>` : ""}
-      <button class="danger" data-act="delete">Delete</button>
-    </div>` : ""}
+      ${canManage ? `<button class="danger" data-act="delete">Delete</button>` : ""}
+    </div>
   </article>`;
 }
 
@@ -1276,10 +1298,35 @@ function wireMessageList(list) {
 }
 
 function copyText(text) {
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text || "").then(() => toast("Copied.", "success"))
-      .catch(() => toast("Couldn't copy.", "error"));
-  } else toast("Clipboard unavailable.", "error");
+  text = String(text == null ? "" : text);
+  const done = () => toast("Copied.", "success");
+  const fallback = () => {
+    // Older/permission-blocked clipboards: transient textarea + execCommand.
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;" +
+        "pointer-events:none;z-index:-1";
+      document.body.appendChild(ta);
+      const sel = document.getSelection();
+      const ranges = [];
+      for (let i = 0; i < sel.rangeCount; i++) ranges.push(sel.getRangeAt(i));
+      ta.focus({ preventScroll: true });
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      const ok = document.execCommand("copy");
+      ta.remove();
+      if (ranges.length) { sel.removeAllRanges(); ranges.forEach((r) => sel.addRange(r)); }
+      if (ok) { done(); return; }
+    } catch (e) { /* fall through */ }
+    toast("Couldn't copy — select the text and press Ctrl+C.", "error");
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText && document.hasFocus()) {
+    navigator.clipboard.writeText(text).then(done).catch(fallback);
+  } else {
+    fallback();
+  }
 }
 
 function startEditMessage(msg) {
@@ -1327,8 +1374,8 @@ function scrollChatToBottom() {
 }
 
 function onMessageCreate(data) {
-  const msg = data.message;
-  if (!msg) return;
+  const msg = normMsg(data.message || data);
+  if (!msg || !msg.id) return;
   const cid = msg.channel;
   const list = state.messages[cid] || (state.messages[cid] = []);
   if (list.some((m) => m.id === msg.id)) return;
@@ -1346,6 +1393,42 @@ function onMessageCreate(data) {
     bumpUnread("c" + cid);
     bumpServerUnreadForChannel(cid);
   }
+  maybeNotify(cid, msg, isCurrent);
+}
+
+/** Ping sound + desktop notification for mentions and direct messages. */
+function maybeNotify(cid, msg, isCurrent) {
+  if (!state.user || !msg.author || msg.author.uid === state.user.uid) return;
+  const content = msg.content || "";
+  let mentioned = false;
+  try {
+    mentioned = new RegExp("@" + state.user.username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")
+      .test(content);
+  } catch (e) {}
+  const isDM = state.dms.some((d) => d.id === cid);
+  if (!mentioned && !isDM) return;
+  const watching = isCurrent && document.hasFocus();
+  if (watching) return;
+  sfx.ping();
+  let title = "New message";
+  const dm = state.dms.find((d) => d.id === cid);
+  if (dm) title = dmTitle(dm);
+  else {
+    const chan = channelById(cid);
+    if (chan) title = "#" + chan.name;
+  }
+  const who = msg.author.display_name || msg.author.username || "Someone";
+  const body = (mentioned ? "@" + who + " mentioned you: " : who + ": ") +
+    content.replace(/\s+/g, " ").slice(0, 140);
+  try {
+    if (typeof Notification !== "undefined") {
+      if (Notification.permission === "granted") {
+        new Notification(title, { body, tag: "dm-" + cid });
+      } else if (Notification.permission === "default") {
+        Notification.requestPermission().catch(() => {});
+      }
+    }
+  } catch (e) {}
 }
 
 function bumpChannelUnreadFromServer(cid) {
@@ -1360,8 +1443,8 @@ function bumpServerUnreadForChannel(cid) {
 }
 
 function onMessageUpdate(data) {
-  const msg = data.message;
-  if (!msg) return;
+  const msg = normMsg(data.message || data);
+  if (!msg || !msg.id) return;
   const list = state.messages[msg.channel];
   if (!list) return;
   const idx = list.findIndex((m) => m.id === msg.id);
@@ -1381,22 +1464,23 @@ function onMessageDelete(data) {
 
 function onChannelEvent(kind, data) {
   const srv = state.serverCache[data.server_id];
+  const chanId = data.channel ? data.channel.id : data.channel_id;
   if (srv) {
     const arr = srv.channels || (srv.channels = []);
-    const idx = arr.findIndex((c) => c.id === data.channel.id);
+    const idx = arr.findIndex((c) => c.id === chanId);
     if (kind === "create") { if (idx < 0) arr.push(data.channel); }
     else if (kind === "update") { if (idx >= 0) arr[idx] = Object.assign(arr[idx], data.channel); }
     else if (kind === "delete") {
       if (idx >= 0) arr.splice(idx, 1);
-      delete state.messages[data.channel.id];
-      if (state.currentChannel && state.currentChannel.id === data.channel.id) {
+      delete state.messages[chanId];
+      if (state.currentChannel && state.currentChannel.id === chanId) {
         navigate("/servers/" + data.server_id, true);
         toast("That channel was deleted.", "warn");
       }
     }
   }
   if (state.currentServer && state.currentServer.id === data.server_id) renderSidebar();
-  if (kind === "create" && state.user) toast(`#${data.channel.name} created`, "success");
+  if (kind === "create" && state.user && data.channel) toast(`#${data.channel.name} created`, "success");
 }
 
 function onServerUpdate(data) {
@@ -1419,6 +1503,28 @@ function onMemberEvent(op, data) {
   else if (op === "member.leave" && idx >= 0) members.splice(idx, 1);
   else if (op === "member.update" && idx >= 0) members[idx].roles = data.roles || [];
   if (state.currentServer && state.currentServer.id === data.server_id) renderMembers();
+}
+
+function onRoleEvent(op, data) {
+  const srv = state.serverCache[data.server_id];
+  if (!srv) return;
+  const roles = srv.roles || (srv.roles = []);
+  const role = data.role;
+  const idx = role ? roles.findIndex((r) => r.id === role.id) : -1;
+  if (op === "role.create" && role) { if (idx < 0) roles.push(role); }
+  else if (op === "role.update" && role) { if (idx >= 0) roles[idx] = Object.assign(roles[idx], role); }
+  else if (op === "role.delete") {
+    const rid = role ? role.id : data.role_id;
+    const ridx = roles.findIndex((r) => r.id === rid);
+    if (ridx >= 0) roles.splice(ridx, 1);
+    (srv.members || []).forEach((m) => {
+      if (m.roles) m.roles = m.roles.filter((x) => x !== rid);
+    });
+  }
+  if (state.currentServer && state.currentServer.id === data.server_id) {
+    renderMembers();
+    renderSidebar();
+  }
 }
 
 function onDmCreate(data) {
@@ -1572,7 +1678,7 @@ async function loadMessages(cid) {
   if (state.loadedChannels[cid]) { renderMessages({ reset: true }); return; }
   try {
     const data = await api("GET", `/api/dm/channels/${cid}/messages?limit=50`);
-    state.messages[cid] = data.messages || [];
+    state.messages[cid] = (data.messages || []).map(normMsg);
     state.loadedChannels[cid] = true;
     if (state.currentChannel && state.currentChannel.id === cid) {
       if (!state.currentChannel.server_id && data.channel) {
@@ -1597,7 +1703,7 @@ async function loadOlderMessages() {
   const heightBefore = scroll.scrollHeight;
   try {
     const data = await api("GET", `/api/dm/channels/${cid}/messages?before=${before}&limit=50`, null, { silent: true });
-    const older = (data.messages || []).filter((m) => !list.some((x) => x.id === m.id));
+    const older = (data.messages || []).map(normMsg).filter((m) => !list.some((x) => x.id === m.id));
     if (!older.length) return;
     state.messages[cid] = older.concat(list);
     renderMessages();
@@ -3561,6 +3667,71 @@ const call = {
   preferredMode: "p2p",
 };
 
+/* ---- sounds (generated with WebAudio — no asset files) ---- */
+
+const sfx = {
+  ctx: null,
+  _ringTimer: null,
+  ac() {
+    try {
+      if (!this.ctx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return null;
+        this.ctx = new AC();
+      }
+      if (this.ctx.state === "suspended") this.ctx.resume().catch(() => {});
+      return this.ctx;
+    } catch (e) { return null; }
+  },
+  blip(freq, at, dur, opts) {
+    const ctx = this.ac();
+    if (!ctx) return;
+    opts = opts || {};
+    const t = ctx.currentTime + (at || 0);
+    try {
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = opts.type || "sine";
+      osc.frequency.setValueAtTime(freq, t);
+      const vol = opts.gain == null ? 0.14 : opts.gain;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(vol, t + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      osc.connect(g);
+      g.connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + dur + 0.05);
+    } catch (e) {}
+  },
+  join() {   // rising chime
+    this.blip(392, 0, 0.16);
+    this.blip(523.25, 0.09, 0.18);
+    this.blip(659.25, 0.18, 0.3, { gain: 0.12 });
+  },
+  leave() {  // falling two-tone
+    this.blip(523.25, 0, 0.15);
+    this.blip(392, 0.1, 0.24, { gain: 0.12 });
+  },
+  ping() {   // short bright pop for mentions / DMs
+    this.blip(880, 0, 0.08, { type: "triangle", gain: 0.11 });
+    this.blip(1318.5, 0.06, 0.13, { type: "triangle", gain: 0.09 });
+  },
+  ringStart() {
+    if (this._ringTimer) return;
+    const ringOnce = () => {
+      this.blip(440, 0, 0.18, { gain: 0.11 });
+      this.blip(554.37, 0.02, 0.18, { gain: 0.09 });
+      this.blip(440, 0.38, 0.18, { gain: 0.11 });
+      this.blip(554.37, 0.4, 0.22, { gain: 0.09 });
+    };
+    ringOnce();
+    this._ringTimer = setInterval(ringOnce, 2200);
+  },
+  ringStop() {
+    if (this._ringTimer) { clearInterval(this._ringTimer); this._ringTimer = null; }
+  },
+};
+
 function callRoomFor(cid) {
   if (cid === null || cid === undefined) return null;
   return (state.currentServer ? "c" : "d") + cid;
@@ -3665,17 +3836,19 @@ async function joinRoom(room, withMic) {
   if (!room || !state.wsReady) return;
   if (state.activeRoom === room) return;
   if (state.activeRoom) stopCall(true);
+  stopRing();
   state.activeRoom = room;
   call.room = room;
   call.preferredMode = "p2p";
   sendWS({ t: "call.join", room });
   if (withMic !== false) await ensureMic();
+  sfx.join();
   renderCallUI(); syncCallButtons(); renderSidebar();
 }
 
 function stopCall(silent) {
   const room = state.activeRoom || call.room;
-  if (room && !silent) sendWS({ t: "call.leave", room });
+  if (room && !silent) { sendWS({ t: "call.leave", room }); sfx.leave(); }
   stopShare(true);
   if (call.mic) { call.mic.getTracks().forEach((t) => t.stop()); call.mic = null; }
   for (const [, e] of call.peers) { try { e.pc.close(); } catch (err) {} }
@@ -3707,8 +3880,25 @@ function ensurePeer(uid) {
     }
   };
   pc.ontrack = (ev) => {
-    const stream = (ev.streams && ev.streams[0]) || new MediaStream([ev.track]);
-    call.remote[uid] = stream;
+    // Merge every incoming track into ONE stream per peer. Replacing the
+    // stored stream (e.g. when a screenshare video arrives in its own stream)
+    // used to repoint the audio element to a video-only stream and mute the
+    // sharer's voice for everyone.
+    let stream = call.remote[uid];
+    if (!stream) {
+      stream = (ev.streams && ev.streams[0]) || new MediaStream();
+      call.remote[uid] = stream;
+    }
+    if (ev.track && !stream.getTracks().some((t) => t.id === ev.track.id)) {
+      if (ev.track.kind === "video") {
+        // keep exactly one live video track (share → stop → share again)
+        stream.getVideoTracks().forEach((t) => {
+          if (t.id !== ev.track.id) { try { stream.removeTrack(t); } catch (e) {} }
+        });
+      }
+      try { stream.addTrack(ev.track); } catch (e) {}
+      ev.track.onended = () => { try { stream.removeTrack(ev.track); } catch (e) {} };
+    }
     attachStreams();
     renderCallUI();
   };
@@ -3957,6 +4147,7 @@ function drawRelayFrame(bytes) {
 
 function onCallState(msg) {
   if (!msg || !msg.call) return;
+  stopRing();
   call.state = msg.call;
   call.room = msg.call.room;
   state.activeRoom = msg.call.room;
@@ -3974,6 +4165,7 @@ function onCallUpdate(st) {
     state.activeRoom = st.room;
     call.room = st.room;
   }
+  if (mine) stopRing();
   call.state = st;
   call.isHost = st.host === state.user.uid;
   syncPeers();
@@ -3984,10 +4176,74 @@ function onCallUpdate(st) {
 function onCallEnded(data) {
   if (!data || !data.room) return;
   delete state.calls[data.room];
+  if (state.ring && state.ring.room === data.room) stopRing();
   if (data.room === state.activeRoom) {
     stopCall(true);
+    sfx.leave();
     toast("The call ended.", "info", 2500);
   }
+}
+
+/* ---- incoming call ring (Discord-style) ---- */
+
+function onCallRing(data) {
+  if (!data || !data.room || !state.user) return;
+  if (Number(data.from) === state.user.uid) return;
+  if (state.activeRoom === data.room) return;
+  stopRing();
+  state.ring = {
+    room: data.room,
+    channel_id: data.channel_id,
+    from: Number(data.from),
+    name: data.caller_name || "Someone",
+    username: data.caller_username || "",
+    at: Date.now(),
+  };
+  renderRingOverlay();
+  sfx.ringStart();
+  setTimeout(() => {
+    if (state.ring && state.ring.room === data.room) stopRing();
+  }, 45000);
+}
+
+function stopRing() {
+  if (!state.ring) { sfx.ringStop(); return; }
+  state.ring = null;
+  sfx.ringStop();
+  renderRingOverlay();
+}
+
+function renderRingOverlay() {
+  let el = $("#ringOverlay");
+  const r = state.ring;
+  if (!r) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "ringOverlay";
+    document.body.appendChild(el);
+  }
+  el.innerHTML = `
+    <div class="ring-card">
+      <span class="ring-avatar">${esc((r.name || "?").slice(0, 1).toUpperCase())}</span>
+      <div class="ring-meta">
+        <strong>Incoming call</strong>
+        <span>${esc(r.name)}${r.username ? " · @" + esc(r.username) : ""}</span>
+      </div>
+      <button class="ring-btn accept" id="ringAccept" title="Accept" aria-label="Accept call">📞</button>
+      <button class="ring-btn decline" id="ringDecline" title="Decline" aria-label="Decline call">✕</button>
+    </div>`;
+  $("#ringAccept").onclick = async () => {
+    const room = r.room;
+    stopRing();
+    if (room && room[0] === "d") {
+      const cid = Number(room.slice(1));
+      navigate("/channels/" + cid);
+      joinRoom(room);
+    } else if (room) {
+      joinRoom(room);
+    }
+  };
+  $("#ringDecline").onclick = () => { stopRing(); };
 }
 
 /* ---- call rendering ---- */
@@ -4014,7 +4270,7 @@ function stageHTML(st) {
   const src = stageSource(st);
   if (src.kind === "stream") {
     return `<div class="stage">
-      <video id="stageVideo" autoplay playsinline ${call.share ? "muted" : ""} data-src="1"></video>
+      <video id="stageVideo" autoplay playsinline muted data-src="1"></video>
       <span class="stage-tag"><span class="live">●</span> ${esc(src.who)} is sharing</span>
     </div>`;
   }
@@ -4117,7 +4373,13 @@ function renderCallUI() {
     const html = showStrip ? stripHTML() : "";
     if (host.dataset.html !== html) { host.innerHTML = html; host.dataset.html = html; }
   }
+  // The call panel lives inside the chat area — mount it when this channel is
+  // in a call (DMs and text channels included) and unmount it when the call ends.
+  const cur = state.currentChannel;
+  const wantPanel = !!cur && (cur.kind === "voice" ||
+    (!!state.activeRoom && state.activeRoom === callRoomFor(cur.id)));
   const panel = $("#voicePanel");
+  if (cur && (!!panel !== wantPanel)) { renderChatArea(); return; }
   if (panel) renderVoicePanel(panel);
   wireCallControls();
   attachStreams();
