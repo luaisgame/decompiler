@@ -28,8 +28,29 @@ MAX_WRITE_BUFFER = 1 << 19  # 512 KB of unflushed socket data -> start dropping 
 clients: dict = {}          # ws -> {"uid", "user", "rooms": set, "meta": dict}
 by_user: dict = {}          # uid -> set(ws)
 calls: dict = {}            # room -> {"channel_id","kind","host","started_at","rooms_mode","members": set(uid)}
+talking: set = set()        # uids whose mic is over the voice-activity threshold
 
 PING_INTERVAL = 20.0
+
+
+def calling_users() -> set:
+    """Everyone currently sitting in a call."""
+    out = set()
+    for call in calls.values():
+        out |= call.get("members") or set()
+    return out
+
+
+def presence_payload(uid, presence: str | None = None) -> dict:
+    """The full presence snapshot for one user (what presence.update carries)."""
+    uid = int(uid)
+    user = auth.get_user(uid) or {}
+    if presence is None:
+        presence = auth.display_presence(user)
+    return {"uid": uid, "presence": presence,
+            "last_seen": user.get("last_seen") or time.time(),
+            "in_call": uid in calling_users(),
+            "talking": uid in talking}
 
 
 # --------------------------------------------------------------------------
@@ -40,20 +61,25 @@ async def handle_ws(request):
     user = auth.user_from_request(request)
     if not user:
         return web.Response(status=401)
-    auth.touch_presence(user["id"], "online")
 
     ws = web.WebSocketResponse(heartbeat=PING_INTERVAL, max_msg_size=8 * 1024 * 1024,
                                compress=False)
     await ws.prepare(request)
 
-    meta = {"uid": user["id"], "user": auth.public_user(user), "rooms": set(),
+    # Register the socket BEFORE serialising the user: display_presence() reads
+    # by_user, so your own status dot in the ready payload would otherwise say
+    # "offline".
+    meta = {"uid": user["id"], "user": None, "rooms": set(),
             "last_ping": time.time()}
     clients[ws] = meta
     by_user.setdefault(user["id"], set()).add(ws)
+    auth.touch_last_seen(user["id"])
+    talking.discard(user["id"])
+    meta["user"] = auth.public_user(auth.get_user(user["id"]) or user)
 
     await ws.send_json({"t": "ready", "uid": user["id"],
                         "user": meta["user"], "server_time": time.time()})
-    await _fanout_presence(user["id"], "online")
+    await _fanout_presence(user["id"])
 
     try:
         async for msg in ws:
@@ -86,13 +112,18 @@ async def _disconnect(ws, meta):
     sockets.discard(ws)
     if not sockets:
         by_user.pop(meta["uid"], None)
-        await _fanout_presence(meta["uid"], "offline")
+        talking.discard(meta["uid"])
+        auth.touch_last_seen(meta["uid"])
+        # presence is derived from by_user, so this is what flips everyone
+        # else's view of this user to offline.
+        await _fanout_presence(meta["uid"])
     for room in list(rooms):
         await _leave_room(ws, meta, room)
 
 
-async def _fanout_presence(uid, presence):
-    targets = set()
+async def _fanout_presence(uid, presence: str | None = None):
+    data = presence_payload(uid, presence)
+    targets = set(db.friend_ids(uid))
     for row in db.rows("SELECT server_id FROM server_members WHERE user_id=?", (uid,)):
         for m in db.rows("SELECT user_id FROM server_members WHERE server_id=? AND user_id!=?",
                          (row["server_id"], uid)):
@@ -101,10 +132,16 @@ async def _fanout_presence(uid, presence):
         for m in db.rows("SELECT user_id FROM channel_members WHERE channel_id=? AND user_id!=?",
                          (row["channel_id"], uid)):
             targets.add(m["user_id"])
+    targets.discard(int(uid))
     for target in targets:
         await send_to_user(target, {"t": "event", "op": "presence.update",
-                                    "data": {"uid": uid, "presence": presence,
-                                             "last_seen": time.time()}})
+                                    "data": data})
+
+
+async def broadcast_presence(uid, presence: str | None = None) -> None:
+    """Public entry point: re-send one user's presence snapshot to everyone who
+    can see them (used when they change their status in settings)."""
+    await _fanout_presence(uid, presence)
 
 
 # --------------------------------------------------------------------------
@@ -170,6 +207,21 @@ async def _on_message(ws, meta, data):
     if t == "ping":
         meta["last_ping"] = time.time()
         await ws.send_json({"t": "pong", "ts": data.get("ts", 0), "server_time": time.time()})
+        return
+
+    if t == "talking":
+        # Voice activity report: drives the green "speaking" ring around avatars.
+        if not meta["rooms"]:
+            return
+        uid = meta["uid"]
+        on = bool(data.get("on"))
+        if on == (uid in talking):
+            return
+        if on:
+            talking.add(uid)
+        else:
+            talking.discard(uid)
+        await _fanout_presence(uid)
         return
 
     if t == "typing":
@@ -300,7 +352,10 @@ async def _join_room(ws, meta, room: str):
     await ws.send_json({"t": "call.state", "call": _call_state(room),
                         "you": {"uid": meta["uid"], "is_host": call["host"] == meta["uid"]}})
     await _room_event(room, "call.update", _call_state(room), exclude_ws=ws)
+    await _fanout_presence(meta["uid"])          # in_call just flipped on
     # A brand-new DM call: ring the people on the other end (Discord-style).
+    # Only friends get rung — calls to non-friends still connect, they just
+    # never interrupt anyone (ringing is a relationship, not a side effect).
     if is_new and room[:1] == "d":
         try:
             channel_id = int(room[1:])
@@ -308,7 +363,7 @@ async def _join_room(ws, meta, room: str):
             channel_id = 0
         caller = meta.get("user") or {}
         for uid in channel_member_ids(channel_id):
-            if uid == meta["uid"]:
+            if uid == meta["uid"] or not db.are_friends(meta["uid"], uid):
                 continue
             await send_to_user(uid, {"t": "event", "op": "call.ring",
                                      "data": {"room": room, "channel_id": channel_id,
@@ -332,9 +387,13 @@ async def _leave_room(ws, meta, room: str):
         return
     meta["rooms"].discard(room)
     call = calls.get(room)
+    if not meta["rooms"] and meta["uid"] in talking:
+        talking.discard(meta["uid"])     # left the call: stop showing the ring
+        await _fanout_presence(meta["uid"])
     if not call:
         return
     call["members"].discard(meta["uid"])
+    await _fanout_presence(meta["uid"])          # in_call just flipped off
     if call["host"] == meta["uid"]:
         call["host"] = next(iter(call["members"]), None)
     if not call["members"]:
@@ -353,3 +412,4 @@ def reset() -> None:
     clients.clear()
     by_user.clear()
     calls.clear()
+    talking.clear()

@@ -99,9 +99,14 @@ function avatarInner(user) {
 
 function avatarHTML(user, cls, presence) {
   const u = user || {};
-  const dot = presence !== false && u.presence
-    ? `<i class="dot small ${esc(u.presence)}"></i>` : "";
-  return `<span class="${cls || "mini-avatar"}" style="background:${avatarBg(u)}">${avatarInner(u)}${presence !== false && u.uid !== undefined ? dot : ""}</span>`;
+  const show = presence !== false && u.uid !== undefined;
+  const p = state.presence[u.uid] || u.presence;
+  const inCall = show && userInCall(u.uid);
+  const dot = show && p
+    ? `<i class="dot small ${esc(p)}${inCall ? " incall" : ""}"` +
+      ` title="${esc(inCall ? "In a call" : presenceText(u))}"></i>` : "";
+  const ring = show && state.talking.has(Number(u.uid)) ? " talking" : "";
+  return `<span class="${cls || "mini-avatar"}${ring}" data-uid="${Number(u.uid)}" style="background:${avatarBg(u)}">${avatarInner(u)}${dot}</span>`;
 }
 
 function avatarBg(user) {
@@ -226,6 +231,10 @@ const state = {
   typing: {},               // channelId -> {uid: {name, ts}}
   members: {},              // serverId -> member[]
   presence: {},             // uid -> presence
+  friends: { friends: [], incoming: [], outgoing: [] },
+  friendsModal: null,       // the open friends pane (re-clicking reuses it)
+  talking: new Set(),       // uid -> over the voice-activity threshold
+  inCall: new Set(),        // uid -> sitting in a call
   badges: [],               // badge catalogue
   calls: {},
   route: { name: "home" },
@@ -320,8 +329,24 @@ function colorFor(member, fallbackUser) {
 
 function isOnline(uid) {
   const u = typeof uid === "object" ? uid : null;
-  if (u) return (u.presence || state.presence[u.uid] || "offline") !== "offline";
+  if (u) return (state.presence[u.uid] || u.presence || "offline") !== "offline";
   return (state.presence[uid] || "offline") !== "offline";
+}
+
+function userInCall(uid) {
+  if (uid === undefined || uid === null) return false;
+  return state.inCall.has(Number(uid));
+}
+
+function presenceText(u) {
+  if (!u) return "offline";
+  const uid = Number(u.uid);
+  if (state.talking.has(uid)) return "speaking";
+  if (userInCall(uid)) return "in a call";
+  const p = state.presence[uid] || u.presence || "offline";
+  if (p === "dnd") return "do not disturb";
+  if (p === "idle") return "idle";
+  return p;
 }
 
 /* ================= 3. toasts / modals ================= */
@@ -609,8 +634,14 @@ function dispatchEvent(op, data) {
     case "typing": onTyping(data); break;
     case "presence.update":
       state.presence[data.uid] = data.presence;
+      if (data.in_call) state.inCall.add(Number(data.uid)); else state.inCall.delete(Number(data.uid));
+      if (data.talking) state.talking.add(Number(data.uid)); else state.talking.delete(Number(data.uid));
       updateMemberPresence(data.uid, data.presence);
       break;
+    case "friend.request": onFriendEvent("request", data); break;
+    case "friend.accept": onFriendEvent("accept", data); break;
+    case "friend.decline": onFriendEvent("decline", data); break;
+    case "friend.remove": onFriendEvent("remove", data); break;
     case "badge.granted":
       if (state.user && data.badges) {
         state.user.badges = data.badges;
@@ -746,9 +777,31 @@ function applyBootstrap(data) {
   state.user = data.user;
   state.servers = data.servers || [];
   state.dms = data.dms || [];
+  state.friends = data.friends || { friends: [], incoming: [], outgoing: [] };
+  state.talking = new Set();
+  state.inCall = new Set();
   (data.calls || []).forEach((c) => { if (c.room) state.calls[c.room] = c; });
   for (const s of state.servers) state.unread["s" + s.id] = s.unread || 0;
-  for (const d of state.dms) markChannelFresh(d);
+  for (const d of state.dms) {
+    markChannelFresh(d);
+    (Array.isArray(d.members) ? d.members : []).forEach(seedPresence);
+  }
+  (state.friends.friends || []).forEach(seedPresence);
+  for (const s of state.servers) {
+    // server briefs only carry a member count, so this is a no-op unless the
+    // payload ever grows a real member list
+    (Array.isArray(s.members) ? s.members : []).forEach(seedPresence);
+  }
+  for (const key in state.calls) (state.calls[key].members || []).forEach((uid) => state.inCall.add(Number(uid)));
+}
+
+/* Presence/call state is server-computed; keep our local mirrors in sync
+   whenever a fresh user payload arrives. */
+function seedPresence(u) {
+  if (!u || u.uid === undefined) return;
+  if (u.presence) state.presence[u.uid] = u.presence;
+  if (u.in_call) state.inCall.add(Number(u.uid)); else state.inCall.delete(Number(u.uid));
+  if (u.talking) state.talking.add(Number(u.uid)); else state.talking.delete(Number(u.uid));
 }
 
 function markChannelFresh(dm) {
@@ -875,6 +928,11 @@ function renderSidebar() {
         <button class="btn icon ghost" id="newDmBtn" aria-label="New direct message" title="New DM">${icon("pencil", 17)}</button>
       </div>
       <div class="side-scroll">
+        <div class="nav-row friends-btn ${pendingCount() ? "has-pending" : ""}" data-friends role="button" tabindex="0">
+          <span class="hash">${icon("user", 16)}</span>
+          <span class="row-name">Friends</span>
+          ${pendingCount() ? `<span class="row-badge">${pendingCount()}</span>` : ""}
+        </div>
         <div class="nav-row" data-find>
           <span class="hash">${icon("search", 16)}</span><span class="row-name">Find a server</span>
         </div>
@@ -893,6 +951,11 @@ function renderSidebar() {
       ${userBarHTML()}`;
 
     $("#newDmBtn").onclick = showNewDMModal;
+    const frBtn = $("[data-friends]", side);
+    if (frBtn) {
+      frBtn.onclick = () => { showFriendsModal(); closeDrawers(); };
+      frBtn.onkeydown = (ev) => { if (ev.key === "Enter") showFriendsModal(); };
+    }
     $("[data-find]", side).onclick = showFindModal;
     $$("[data-goto-server]", side).forEach((n) => {
       n.onclick = () => { navigate("/servers/" + n.dataset.gotoServer); };
@@ -983,13 +1046,22 @@ function wireDMRows() {
   });
 }
 
+const STATUS_LABELS = {
+  online: "Online", idle: "Idle", dnd: "Do not disturb",
+  invisible: "Invisible", offline: "Offline",
+};
+
 function userBarHTML() {
   const me = state.user || {};
+  const choice = me.status_choice || me.presence || "online";
+  const line = me.custom_status
+    || (me.is_owner ? "Platform owner" : (STATUS_LABELS[choice] || "Online"));
+  const dot = choice === "invisible" ? "offline" : (me.presence || "online");
   return `<div class="user-bar">
-    <div class="mini-avatar" id="meAvatar" style="background:${avatarBg(me)}">${avatarInner(me)}<i class="dot small ${esc(me.presence || "online")}"></i></div>
+    <div class="mini-avatar" id="meAvatar" style="background:${avatarBg(me)}">${avatarInner(me)}<i class="dot small ${esc(dot)}"></i></div>
     <div class="who" id="meWho" role="button" tabindex="0">
       <div class="name">${esc(me.display_name || me.username)}</div>
-      <div class="status">${esc(me.custom_status || (me.is_owner ? "Platform owner" : (me.presence || "online")))}</div>
+      <div class="status">${esc(line)}</div>
     </div>
     <div class="ctl">
       <button id="muteBtn" title="Mute microphone" aria-label="Mute microphone">${icon("mic", 18)}</button>
@@ -1659,18 +1731,32 @@ function memberRowHTML(m) {
 
 function updateMemberPresence(uid, presence) {
   state.presence[uid] = presence;
-  const row = $(`#members .member-row[data-uid="${uid}"] .dot`);
-  if (row) row.className = "dot small " + presence;
+  const n = Number(uid);
+  const talking = state.talking.has(n);
+  const incall = state.inCall.has(n);
+  // refresh every avatar already rendered for this user (member list, DM rows,
+  // friend rows, popouts) without a full re-render
+  $$(`[data-uid="${n}"].mini-avatar, [data-uid="${n}"].friend-avatar`).forEach((av) => {
+    av.classList.toggle("talking", talking);
+    const dot = $(".dot", av);
+    if (dot) {
+      dot.className = `dot small ${presence || "offline"}${incall ? " incall" : ""}`;
+      dot.title = incall ? "In a call" : presence;
+    }
+  });
+  const row = $(`#members .member-row[data-uid="${n}"]`);
+  if (row) row.style.opacity = (presence === "offline" && !incall) ? ".5" : "";
   const dmRows = $$(`[data-dm]`);
-  dmRows.forEach((n) => {
-    const dm = state.dms.find((d) => d.id === Number(n.dataset.dm));
+  dmRows.forEach((node) => {
+    const dm = state.dms.find((d) => d.id === Number(node.dataset.dm));
     if (!dm) return;
-    const dot = $(".dot", n);
+    const dot = $(".dot", node);
     if (!dot) return;
     const others = (dm.members || []).filter((m) => m.uid !== (state.user && state.user.uid));
     const on = others.some((m) => isOnline(m.uid === uid ? Object.assign({}, m, { presence }) : m));
     dot.className = "dot small " + (on ? "online" : "offline");
   });
+  if (state.refreshFriends) state.refreshFriends();
 }
 
 /* ---- navigation ---- */
@@ -1885,7 +1971,10 @@ function cancelUpload(id) {
 
 /* ================= 11. popouts / menus ================= */
 
-function closePopouts() { $$(".popout").forEach((n) => n.remove()); }
+function closePopouts() {
+  $$(".popout").forEach((n) => n.remove());
+  state.repaintPopout = null;
+}
 
 function openMenu(x, y, items) {
   closePopouts();
@@ -1964,6 +2053,48 @@ async function showProfilePopout(user, anchor) {
     const msgBtn = h(`<button class="btn sm">Message</button>`);
     msgBtn.onclick = async () => { closePopouts(); await startDM(uid); };
     actions.appendChild(msgBtn);
+
+    // relationship button: Add friend -> Accept/Cancel -> Remove friend
+    const rel = h(`<button class="btn sm secondary">Add friend</button>`);
+    const relState = () => {
+      const f = state.friends || {};
+      if ((f.friends || []).some((u) => Number(u.uid) === uid)) return "friends";
+      if ((f.incoming || []).some((u) => Number(u.uid) === uid)) return "incoming";
+      if ((f.outgoing || []).some((u) => Number(u.uid) === uid)) return "outgoing";
+      return "none";
+    };
+    const paint = () => {
+      const s = relState();
+      rel.textContent = s === "friends" ? "Remove friend"
+        : s === "incoming" ? "Accept request"
+        : s === "outgoing" ? "Cancel request" : "Add friend";
+      rel.className = "btn sm " + (s === "friends" ? "ghost" : s === "none" ? "secondary" : "");
+    };
+    paint();
+    rel.onclick = async () => {
+      const s = relState();
+      rel.disabled = true;
+      try {
+        if (s === "friends") {
+          await api("DELETE", `/api/dm/friends/${uid}`);
+          toast("Friend removed.", "info");
+        } else if (s === "incoming") {
+          await api("POST", `/api/dm/friends/${uid}/accept`, {});
+          toast(`You and ${user.display_name || user.username} are now friends.`, "success");
+        } else if (s === "outgoing") {
+          await api("POST", `/api/dm/friends/${uid}/decline`, {});
+        } else {
+          const data = await api("POST", "/api/dm/friends", { username: user.username || "" });
+          toast(data.friend ? `You and ${data.friend.display_name || data.friend.username} are already friends.`
+            : `Request sent to ${user.username}.`, data.friend ? "warn" : "success");
+        }
+        await refreshFriends();
+        paint();
+      } catch (e) { /* toast already shown */ }
+      finally { rel.disabled = false; }
+    };
+    actions.appendChild(rel);
+    state.repaintPopout = paint;
   }
   if (user.is_owner || (me && me.is_owner && uid === me.uid)) {
     actions.appendChild(h(`<span class="badge-pill owner">👑 Owner</span>`));
@@ -2029,6 +2160,202 @@ async function startDM(uid) {
   } catch (e) {}
 }
 
+/* ---- friends ---- */
+
+function pendingCount() {
+  return ((state.friends && state.friends.incoming) || []).length;
+}
+
+async function refreshFriends() {
+  try {
+    const data = await api("GET", "/api/dm/friends", null, { silent: true });
+    if (data && data.friends) state.friends = data;
+    renderSidebar();
+    if (state.refreshFriends) state.refreshFriends();
+  } catch (e) { /* offline: keep what we have */ }
+}
+
+function onFriendEvent(kind, data) {
+  const f = state.friends || (state.friends = { friends: [], incoming: [], outgoing: [] });
+  const other = data.user || { uid: data.uid };
+  const uid = Number(other.uid !== undefined ? other.uid : data.uid);
+  const drop = (list) => list.filter((u) => Number(u.uid) !== uid);
+  if (kind === "request") {
+    if (!f.incoming.some((u) => Number(u.uid) === uid)) f.incoming.unshift(other);
+    toast(`${other.display_name || other.username || "Someone"} sent you a friend request.`,
+      "success", 6000);
+  } else if (kind === "accept") {
+    f.incoming = drop(f.incoming);
+    f.outgoing = drop(f.outgoing);
+    if (uid !== (state.user && state.user.uid) && !f.friends.some((u) => Number(u.uid) === uid)) {
+      f.friends.push(other);
+      toast(`You and ${other.display_name || other.username} are now friends.`, "success");
+    }
+  } else if (kind === "decline") {
+    f.incoming = drop(f.incoming);
+    f.outgoing = drop(f.outgoing);
+  } else if (kind === "remove") {
+    f.incoming = drop(f.incoming);
+    f.outgoing = drop(f.outgoing);
+    f.friends = drop(f.friends);
+  }
+  renderSidebar();
+  if (state.refreshFriends) state.refreshFriends();
+  if (state.repaintPopout) state.repaintPopout();   // keep an open profile card honest
+}
+
+function friendRow(u, kind) {
+  const name = esc(u.display_name || u.username || "Unknown");
+  const sub = kind === "pending-in" ? "Incoming friend request"
+    : kind === "pending-out" ? "Outgoing friend request" : esc(presenceText(u));
+  const actions = kind === "pending-in"
+    ? `<button class="btn sm" data-accept>Accept</button>
+       <button class="btn sm ghost" data-decline>Decline</button>`
+    : kind === "pending-out"
+      ? `<button class="btn sm ghost" data-decline>Cancel</button>`
+      : `<button class="btn sm secondary" data-message>Message</button>
+         <button class="btn sm ghost" data-remove>Remove</button>`;
+  return `<div class="friend-row" data-uid="${Number(u.uid)}">
+    ${avatarHTML(u, "mini-avatar", true)}
+    <div class="fr-who">
+      <div class="fr-name">${name}</div>
+      <div class="fr-sub">${sub}</div>
+    </div>
+    <div class="fr-actions">${actions}</div>
+  </div>`;
+}
+
+function showFriendsModal() {
+  // re-clicking the sidebar button must reuse the open pane, not stack a
+  // second modal whose stale copy keeps receiving no updates
+  if (state.friendsModal) { state.friendsModal.close(null); state.friendsModal = null; }
+  const startTab = pendingCount() ? "pending" : "online";
+  const m = openModal(`
+    <div class="modal wide friends-modal">
+      <div class="modal-head"><h2>Friends</h2>
+        <p>Add people you trust — friends get rung when you call them, everyone
+           else's call connects quietly.</p></div>
+      <div class="modal-body">
+        <div class="tabs" id="frTabs">
+          <button class="tab" data-tab="online">Online</button>
+          <button class="tab" data-tab="all">All</button>
+          <button class="tab" data-tab="pending">Pending <span data-pcount></span></button>
+          <button class="tab" data-tab="add">Add Friend</button>
+        </div>
+        <div id="frPane"></div>
+      </div>
+      <div class="modal-foot"><button class="btn ghost" data-close>Close</button></div>
+    </div>`, { onClose: () => { state.refreshFriends = null; state.friendsModal = null; } });
+  state.friendsModal = m;
+
+  const pane = $("#frPane", m.node);
+  const tabs = $("#frTabs", m.node);
+  let tab = startTab;
+
+  function paintTabs() {
+    $$(".tab", tabs).forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+    const c = $("[data-pcount]", tabs);
+    if (c) c.textContent = pendingCount() ? `(${pendingCount()})` : "";
+  }
+
+  function render() {
+    paintTabs();
+    const f = state.friends || {};
+    if (tab === "add") {
+      pane.innerHTML = `
+        <div class="add-friend">
+          <div class="row-line">
+            <input class="input" id="frAdd" placeholder="exact username" maxlength="32"
+                   autocomplete="off">
+            <button class="btn" id="frAddGo">Send request</button>
+          </div>
+          <div class="hint">Usernames are unique and case-insensitive. They'll get a
+            request they can accept or decline.</div>
+          <div class="error-text" data-err></div>
+        </div>`;
+      const input = $("#frAdd", pane);
+      const go = async () => {
+        const who = input.value.trim();
+        const err = $("[data-err]", pane);
+        err.textContent = "";
+        if (!who) { err.textContent = "Enter a username."; return; }
+        $("#frAddGo", pane).disabled = true;
+        try {
+          const data = await api("POST", "/api/dm/friends", { username: who });
+          if (data.friend) {
+            toast(`You and ${data.friend.display_name || data.friend.username} are already friends.`, "warn");
+          } else {
+            toast(`Request sent to ${who}.`, "success");
+            if (!state.friends.outgoing.some((u) => u.username && u.username.toLowerCase() === who.toLowerCase())) {
+              state.friends.outgoing.unshift(data.request);
+            }
+            tab = "pending";
+          }
+          input.value = "";
+          render();
+        } catch (e) {
+          err.textContent = e.message;
+          $("#frAddGo", pane).disabled = false;
+        }
+      };
+      $("#frAddGo", pane).onclick = go;
+      input.onkeydown = (ev) => { if (ev.key === "Enter") { ev.preventDefault(); go(); } };
+      input.focus();
+      return;
+    }
+
+    let list = [];
+    if (tab === "pending") {
+      list = [
+        ...((f.incoming || []).map((u) => friendRow(u, "pending-in"))),
+        ...((f.outgoing || []).map((u) => friendRow(u, "pending-out"))),
+      ];
+    } else {
+      const all = (f.friends || []).slice();
+      list = (tab === "online" ? all.filter((u) => isOnline(u)) : all)
+        .map((u) => friendRow(u, "friend"));
+    }
+    pane.innerHTML = `<div class="modal-list friend-list">${
+      list.join("") || `<div class="hint" style="padding:14px 4px">${
+        tab === "pending" ? "No pending requests."
+        : tab === "online" ? "Nobody's online right now."
+        : "You haven't added anyone yet."}</div>`}</div>`;
+  }
+
+  state.refreshFriends = render;
+  tabs.onclick = (ev) => {
+    const btn = ev.target.closest("[data-tab]");
+    if (!btn) return;
+    tab = btn.dataset.tab;
+    render();
+  };
+  pane.onclick = async (ev) => {
+    const row = ev.target.closest(".friend-row");
+    if (!row) return;
+    const uid = Number(row.dataset.uid);
+    const kind = ev.target.closest("[data-accept]") ? "accept"
+      : ev.target.closest("[data-decline]") ? "decline"
+      : ev.target.closest("[data-remove]") ? "remove"
+      : ev.target.closest("[data-message]") ? "message" : "";
+    if (!kind) return;
+    if (kind === "message") { m.close(null); await startDM(uid); return; }
+    try {
+      if (kind === "accept") {
+        await api("POST", `/api/dm/friends/${uid}/accept`, {});
+      } else if (kind === "decline") {
+        await api("POST", `/api/dm/friends/${uid}/decline`, {});
+        onFriendEvent("decline", { uid });
+      } else {
+        await api("DELETE", `/api/dm/friends/${uid}`);
+        onFriendEvent("remove", { uid });
+      }
+      render();
+    } catch (e) { toast(e.message, "error"); }
+  };
+  $("[data-close]", m.node).onclick = () => m.close(null);
+  render();
+}
+
 function showDMInfoModal() {
   const dm = state.currentChannel;
   if (!dm || dm.server_id) return;
@@ -2080,7 +2407,16 @@ function showDMInfoModal() {
 function imageFromFile(file, maxDim) {
   return new Promise((resolve, reject) => {
     if (!file || !/^image\//.test(file.type || "")) { reject(new Error("Pick an image file.")); return; }
-    if (file.size > 5 * 1024 * 1024) { reject(new Error("Image must be under 5 MB.")); return; }
+    if (file.size > INLINE_IMAGE_MAX) { reject(new Error("Image must be under 5 MB.")); return; }
+    if ((file.type || "") === "image/gif") {
+      // Canvas would flatten an animated GIF to its first frame — send the
+      // original bytes instead (the server keeps the .gif extension).
+      const fr = new FileReader();
+      fr.onload = () => resolve(fr.result);
+      fr.onerror = () => reject(new Error("Couldn't read that image."));
+      fr.readAsDataURL(file);
+      return;
+    }
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
@@ -2101,6 +2437,40 @@ function imageFromFile(file, maxDim) {
   });
 }
 
+/* Small stills become a downscaled PNG data URL; anything bigger rides the
+   chunked uploader (Cloudflare caps a single request at ~100 MB, so a 10 GB
+   file has to travel in 16 MB pieces) and is adopted by the server when you
+   save. GIFs always keep their original bytes. */
+const INLINE_IMAGE_MAX = 5 * 1024 * 1024;
+const PICKER_MAX = 10 * 1024 * 1024 * 1024;
+
+async function uploadPickerImage(file) {
+  const init = await api("POST", "/api/dm/uploads", {
+    filename: file.name || "image.bin", size: file.size,
+    mime: file.type || "application/octet-stream",
+  }, { silent: true });
+  const chunk = init.chunk_size || 16777216;
+  try {
+    for (let offset = 0; offset < file.size; offset += chunk) {
+      const slice = file.slice(offset, Math.min(offset + chunk, file.size));
+      await api("PUT", `/api/dm/uploads/${init.upload_id}?offset=${offset}&received=${offset + slice.size}`,
+        slice, { silent: true });
+    }
+    const done = await api("POST", `/api/dm/uploads/${init.upload_id}/complete`, {}, { silent: true });
+    return done.url;
+  } catch (err) {
+    api("DELETE", `/api/dm/uploads/${init.upload_id}`, undefined, { silent: true }).catch(() => {});
+    throw err;
+  }
+}
+
+async function pickerValue(file) {
+  if (!file || !/^image\//.test(file.type || "")) throw new Error("Pick an image file.");
+  if (file.size > PICKER_MAX) throw new Error("Max file size is 10 GB.");
+  if (file.size > INLINE_IMAGE_MAX) return await uploadPickerImage(file);
+  return await imageFromFile(file, 256);
+}
+
 function imagePickerHTML(id, current, label) {
   const inner = current ? `<img src="${esc(safeURL(current))}" alt="">` : `<span>＋</span>`;
   return `<div class="avatar-pick">
@@ -2108,9 +2478,9 @@ function imagePickerHTML(id, current, label) {
     <div style="display:flex;flex-direction:column;gap:7px">
       <button type="button" class="btn sm secondary" data-pick="${id}">${esc(label || "Upload image")}</button>
       <button type="button" class="btn sm ghost" data-clear="${id}">Remove</button>
-      <span class="hint">PNG or JPG, up to 5 MB.</span>
+      <span class="hint">PNG, JPG or GIF — up to 10 GB.</span>
     </div>
-    <input type="file" accept="image/*" id="${id}File" hidden>
+    <input type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" id="${id}File" hidden>
   </div>`;
 }
 
@@ -2119,17 +2489,25 @@ function wireImagePicker(root, id, onValue) {
   const preview = $(`#${id}Preview`, root);
   const pick = $(`[data-pick="${id}"]`, root);
   const clear = $(`[data-clear="${id}"]`, root);
+  const hint = pick && pick.parentElement ? pick.parentElement.querySelector(".hint") : null;
   let value = null;
   if (pick) pick.onclick = () => file.click();
   if (file) file.onchange = async () => {
     const f = file.files && file.files[0];
     file.value = "";
     if (!f) return;
+    const idleHint = hint ? hint.textContent : "";
+    if (pick) pick.disabled = true;
+    if (hint) hint.textContent = f.size > INLINE_IMAGE_MAX ? "Uploading…" : "Reading image…";
     try {
-      value = await imageFromFile(f, id.indexOf("server") >= 0 ? 256 : 256);
-      preview.innerHTML = `<img src="${value}" alt="">`;
+      value = await pickerValue(f);
+      preview.innerHTML = `<img src="${esc(value)}" alt="">`;
       if (onValue) onValue(value);
     } catch (e) { toast(e.message, "error"); }
+    finally {
+      if (pick) pick.disabled = false;
+      if (hint) hint.textContent = idleHint;
+    }
   };
   if (clear) clear.onclick = () => {
     value = "";
@@ -2615,8 +2993,9 @@ SETTINGS_SECTIONS.profile = function (pane) {
       <div class="field"><label>Status</label>
         <select class="input" name="presence">
           ${["online", "idle", "dnd", "invisible"].map((p) =>
-            `<option value="${p}" ${(me.presence || "online") === p ? "selected" : ""}>${p}</option>`).join("")}
-        </select></div>
+            `<option value="${p}" ${(me.status_choice || me.presence || "online") === p ? "selected" : ""}>${STATUS_LABELS[p]}</option>`).join("")}
+        </select>
+        <span class="hint">Invisible shows you as offline to everyone else.</span></div>
       <div class="error-text" data-err></div>
       <button class="btn" data-save>Save changes</button>
     </div>
@@ -2635,7 +3014,7 @@ SETTINGS_SECTIONS.profile = function (pane) {
       bio: $('[name="bio"]', pane).value,
       presence: $('[name="presence"]', pane).value,
     };
-    if (avatar) payload.avatar = avatar;
+    if (avatar !== null) payload.avatar = avatar;
     try {
       const data = await api("POST", "/api/dm/me", payload);
       state.user = data.user;
@@ -3816,6 +4195,58 @@ function callTitle(room) {
 
 /* ---- microphone / deafen ---- */
 
+/* Voice activity: watch the local mic and report speech so everyone else gets
+   the green "speaking" ring. A simple RMS threshold with hysteresis-free
+   200 ms sampling is plenty — this only drives a dot, not a gate. */
+const voiceActivity = { ctx: null, timer: null, on: false };
+
+function setTalking(on) {
+  on = !!on;
+  if (voiceActivity.on === on) return;
+  voiceActivity.on = on;
+  if (state.activeRoom) sendWS({ t: "talking", on });
+}
+
+function startVoiceActivity(stream) {
+  stopVoiceActivity(true);
+  if (!stream) return;
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC();
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
+    const src = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.6;
+    src.connect(analyser);
+    const buf = new Uint8Array(analyser.fftSize);
+    voiceActivity.ctx = ctx;
+    voiceActivity.timer = setInterval(() => {
+      if (!state.activeRoom || call.muted || call.deaf || !stream.active) {
+        setTalking(false);
+        return;
+      }
+      try { analyser.getByteTimeDomainData(buf); } catch (e) { return; }
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const v = (buf[i] - 128) / 128;
+        sum += v * v;
+      }
+      setTalking(Math.sqrt(sum / buf.length) > 0.02);
+    }, 200);
+  } catch (e) { /* no AudioContext: no ring, no harm */ }
+}
+
+function stopVoiceActivity(silent) {
+  if (voiceActivity.timer) { clearInterval(voiceActivity.timer); voiceActivity.timer = null; }
+  if (voiceActivity.ctx) { try { voiceActivity.ctx.close(); } catch (e) {} voiceActivity.ctx = null; }
+  if (voiceActivity.on) {
+    voiceActivity.on = false;
+    if (!silent && state.activeRoom) sendWS({ t: "talking", on: false });
+  }
+}
+
 async function ensureMic() {
   if (call.mic) { applyMicState(); return call.mic; }
   try {
@@ -3823,6 +4254,7 @@ async function ensureMic() {
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
     call.mic.getAudioTracks().forEach((t) => { t.enabled = !call.muted && !call.deaf; });
+    startVoiceActivity(call.mic);
     for (const [, e] of call.peers) {
       call.mic.getAudioTracks().forEach((t) => {
         try { e.pc.addTrack(t, call.mic); } catch (err) {}
@@ -3839,6 +4271,7 @@ function applyMicState() {
   if (!call.mic) return;
   const on = !call.muted && !call.deaf;
   call.mic.getAudioTracks().forEach((t) => { t.enabled = on; });
+  if (!on) setTalking(false);
 }
 
 function toggleMute() {
@@ -3900,6 +4333,7 @@ async function joinRoom(room, withMic) {
 
 function stopCall(silent) {
   const room = state.activeRoom || call.room;
+  stopVoiceActivity();               // clear the speaking ring while we're still in the room
   if (room && !silent) { sendWS({ t: "call.leave", room }); sfx.leave(); }
   stopShare(true);
   if (call.mic) { call.mic.getTracks().forEach((t) => t.stop()); call.mic = null; }

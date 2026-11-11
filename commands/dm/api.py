@@ -114,10 +114,18 @@ def _disk_free() -> int:
             return 1 << 40
 
 
-def _save_media(data_url: str, kind: str, uid: int) -> str:
-    """Persist a base64 data-URL image, return the public path."""
+def _save_media(value: str, kind: str, uid: int) -> str:
+    """Persist an image and return its public path.
+
+    Two inputs are accepted: a base64 data URL (small, inline) or the URL of a
+    finished chunked upload (`/api/dm/files/...`) — the latter is how anything
+    over 5 MB arrives, because it has to travel in 16 MB pieces.
+    """
     if kind not in MEDIA_TYPES:
         raise ValueError("unsupported media kind")
+    if isinstance(value, str) and value.startswith("/api/dm/files/"):
+        return _adopt_upload(value, kind, uid)
+    data_url = value
     if not isinstance(data_url, str) or not data_url.startswith("data:image/"):
         raise ValueError("expected an image data URL")
     header, _, payload = data_url.partition(",")
@@ -133,6 +141,41 @@ def _save_media(data_url: str, kind: str, uid: int) -> str:
     os.makedirs(_root["media"], exist_ok=True)
     with open(os.path.join(_root["media"], name), "wb") as fh:
         fh.write(raw)
+    return f"/api/dm/media/{name}"
+
+
+_UPLOAD_URL_RE = re.compile(r"^/api/dm/files/(\d+)/[^/?#]+$")
+_UPLOAD_EXTS = {"image/png": "png", "image/jpg": "jpg", "image/jpeg": "jpg",
+                "image/gif": "gif", "image/webp": "webp", "image/svg+xml": "svg"}
+_IMAGE_EXTS = {"png", "jpg", "gif", "webp", "svg"}
+
+
+def _adopt_upload(url: str, kind: str, uid: int) -> str:
+    """Move a finished chunked upload into the public media folder.
+
+    Media files have to be readable by everyone (they show up in other
+    people's member lists), while uploads stay private until you claim one —
+    so the file is renamed, moved and released from your storage quota here.
+    """
+    m = _UPLOAD_URL_RE.match(url)
+    if not m:
+        raise ValueError("expected an image data URL or an uploaded file")
+    att = db.row("SELECT * FROM attachments WHERE id=? AND owner_id=?",
+                 (int(m.group(1)), uid))
+    if not att:
+        raise ValueError("That upload is no longer available — pick the file again.")
+    mime = (att["mime"] or "").split(";")[0].strip().lower()
+    ext = _UPLOAD_EXTS.get(mime) or \
+        (os.path.splitext(att["filename"] or "")[1] or "").lower().lstrip(".")
+    if ext not in _IMAGE_EXTS:
+        raise ValueError("That file type can't be used here.")
+    src = os.path.join(_root["uploads"], att["path"])
+    if not os.path.exists(src):
+        raise ValueError("That upload is no longer available — pick the file again.")
+    name = f"{kind}_{uid}_{secrets.token_hex(8)}.{ext}"
+    os.makedirs(_root["media"], exist_ok=True)
+    os.replace(src, os.path.join(_root["media"], name))   # same volume: instant
+    db.run("DELETE FROM attachments WHERE id=?", (att["id"],))
     return f"/api/dm/media/{name}"
 
 
@@ -369,7 +412,7 @@ async def api_logout(request):
 
 async def api_me(request):
     user = _need_user(request)
-    auth.touch_presence(user["id"], "online")
+    auth.touch_last_seen(user["id"])
     return web.json_response({"user": auth.public_user(user),
                               "servers": [_server_brief(s, user) for s in db.rows(
                                   "SELECT s.* FROM servers s JOIN server_members m "
@@ -381,6 +424,7 @@ async def api_update_me(request):
     user = _need_user(request)
     data = await _body(request)
     fields, params = [], []
+    status_changed = False
     if "display_name" in data:
         name = str(data.get("display_name") or "").strip()[:64]
         fields.append("display_name=?")
@@ -394,15 +438,26 @@ async def api_update_me(request):
     if "presence" in data and data.get("presence") in ("online", "idle", "dnd", "invisible"):
         fields.append("presence=?")
         params.append(data["presence"])
-    if "avatar" in data and data.get("avatar"):
-        try:
+        status_changed = True
+    if "avatar" in data:
+        # "" clears the avatar (the picker's Remove button); anything else is a
+        # data URL or a finished upload the server adopts.
+        avatar = str(data.get("avatar") or "")
+        if not avatar:
             fields.append("avatar=?")
-            params.append(_save_media(data["avatar"], "avatar", user["id"]))
-        except Exception as e:
-            return _err(str(e))
+            params.append("")
+        else:
+            try:
+                fields.append("avatar=?")
+                params.append(_save_media(avatar, "avatar", user["id"]))
+            except Exception as e:
+                return _err(str(e))
     if fields:
         params.append(user["id"])
         db.run(f"UPDATE users SET {', '.join(fields)} WHERE id=?", params)
+    if status_changed:
+        # everyone else's view of this user's status just changed
+        await realtime.broadcast_presence(user["id"])
     return web.json_response({"user": auth.public_user(auth.get_user(user["id"]))})
 
 
@@ -464,6 +519,7 @@ async def api_bootstrap(request):
         "user": auth.public_user(user),
         "servers": [_server_brief(s, user) for s in servers],
         "dms": [_channel_payload(c, user) for c in dms],
+        "friends": _friends_payload(user["id"]),
         "calls": realtime.active_calls(),
         "server_time": time.time(),
     })
@@ -500,6 +556,126 @@ async def api_user_profile(request):
     return web.json_response({"user": auth.public_user(user),
                               "mutual_servers": [_server_brief(s, viewer) for s in shared],
                               "can_dm": True})
+
+
+# --------------------------------------------------------------------------
+# friends
+# --------------------------------------------------------------------------
+
+def _friend_user(uid) -> dict | None:
+    user = auth.get_user(int(uid))
+    return auth.public_user(user) if user and not user.get("banned") else None
+
+
+def _friends_payload(uid: int) -> dict:
+    """Friends + pending requests for the sidebar badge and the friends pane."""
+    friends = [p for p in (_friend_user(i) for i in db.friend_ids(uid)) if p]
+    friends.sort(key=lambda u: (u["presence"] == "offline",
+                                (u["display_name"] or u["username"]).lower()))
+    incoming, outgoing = [], []
+    for r in db.rows("SELECT * FROM friend_requests WHERE to_id=? ORDER BY created_at DESC",
+                     (uid,)):
+        p = _friend_user(r["from_id"])
+        if p:
+            p["requested_at"] = r["created_at"]
+            incoming.append(p)
+    for r in db.rows("SELECT * FROM friend_requests WHERE from_id=? ORDER BY created_at DESC",
+                     (uid,)):
+        p = _friend_user(r["to_id"])
+        if p:
+            p["requested_at"] = r["created_at"]
+            outgoing.append(p)
+    return {"friends": friends, "incoming": incoming, "outgoing": outgoing}
+
+
+async def _link_friends(user: dict, other: dict) -> dict:
+    """Accept both directions of a request (or a fresh add) and tell everyone."""
+    a, b = (user["id"], other["id"]) if user["id"] < other["id"] \
+        else (other["id"], user["id"])
+    db.run("INSERT OR IGNORE INTO friendships(user_a,user_b,created_at) VALUES(?,?,?)",
+           (a, b, time.time()))
+    db.run("DELETE FROM friend_requests WHERE (from_id=? AND to_id=?) "
+           "OR (from_id=? AND to_id=?)",
+           (user["id"], other["id"], other["id"], user["id"]))
+    mine = auth.public_user(user)
+    theirs = auth.public_user(other)
+    await realtime.send_to_user(user["id"], {"t": "event", "op": "friend.accept",
+                                             "data": {"user": theirs}})
+    await realtime.send_to_user(other["id"], {"t": "event", "op": "friend.accept",
+                                              "data": {"user": mine}})
+    return {"friend": theirs}
+
+
+async def api_list_friends(request):
+    user = _need_user(request)
+    return web.json_response(_friends_payload(user["id"]))
+
+
+async def api_add_friend(request):
+    user = _need_user(request)
+    data = await _body(request)
+    who = str(data.get("username") or data.get("user") or "").strip()
+    if not who:
+        return _err("Enter a username to add.")
+    target = auth.user_by_username(who)
+    if not target or target.get("banned"):
+        return _err("Couldn't find anyone with that username.")
+    if target["id"] == user["id"]:
+        return _err("You can't add yourself.")
+    if db.are_friends(user["id"], target["id"]):
+        return _err("You're already friends with them.")
+    if db.row("SELECT 1 FROM friend_requests WHERE from_id=? AND to_id=?",
+              (user["id"], target["id"])):
+        return _err("You've already sent them a request.")
+    if db.row("SELECT 1 FROM friend_requests WHERE from_id=? AND to_id=?",
+              (target["id"], user["id"])):
+        # They asked first — adding them back is an accept.
+        return web.json_response(await _link_friends(user, target))
+    db.friend_request(user["id"], target["id"])
+    await realtime.send_to_user(target["id"], {"t": "event", "op": "friend.request",
+                                               "data": {"user": auth.public_user(user)}})
+    return web.json_response({"request": auth.public_user(target), "sent": True})
+
+
+async def api_accept_friend(request):
+    user = _need_user(request)
+    other = auth.get_user(int(request.match_info["uid"]))
+    if not other:
+        return _err("User not found.", 404)
+    if not db.row("SELECT 1 FROM friend_requests WHERE from_id=? AND to_id=?",
+                  (other["id"], user["id"])):
+        return _err("No pending request from them.", 404)
+    return web.json_response(await _link_friends(user, other))
+
+
+async def api_decline_friend(request):
+    user = _need_user(request)
+    other_id = int(request.match_info["uid"])
+    other = auth.get_user(other_id)
+    if not other:
+        return _err("User not found.", 404)
+    # Declining an incoming request and cancelling your own share one path.
+    removed = db.run("DELETE FROM friend_requests WHERE (from_id=? AND to_id=?) "
+                     "OR (from_id=? AND to_id=?)",
+                     (other_id, user["id"], user["id"], other_id))
+    if removed:
+        await realtime.send_to_user(other_id, {"t": "event", "op": "friend.decline",
+                                               "data": {"uid": user["id"]}})
+    return web.json_response({"ok": True})
+
+
+async def api_remove_friend(request):
+    user = _need_user(request)
+    other_id = int(request.match_info["uid"])
+    if not db.are_friends(user["id"], other_id):
+        return _err("You're not friends with them.", 404)
+    a, b = (user["id"], other_id) if user["id"] < other_id else (other_id, user["id"])
+    db.run("DELETE FROM friendships WHERE user_a=? AND user_b=?", (a, b))
+    await realtime.send_to_user(other_id, {"t": "event", "op": "friend.remove",
+                                           "data": {"uid": user["id"]}})
+    await realtime.send_to_user(user["id"], {"t": "event", "op": "friend.remove",
+                                             "data": {"uid": other_id}})
+    return web.json_response({"ok": True})
 
 
 # --------------------------------------------------------------------------
@@ -1363,6 +1539,12 @@ ROUTES = [
     ("GET", "/api/dm/bootstrap", api_bootstrap),
     ("GET", "/api/dm/directory", api_directory),
     ("GET", "/api/dm/users/{uid}", api_user_profile),
+
+    ("GET", "/api/dm/friends", api_list_friends),
+    ("POST", "/api/dm/friends", api_add_friend),
+    ("POST", "/api/dm/friends/{uid}/accept", api_accept_friend),
+    ("POST", "/api/dm/friends/{uid}/decline", api_decline_friend),
+    ("DELETE", "/api/dm/friends/{uid}", api_remove_friend),
 
     ("POST", "/api/dm/servers", api_create_server),
     ("GET", "/api/dm/servers/{sid}", api_get_server),

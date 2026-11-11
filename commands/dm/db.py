@@ -175,6 +175,23 @@ CREATE TABLE IF NOT EXISTS invites (
     server_id INTEGER NOT NULL,
     uses      INTEGER NOT NULL DEFAULT 0
 );
+
+-- friends: a request is one direction, a friendship is the accepted pair
+CREATE TABLE IF NOT EXISTS friend_requests (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_id    INTEGER NOT NULL,
+    to_id      INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    UNIQUE (from_id, to_id)
+);
+CREATE INDEX IF NOT EXISTS idx_friend_requests_to ON friend_requests(to_id);
+
+CREATE TABLE IF NOT EXISTS friendships (
+    user_a     INTEGER NOT NULL,      -- always the lower of the two ids
+    user_b     INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (user_a, user_b)
+);
 """
 
 
@@ -241,3 +258,43 @@ def many(sql: str, seq) -> None:
 
 def now() -> float:
     return time.time()
+
+
+# --------------------------------------------------------------------------
+# friendships
+# --------------------------------------------------------------------------
+
+def _pair(a, b) -> tuple:
+    a, b = int(a), int(b)
+    return (a, b) if a < b else (b, a)
+
+
+def are_friends(a, b) -> bool:
+    if not a or not b or int(a) == int(b):
+        return False
+    lo, hi = _pair(a, b)
+    return row("SELECT 1 FROM friendships WHERE user_a=? AND user_b=?",
+               (lo, hi)) is not None
+
+
+def friend_ids(uid) -> list:
+    uid = int(uid)
+    return [r["other"] for r in rows(
+        "SELECT user_b AS other FROM friendships WHERE user_a=? "
+        "UNION "
+        "SELECT user_a AS other FROM friendships WHERE user_b=?",
+        (uid, uid))]
+
+
+def friend_request(from_id, to_id):
+    """Insert a request unless one already exists; returns the row (or None)."""
+    lo, hi = _pair(from_id, to_id)
+    if lo == hi or are_friends(lo, hi):
+        return None
+    existing = row("SELECT * FROM friend_requests WHERE from_id=? AND to_id=?",
+                   (int(from_id), int(to_id)))
+    if existing:
+        return existing
+    rid = run("INSERT INTO friend_requests(from_id,to_id,created_at) VALUES(?,?,?)",
+              (int(from_id), int(to_id), time.time()))
+    return row("SELECT * FROM friend_requests WHERE id=?", (rid,))

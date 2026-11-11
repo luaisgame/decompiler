@@ -218,6 +218,60 @@ def touch_presence(user_id: int, presence: str = "online") -> None:
            (time.time(), presence or "online", int(user_id)))
 
 
+def touch_last_seen(user_id: int) -> None:
+    """Record that a tab connected/disconnected without touching their status.
+
+    `presence` stores the user's *choice* (online/idle/dnd/invisible); whether
+    they're actually reachable is derived from live sockets in
+    display_presence(), so connections must not rewrite the choice.
+    """
+    db.run("UPDATE users SET last_seen=? WHERE id=?", (time.time(), int(user_id)))
+
+
+_rt = None
+
+
+def _realtime():
+    """Late import: realtime imports auth, so auth can't import it at module level."""
+    global _rt
+    if _rt is None:
+        from . import realtime
+        _rt = realtime
+    return _rt
+
+
+def display_presence(user) -> str:
+    """The presence everyone else should see.
+
+    Offline is derived from the live socket table instead of the database, so
+    a crashed or restarted process can never leave a user stuck "online".
+    """
+    if not user:
+        return "offline"
+    choice = user.get("presence") or "online"
+    if choice == "invisible":
+        return "offline"
+    try:
+        live = int(user["id"]) in _realtime().by_user
+    except Exception:
+        live = False
+    if not live:
+        return "offline"
+    return choice if choice in ("idle", "dnd") else "online"
+
+
+def call_presence(user) -> tuple:
+    """(in a call right now, speaking right now)."""
+    if not user:
+        return (False, False)
+    try:
+        rt = _realtime()
+        uid = int(user["id"])
+        return (uid in rt.calling_users(), uid in rt.talking)
+    except Exception:
+        return (False, False)
+
+
 def is_owner_user(user: dict | None) -> bool:
     if not user:
         return False
@@ -245,6 +299,7 @@ def badges_for(user_id: int) -> list:
 def public_user(user: dict | None) -> dict:
     if not user:
         return {}
+    in_call, talking = call_presence(user)
     return {
         "uid": user["id"],
         "id": str(user.get("discord_id") or "0"),   # legacy Discord-snowflake field
@@ -256,7 +311,10 @@ def public_user(user: dict | None) -> dict:
         "discord_name": user.get("discord_name") or "",
         "is_owner": bool(user.get("is_owner")) or str(user.get("discord_id") or "") == OWNER_DISCORD_ID,
         "banned": bool(user.get("banned")),
-        "presence": user.get("presence") or "offline",
+        "presence": display_presence(user),
+        "status_choice": user.get("presence") or "online",   # what the settings picker shows
+        "in_call": in_call,
+        "talking": talking,
         "custom_status": user.get("custom_status") or "",
         "created_at": user.get("created_at") or 0,
         "badges": badges_for(user["id"]),
