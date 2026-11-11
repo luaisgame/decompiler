@@ -30,6 +30,9 @@
 
 * { box-sizing: border-box; }
 
+/* the hidden attribute must win over component display rules (e.g. .field) */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   padding: 0;
@@ -86,6 +89,13 @@ a:hover { text-decoration: underline; }
 .btn.sm { padding: 5px 10px; font-size: 13px; min-height: 28px; border-radius: 6px; }
 .btn.block { width: 100%; }
 .btn.icon { padding: 7px; min-width: 32px; border-radius: 6px; }
+
+/* ---------- inline icons ---------- */
+.ico { display: block; flex-shrink: 0; }
+.btn, .tools button, .attach-btn, .send-btn, .ctl button, .mobile-only {
+  align-items: center; justify-content: center;
+}
+.nav-row .hash { display: flex; align-items: center; justify-content: center; }
 
 .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
 .field label { font-size: 11px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; color: var(--text-dim); }
@@ -206,7 +216,10 @@ textarea.input { resize: vertical; min-height: 70px; }
 .user-bar .name { font-size: 14px; font-weight: 600; color: var(--text-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .user-bar .status { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .user-bar .ctl { display: flex; gap: 2px; }
-.user-bar .ctl button { padding: 6px; border-radius: 5px; color: var(--text-dim); font-size: 15px; }
+.user-bar .ctl button {
+  padding: 6px; border-radius: 5px; color: var(--text-dim); font-size: 15px;
+  display: flex; align-items: center; justify-content: center;
+}
 .user-bar .ctl button:hover { background: var(--bg-3); color: var(--text-strong); }
 .user-bar .ctl button.on { color: var(--green); }
 
@@ -225,7 +238,10 @@ textarea.input { resize: vertical; min-height: 70px; }
 }
 .topbar .spacer { flex: 1; }
 .topbar .tools { display: flex; align-items: center; gap: 4px; }
-.topbar .tools button { padding: 6px 8px; border-radius: 5px; color: var(--text-dim); font-size: 15px; }
+.topbar .tools button {
+  padding: 6px; border-radius: 5px; color: var(--text-dim); font-size: 15px;
+  display: flex; align-items: center; justify-content: center;
+}
 .topbar .tools button:hover { background: var(--bg-3); color: var(--text-strong); }
 .topbar .tools button.on { color: var(--accent); }
 .latency {
@@ -321,11 +337,13 @@ textarea.input { resize: vertical; min-height: 70px; }
 
 .empty {
   flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 10px; color: var(--text-dim); text-align: center; padding: 30px;
+  gap: 8px; color: var(--text-dim); text-align: center; padding: 40px 30px;
 }
-.empty .big { font-size: 44px; opacity: .55; }
-.empty h3 { margin: 0; color: var(--text-strong); font-size: 21px; }
-.empty p { margin: 0; max-width: 420px; line-height: 1.5; font-size: 14px; }
+.empty h3 {
+  margin: 0; color: var(--text-strong); font-size: 20px; font-weight: 700; letter-spacing: -.2px;
+}
+.empty p { margin: 0; max-width: 440px; line-height: 1.5; font-size: 14.5px; }
+.empty-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-top: 12px; }
 
 /* typing + composer */
 .typing {
@@ -358,6 +376,7 @@ textarea.input { resize: vertical; min-height: 70px; }
 .composer-box:focus-within { border-color: rgba(88,101,242,.5); }
 .composer-box .attach-btn, .composer-box .send-btn {
   padding: 8px; border-radius: 6px; color: var(--text-dim); font-size: 19px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
 }
 .composer-box .attach-btn:hover, .composer-box .send-btn:hover { color: var(--text-strong); background: var(--bg-3); }
 .composer-box .send-btn { color: var(--accent); }
@@ -426,7 +445,13 @@ textarea.input { resize: vertical; min-height: 70px; }
 .tile.speaking { border-color: var(--green); box-shadow: 0 0 0 2px rgba(35,165,90,.35); }
 .tile .t-name { font-size: 12px; color: var(--text-strong); font-weight: 600; max-width: 118px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tile .mini-avatar { width: 52px; height: 52px; font-size: 19px; }
-.tile .t-mute { position: absolute; bottom: 5px; right: 6px; font-size: 12px; color: var(--red); }
+.tile .t-mute {
+  position: absolute; bottom: 5px; right: 6px; color: var(--red);
+  display: flex; align-items: center;
+}
+.tile .t-host {
+  display: inline-flex; vertical-align: -2px; color: var(--text-dim);
+}
 
 /* ---------- modals / toasts / popouts ---------- */
 #modals { position: fixed; inset: 0; z-index: 50; pointer-events: none; }
@@ -454,18 +479,22 @@ textarea.input { resize: vertical; min-height: 70px; }
 .modal-list .nav-row { margin-bottom: 0; }
 
 #toasts {
-  position: fixed; top: 16px; right: 16px; z-index: 90; display: flex;
-  flex-direction: column; gap: 8px; max-width: 340px;
+  position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 300;
+  display: flex; flex-direction: column; align-items: center; gap: 8px; max-width: min(92vw, 420px);
 }
 .toast {
-  background: var(--bg-1); border: 1px solid var(--line); border-left: 3px solid var(--accent);
-  border-radius: 7px; padding: 11px 14px; font-size: 13.5px; box-shadow: var(--shadow);
-  animation: slide .18s ease; color: var(--text);
+  background: #111214; border: 1px solid var(--line);
+  border-radius: 8px; padding: 11px 16px; font-size: 13.5px; box-shadow: var(--shadow);
+  animation: toastIn 0.2s cubic-bezier(.2,.9,.3,1.2); color: var(--text-strong);
+  display: flex; align-items: center; gap: 9px;
 }
-.toast.success { border-left-color: var(--green); }
-.toast.error { border-left-color: var(--red); }
-.toast.warn { border-left-color: var(--yellow); }
-@keyframes slide { from { transform: translateX(30px); opacity: 0 } to { transform: none; opacity: 1 } }
+.toast::before {
+  content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex-shrink: 0;
+}
+.toast.success::before { background: var(--green); }
+.toast.error::before { background: var(--red); }
+.toast.warn::before { background: var(--yellow); }
+@keyframes toastIn { from { transform: translateY(-14px); opacity: 0 } to { transform: none; opacity: 1 } }
 
 .popout {
   position: fixed; z-index: 60; background: var(--bg-1); border-radius: 9px;
@@ -496,33 +525,49 @@ textarea.input { resize: vertical; min-height: 70px; }
 .auth-wrap {
   min-height: 100vh; display: flex; align-items: center; justify-content: center;
   background:
-    radial-gradient(1000px 500px at 15% -10%, rgba(88,101,242,.30), transparent 60%),
-    radial-gradient(900px 500px at 110% 110%, rgba(35,165,90,.18), transparent 60%),
-    var(--bg-0);
+    radial-gradient(700px 420px at 22% -8%, rgba(88, 101, 242, .22), transparent 62%),
+    radial-gradient(760px 480px at 104% 106%, rgba(88, 101, 242, .13), transparent 58%),
+    var(--bg-1);
   padding: 24px;
 }
 .auth-card {
-  width: 100%; max-width: 420px; background: var(--bg-1); border-radius: 12px;
-  padding: 26px; box-shadow: var(--shadow); border: 1px solid var(--line);
+  width: 100%; max-width: 440px; background: var(--bg-2); border-radius: 5px;
+  padding: 32px; box-shadow: 0 6px 26px rgba(0, 0, 0, .35);
 }
-.auth-logo {
-  width: 60px; height: 60px; border-radius: 18px; background: var(--accent); color: #fff;
-  display: flex; align-items: center; justify-content: center; font-weight: 800;
-  font-size: 21px; margin: 0 auto 12px;
+.auth-card h1 {
+  text-align: center; font-size: 24px; font-weight: 700; letter-spacing: -.3px;
+  color: var(--text-strong); margin: 0 0 6px;
 }
-.auth-card h1 { text-align: center; font-size: 22px; margin: 0 0 4px; color: var(--text-strong); }
-.auth-card .sub { text-align: center; color: var(--text-dim); font-size: 13px; margin-bottom: 18px; }
-.auth-tabs { display: flex; background: var(--bg-0); border-radius: 7px; padding: 3px; margin-bottom: 16px; }
-.auth-tabs button {
-  flex: 1; padding: 7px; border-radius: 5px; font-weight: 600; font-size: 13.5px;
-  color: var(--text-dim);
+.auth-card .sub { text-align: center; color: var(--text-dim); font-size: 15px; margin: 0 0 22px; }
+.auth-card .field { margin-bottom: 16px; }
+.auth-card .field label {
+  display: block; font-size: 12px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .3px; color: #b5bac1; margin-bottom: 0;
 }
-.auth-tabs button.active { background: var(--bg-3); color: var(--text-strong); }
-.auth-divider { display: flex; align-items: center; gap: 10px; color: var(--text-faint); font-size: 11px; margin: 14px 0; text-transform: uppercase; }
+.auth-card .input {
+  width: 100%; height: 40px; background: var(--bg-0); border: 1px solid transparent;
+  border-radius: 8px; font-size: 15px; color: var(--text-strong); padding: 0 12px;
+}
+.auth-card .input::placeholder { color: var(--text-faint); }
+.auth-card .input:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px rgba(88, 101, 242, .25);
+}
+.auth-card .btn.block { height: 42px; font-size: 15px; font-weight: 600; border-radius: 8px; }
+.auth-card .btn.discord {
+  width: 100%; background: #5865f2; height: 42px; font-size: 15px; font-weight: 600;
+  border-radius: 8px; color: #fff; text-decoration: none;
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+}
+.auth-card .btn.discord:hover { background: #4752c4; }
+.auth-divider { display: flex; align-items: center; gap: 10px; color: var(--text-faint); font-size: 11px; margin: 18px 0; text-transform: uppercase; }
 .auth-divider::before, .auth-divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
-.btn.discord { background: #5865f2; width: 100%; }
-.btn.discord:hover { background: #4752c4; }
-.auth-note { margin-top: 16px; text-align: center; font-size: 11.5px; color: var(--text-faint); line-height: 1.5; }
+.auth-switch { margin-top: 16px; text-align: center; font-size: 14px; color: var(--text-dim); }
+.auth-switch button {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--link); font-size: 14px; font-weight: 500;
+}
+.auth-switch button:hover { text-decoration: underline; }
 
 /* ---------- settings ---------- */
 .settings-layout { display: flex; height: 100vh; background: var(--bg-2); }
@@ -652,7 +697,7 @@ textarea.input { resize: vertical; min-height: 70px; }
   top: 18px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 300;
+  z-index: 320; /* above the toast stack so an incoming call is never hidden */
 }
 
 .ring-card {

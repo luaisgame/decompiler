@@ -109,6 +109,53 @@ function avatarBg(user) {
   return `linear-gradient(135deg, hsl(${hashHue(user && user.username)} 60% 42%), hsl(${(hashHue(user && user.username) + 40) % 360} 60% 34%))`;
 }
 
+/* ---- inline SVG icons (stroke style, no emoji in chrome) ---- */
+
+const ICONS = {
+  video: '<path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/>',
+  search: '<circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>',
+  info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>',
+  menu: '<path d="M3 12h18M3 6h18M3 18h18"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  send: '<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>',
+  check: '<path d="M20 6L9 17l-5-5"/>',
+  users: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
+  pencil: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>',
+  mic: '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8"/>',
+  micOff: '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8"/><path d="M1 1l22 22"/>',
+  headphones: '<path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3v5zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3v5z"/>',
+  headphonesOff: '<path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3v5zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3v5z"/><path d="M1 1l22 22"/>',
+  monitor: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>',
+  monitorOff: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M1 1l22 22"/>',
+  x: '<path d="M18 6L6 18M6 6l12 12"/>',
+  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  phone: '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>',
+  volume: '<path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"/>',
+  hash: '<path d="M4 9h16M4 15h16M10 3L8 21M16 3l-2 18"/>',
+  chevronDown: '<path d="M6 9l6 6 6-6"/>',
+  message: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+  inbox: '<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+  shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+  userPlus: '<path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><path d="M20 8v6M23 11h-6"/>',
+  trash: '<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14M10 11v6M14 11v6"/>',
+  user: '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+  lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+  palette: '<path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.93 0 1.65-.75 1.65-1.69 0-.44-.18-.83-.44-1.12-.29-.29-.44-.65-.44-1.13a1.64 1.64 0 0 1 1.67-1.67h2c3.05 0 5.56-2.5 5.56-5.55C21.97 6.01 17.46 2 12 2z"/><circle cx="13.5" cy="6.5" r=".8"/><circle cx="17.5" cy="10.5" r=".8"/><circle cx="8.5" cy="7.5" r=".8"/><circle cx="6.5" cy="12.5" r=".8"/>',
+  award: '<circle cx="12" cy="8" r="7"/><path d="M8.21 13.89L7 23l5-3 5 3-1.21-9.12"/>',
+  home: '<path d="M3 9.5L12 3l9 6.5V20a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/>',
+  layers: '<path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/>',
+  barChart: '<path d="M18 20V10M12 20V4M6 20v-6"/>',
+  logOut: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/>',
+};
+
+function icon(name, size, extraClass) {
+  const body = ICONS[name] || "";
+  const s = size || 20;
+  return `<svg class="ico ${extraClass || ""}" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" ` +
+    `stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+}
+
 function isSameDay(a, b) {
   const da = new Date(a), db = new Date(b);
   return da.getFullYear() === db.getFullYear() && da.getMonth() === db.getMonth()
@@ -603,13 +650,8 @@ function showAuth(message) {
   app.innerHTML = `
     <div class="auth-wrap">
       <div class="auth-card">
-        <div class="auth-logo">DM</div>
-        <h1>Welcome to DM</h1>
-        <p class="sub">Free chat, servers, group chats and screenshare — no paid tier, ever.</p>
-        <div class="auth-tabs">
-          <button class="active" data-tab="login">Log in</button>
-          <button data-tab="signup">Sign up</button>
-        </div>
+        <h1 id="authTitle">Welcome back!</h1>
+        <p class="sub" id="authSub">We're so excited to see you again!</p>
         <form id="authForm" autocomplete="on">
           <div class="field" data-username hidden>
             <label>Username</label>
@@ -632,9 +674,8 @@ function showAuth(message) {
           <svg width="20" height="16" viewBox="0 0 71 55" fill="none" aria-hidden="true"><path d="M60.1 4.9A58.5 58.5 0 0 0 45.4.2a.2.2 0 0 0-.2.1 40.8 40.8 0 0 0-1.8 3.7 54 54 0 0 0-16.2 0 26.5 26.5 0 0 0-1.8-3.7.2.2 0 0 0-.2-.1A58.4 58.4 0 0 0 10.9 4.9a.2.2 0 0 0-.1.1C1.6 18.4-.5 31.7.5 44.8a.2.2 0 0 0 .1.1 58.7 58.7 0 0 0 17.7 9 .2.2 0 0 0 .2-.1 42 42 0 0 0 3.6-5.9.2.2 0 0 0-.1-.3 38.7 38.7 0 0 1-5.5-2.6.2.2 0 0 1 0-.4c.4-.3.7-.6 1.1-.9a.2.2 0 0 1 .2 0c11.5 5.3 24 5.3 35.4 0a.2.2 0 0 1 .2 0l1.1.9a.2.2 0 0 1 0 .4c-1.8 1-3.6 1.9-5.6 2.6a.2.2 0 0 0-.1.3 47.2 47.2 0 0 0 3.7 5.9.2.2 0 0 0 .2.1 58.5 58.5 0 0 0 17.7-9 .2.2 0 0 0 .1-.1c1.2-15-2-28.3-8.5-39.8a.2.2 0 0 0-.1-.1ZM23.7 36.3c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1 6.5 3.2 6.4 7.1-2.8 7.1-6.4 7.1Zm23.6 0c-3.5 0-6.4-3.2-6.4-7.1s2.8-7.1 6.4-7.1 6.5 3.2 6.4 7.1-2.8 7.1-6.4 7.1Z" fill="white"/></svg>
           Continue with Discord
         </a>
-        <p class="auth-note">
-          One account works on <strong>dm</strong>, <strong>mc</strong> and <strong>storage</strong>.luaisgame.com.<br>
-          Your login is remembered by the server, so a restart never signs you out.
+        <p class="auth-switch" id="authSwitch">Need an account?
+          <button type="button" data-tab="signup">Register</button>
         </p>
       </div>
     </div>`;
@@ -644,17 +685,28 @@ function showAuth(message) {
   const errBox = $("#authError");
   const submit = $("#authSubmit");
   const userInput = $('[name="username"]', form);
+  const title = $("#authTitle", app);
+  const sub = $("#authSub", app);
+  const switchBox = $("#authSwitch", app);
 
-  $$(".auth-tabs button", app).forEach((btn) => {
-    btn.onclick = () => {
-      mode = btn.dataset.tab;
-      $$(".auth-tabs button", app).forEach((b) => b.classList.toggle("active", b === btn));
-      userInput.closest(".field").hidden = mode !== "signup";
-      userInput.required = mode === "signup";
-      submit.textContent = mode === "signup" ? "Create account" : "Log in";
-      errBox.textContent = "";
-    };
-  });
+  const setMode = (m) => {
+    mode = m;
+    userInput.closest(".field").hidden = mode !== "signup";
+    userInput.required = mode === "signup";
+    submit.textContent = mode === "signup" ? "Create account" : "Log in";
+    errBox.textContent = "";
+    if (title) title.textContent = mode === "signup" ? "Create an account" : "Welcome back!";
+    if (sub) sub.textContent = mode === "signup"
+      ? "Pick a username and you're in — it takes less than a minute."
+      : "We're so excited to see you again!";
+    if (switchBox) {
+      switchBox.innerHTML = mode === "signup"
+        ? `Already have an account? <button type="button" data-tab="login">Log in</button>`
+        : `Need an account? <button type="button" data-tab="signup">Register</button>`;
+      $$("[data-tab]", switchBox).forEach((b) => { b.onclick = () => setMode(b.dataset.tab); });
+    }
+  };
+  setMode("login");
 
   form.onsubmit = async (ev) => {
     ev.preventDefault();
@@ -820,11 +872,11 @@ function renderSidebar() {
     side.innerHTML = `
       <div class="side-head">
         <span class="title">Direct Messages</span>
-        <button class="btn icon ghost" id="newDmBtn" aria-label="New direct message" title="New DM">✎</button>
+        <button class="btn icon ghost" id="newDmBtn" aria-label="New direct message" title="New DM">${icon("pencil", 17)}</button>
       </div>
       <div class="side-scroll">
         <div class="nav-row" data-find>
-          <span class="hash">⌕</span><span class="row-name">Find a server</span>
+          <span class="hash">${icon("search", 16)}</span><span class="row-name">Find a server</span>
         </div>
         <div class="side-section">Servers</div>
         ${state.servers.length ? state.servers.map((s) => `
@@ -900,7 +952,7 @@ function channelRowHTML(c, isVoice) {
   const unread = state.unread[key] || 0;
   const inCall = callRoomFor(c.id) && state.activeRoom === callRoomFor(c.id);
   return `<div class="nav-row ${active ? "active" : ""}" data-channel="${c.id}" data-kind="${esc(c.kind)}">
-    <span class="hash">${isVoice ? "🔊" : "#"}</span>
+    <span class="hash">${isVoice ? icon("volume", 16) : "#"}</span>
     <span class="row-name">${esc(c.name)}</span>
     ${inCall ? `<span class="row-badge muted">Live</span>` : ""}
     ${unread ? `<span class="row-badge">${unread > 99 ? "99+" : unread}</span>` : ""}
@@ -940,9 +992,9 @@ function userBarHTML() {
       <div class="status">${esc(me.custom_status || (me.is_owner ? "Platform owner" : (me.presence || "online")))}</div>
     </div>
     <div class="ctl">
-      <button id="muteBtn" title="Mute microphone" aria-label="Mute microphone">🎤</button>
-      <button id="deafenBtn" title="Deafen" aria-label="Deafen">🎧</button>
-      <button id="settingsBtn" title="User settings" aria-label="User settings">⚙</button>
+      <button id="muteBtn" title="Mute microphone" aria-label="Mute microphone">${icon("mic", 18)}</button>
+      <button id="deafenBtn" title="Deafen" aria-label="Deafen">${icon("headphones", 18)}</button>
+      <button id="settingsBtn" title="User settings" aria-label="User settings">${icon("gear", 18)}</button>
     </div>
   </div>`;
 }
@@ -967,21 +1019,21 @@ function wireUserBar() {
 function renderTopbar() {
   const bar = $("#topbar");
   if (!bar) return;
-  const menuBtn = `<button class="mobile-only" id="drawerBtn" aria-label="Menu">☰</button>`;
+  const menuBtn = `<button class="mobile-only" id="drawerBtn" aria-label="Menu">${icon("menu", 18)}</button>`;
 
   if (state.currentServer && state.currentChannel) {
     const c = state.currentChannel;
     bar.innerHTML = `
       ${menuBtn}
-      <span class="chan-name">${c.kind === "voice" ? "🔊" : "#"} ${esc(c.name)}</span>
+      <span class="chan-name">${c.kind === "voice" ? icon("volume", 18) : icon("hash", 18)} ${esc(c.name)}</span>
       ${c.topic ? `<span class="chan-topic">${esc(c.topic)}</span>` : `<span class="spacer"></span>`}
       <span class="spacer"></span>
       <div class="tools">
         <span class="latency" id="latency" title="Round-trip time to the server">– ms</span>
-        ${c.kind !== "voice" ? `<button id="notifBtn" title="Mark as read" aria-label="Mark as read">✓</button>` : ""}
-        <button id="inviteBtn" title="Invite people" aria-label="Invite people">＋</button>
-        <button id="membersBtn" title="Member list" aria-label="Toggle member list">👥</button>
-        <button id="searchBtn" title="Search (Ctrl+K)" aria-label="Search">⌕</button>
+        ${c.kind !== "voice" ? `<button id="notifBtn" title="Mark as read" aria-label="Mark as read">${icon("check", 18)}</button>` : ""}
+        <button id="inviteBtn" title="Invite people" aria-label="Invite people">${icon("userPlus", 18)}</button>
+        <button id="membersBtn" title="Member list" aria-label="Toggle member list">${icon("users", 18)}</button>
+        <button id="searchBtn" title="Search (Ctrl+K)" aria-label="Search">${icon("search", 18)}</button>
       </div>`;
     const inv = $("#inviteBtn", bar);
     if (inv) inv.onclick = () => showInviteModal(state.currentServer.invite, state.currentServer);
@@ -1002,9 +1054,9 @@ function renderTopbar() {
       <span class="spacer"></span>
       <div class="tools">
         <span class="latency" id="latency">– ms</span>
-        <button id="dmCallBtn" title="Start call" aria-label="Start call">📹</button>
-        <button id="dmSearchBtn" title="Search (Ctrl+K)" aria-label="Search">⌕</button>
-        <button id="dmInfoBtn" title="Conversation info" aria-label="Info">ⓘ</button>
+        <button id="dmCallBtn" title="Start call" aria-label="Start call">${icon("video", 18)}</button>
+        <button id="dmSearchBtn" title="Search (Ctrl+K)" aria-label="Search">${icon("search", 18)}</button>
+        <button id="dmInfoBtn" title="Conversation info" aria-label="Info">${icon("info", 18)}</button>
       </div>`;
     const cb = $("#dmCallBtn", bar);
     if (cb) cb.onclick = () => joinRoom(callRoomFor(c.id), true);
@@ -1015,8 +1067,8 @@ function renderTopbar() {
       <span class="spacer"></span>
       <div class="tools">
         <span class="latency" id="latency">– ms</span>
-        <button id="searchBtn" title="Search (Ctrl+K)" aria-label="Search">⌕</button>
-        <button id="newDmTop" title="New message" aria-label="New message">✎</button>
+        <button id="searchBtn" title="Search (Ctrl+K)" aria-label="Search">${icon("search", 18)}</button>
+        <button id="newDmTop" title="New message" aria-label="New message">${icon("pencil", 18)}</button>
       </div>`;
     updateLatencyHUD();
   }
@@ -1041,11 +1093,9 @@ function renderChatArea() {
   if (!state.currentChannel) {
     col.innerHTML = `
       <div class="empty">
-        <div class="big">💬</div>
-        <h3>Welcome, ${esc((state.user && (state.user.display_name || state.user.username)) || "")}</h3>
-        <p>Pick a conversation on the left, or start something new. Servers, group chats,
-           10&nbsp;GB uploads and free screenshare are all included.</p>
-        <div style="display:flex;gap:9px;flex-wrap:wrap;justify-content:center;margin-top:6px">
+        <h3>Welcome back, ${esc((state.user && (state.user.display_name || state.user.username)) || "")}</h3>
+        <p>Select a conversation from the sidebar, or start a new one.</p>
+        <div class="empty-actions">
           <button class="btn" id="homeNewDm">New message</button>
           <button class="btn secondary" id="homeCreateServer">Create a server</button>
           <button class="btn ghost" id="homeJoinServer">Join with an invite</button>
@@ -1073,9 +1123,9 @@ function renderChatArea() {
     <div class="composer" style="position:relative" id="composerWrap">
       <div class="drop-overlay" id="dropOverlay" style="display:none">Drop files to upload (up to 10 GB each)</div>
       <div class="composer-box">
-        <button class="attach-btn" id="attachBtn" title="Upload a file" aria-label="Upload a file">＋</button>
+        <button class="attach-btn" id="attachBtn" title="Upload a file" aria-label="Upload a file">${icon("plus", 18)}</button>
         <textarea id="composerText" rows="1" placeholder="${placeholder}" maxlength="4000"></textarea>
-        <button class="send-btn" id="sendBtn" title="Send" aria-label="Send">➤</button>
+        <button class="send-btn" id="sendBtn" title="Send" aria-label="Send">${icon("send", 17)}</button>
       </div>
       <input type="file" id="fileInput" multiple hidden>
     </div>`;
@@ -1112,7 +1162,7 @@ function draftKey() {
 function renderHomeBlank() {
   const col = $("#chatCol");
   if (!col) return;
-  col.innerHTML = `<div class="empty"><div class="big">🔗</div>
+  col.innerHTML = `<div class="empty">
     <h3>Invite or vanity link</h3><p>Checking that link&hellip;</p></div>`;
   renderMembers();
 }
@@ -1155,11 +1205,9 @@ function renderMessages(opts) {
   if (!msgs.length) {
     const isDM = !state.currentServer;
     list.innerHTML = `<div class="empty">
-        <div class="big">${isDM ? "👋" : "#"}</div>
-        <h3>${isDM ? "This is the start of your conversation with " + esc(dmTitle(state.currentChannel))
-                    : "Welcome to #" + esc(state.currentChannel.name)}</h3>
-        <p>${isDM ? "Send a message, drop a file, or start a call — it's all free."
-                  : esc(state.currentChannel.topic || "No one has said anything yet. Be the first!")}</p>
+        <h3>${isDM ? esc(dmTitle(state.currentChannel)) : "#" + esc(state.currentChannel.name)}</h3>
+        <p>${isDM ? "This is the beginning of your conversation with " + esc(dmTitle(state.currentChannel)) + "."
+                  : esc(state.currentChannel.topic || "This is the start of the channel.")}</p>
       </div>`;
     return;
   }
@@ -1358,7 +1406,7 @@ function startEditMessage(msg) {
 }
 
 function showLightbox(url) {
-  const lb = h(`<div class="lightbox"><button class="lb-close" aria-label="Close">✕</button>
+  const lb = h(`<div class="lightbox"><button class="lb-close" aria-label="Close">${icon("x", 18)}</button>
     <img src="${esc(url)}" alt=""></div>`);
   document.body.appendChild(lb);
   const close = () => lb.remove();
@@ -1770,7 +1818,7 @@ function renderUploads() {
       <span class="u-stat">${fmtBytes(u.received)} / ${fmtBytes(u.file.size)}</span>
       <span class="u-bar"><i style="width:${u.status === "done" ? 100 : pct}%"></i></span>
       <span class="u-stat">${esc(label)}</span>
-      <button class="u-x" data-cancel="${u.id}" title="Cancel upload" aria-label="Cancel upload">✕</button>
+      <button class="u-x" data-cancel="${u.id}" title="Cancel upload" aria-label="Cancel upload">${icon("x", 15)}</button>
     </div>`;
   }).join("");
   $$("[data-cancel]", strip).forEach((btn) => {
@@ -1845,7 +1893,7 @@ function openMenu(x, y, items) {
     if (it.divider) return `<div style="height:1px;background:var(--line);margin:5px 8px"></div>`;
     const color = it.danger ? "var(--red)" : (it.color || "");
     return `<div class="nav-row" data-i="${i}" style="margin-bottom:0;${color ? "color:" + esc(color) : ""}">
-      ${it.icon ? `<span class="hash">${esc(it.icon)}</span>` : ""}
+      ${it.icon ? `<span class="hash">${it.icon}</span>` : ""}
       <span class="row-name">${esc(it.label)}</span></div>`;
   }).join("");
   const node = h(`<div class="popout" style="width:230px;padding:6px">${body}</div>`);
@@ -2357,19 +2405,19 @@ function showServerMenu(ev, srv) {
   const isOwner = srv.owner_id === (state.user && state.user.uid);
   const items = [];
   if (isAdmin) {
-    items.push({ label: "Server settings", icon: "⚙", onClick: () => { state.settingsServerId = srv.id; navigate("/settings/server-overview"); } });
-    items.push({ label: "Create channel", icon: "+", onClick: () => showCreateChannelModal("text") });
-    items.push({ label: "Invite people", icon: "＠", onClick: () => showInviteModal(srv.invite, srv) });
-    items.push({ label: "Request vanity link", icon: "◆", onClick: () => showVanityModal(srv) });
+    items.push({ label: "Server settings", icon: icon("gear", 15), onClick: () => { state.settingsServerId = srv.id; navigate("/settings/server-overview"); } });
+    items.push({ label: "Create channel", icon: icon("plus", 15), onClick: () => showCreateChannelModal("text") });
+    items.push({ label: "Invite people", icon: icon("userPlus", 15), onClick: () => showInviteModal(srv.invite, srv) });
+    items.push({ label: "Request vanity link", icon: icon("link", 15), onClick: () => showVanityModal(srv) });
   } else {
-    items.push({ label: "Invite people", icon: "＠", onClick: () => showInviteModal(srv.invite, srv) });
-    items.push({ label: "Server settings (view)", icon: "⚙", onClick: () => { state.settingsServerId = srv.id; navigate("/settings/server-overview"); } });
+    items.push({ label: "Invite people", icon: icon("userPlus", 15), onClick: () => showInviteModal(srv.invite, srv) });
+    items.push({ label: "Server settings (view)", icon: icon("gear", 15), onClick: () => { state.settingsServerId = srv.id; navigate("/settings/server-overview"); } });
   }
   items.push({ divider: true });
-  items.push({ label: "Copy invite link", icon: "⧉", onClick: () => copyText(location.origin + "/invite/" + srv.invite) });
+  items.push({ label: "Copy invite link", icon: icon("link", 15), onClick: () => copyText(location.origin + "/invite/" + srv.invite) });
   items.push({ divider: true });
   if (!isOwner) {
-    items.push({ label: "Leave server", icon: "⎋", danger: true, onClick: () => {
+    items.push({ label: "Leave server", icon: icon("logOut", 15), danger: true, onClick: () => {
       confirmModal("Leave server", `Leave ${srv.name}? You'll need a new invite to come back.`, "Leave", async () => {
         try {
           await api("POST", `/api/dm/servers/${srv.id}/leave`);
@@ -2383,7 +2431,7 @@ function showServerMenu(ev, srv) {
     } });
   }
   if (isOwner || (state.user && state.user.is_owner)) {
-    items.push({ label: "Delete server", icon: "🗑", danger: true, onClick: () => {
+    items.push({ label: "Delete server", icon: icon("trash", 15), danger: true, onClick: () => {
       confirmModal("Delete server", `Delete ${srv.name} permanently? Every channel, message and role is destroyed.`,
         "Delete forever", async () => {
           try {
@@ -2405,11 +2453,11 @@ function showDMMenu(ev, cid) {
   const y = ((ev && ev.clientY) || 40) + 8;
   const dm = state.dms.find((d) => d.id === cid);
   openMenu(x, y, [
-    { label: "Open", icon: "→", onClick: () => navigate("/channels/" + cid) },
-    { label: "Conversation info", icon: "ⓘ", onClick: () => { navigate("/channels/" + cid); setTimeout(showDMInfoModal, 120); } },
-    { label: "Start call", icon: "📹", onClick: () => { navigate("/channels/" + cid); setTimeout(() => joinRoom("d" + cid), 160); } },
+    { label: "Open", icon: icon("message", 15), onClick: () => navigate("/channels/" + cid) },
+    { label: "Conversation info", icon: icon("info", 15), onClick: () => { navigate("/channels/" + cid); setTimeout(showDMInfoModal, 120); } },
+    { label: "Start call", icon: icon("video", 15), onClick: () => { navigate("/channels/" + cid); setTimeout(() => joinRoom("d" + cid), 160); } },
     { divider: true },
-    { label: "Close conversation", icon: "✕", danger: true, onClick: async () => {
+    { label: "Close conversation", icon: icon("x", 15), danger: true, onClick: async () => {
       if (!dm) return;
       try {
         await api("DELETE", `/api/dm/dms/${cid}`);
@@ -2478,29 +2526,29 @@ function settingsSidebarHTML() {
   const sid = state.settingsServerId || (state.currentServer && state.currentServer.id) || 0;
   const srv = sid ? (state.serverCache[sid] || findServer(sid)) : null;
   const cur = state.route.section;
-  const row = (id, label, icon) => `<div class="nav-row ${cur === id ? "selected" : ""}" data-section="${id}">
-      <span class="hash">${icon}</span><span class="row-name">${esc(label)}</span></div>`;
+  const row = (id, label, ic) => `<div class="nav-row ${cur === id ? "selected" : ""}" data-section="${id}">
+      <span class="hash">${ic}</span><span class="row-name">${esc(label)}</span></div>`;
   return `<nav class="settings-nav">
     <div class="grp">User settings</div>
-    ${row("profile", "My profile", "👤")}
-    ${row("account", "Account", "🔐")}
-    ${row("connections", "Connections", "🔗")}
-    ${row("appearance", "Appearance", "🎨")}
-    ${row("badges", "Badges", "🏅")}
-    ${row("vanity", "Vanity links", "◆")}
+    ${row("profile", "My profile", icon("user", 16))}
+    ${row("account", "Account", icon("lock", 16))}
+    ${row("connections", "Connections", icon("link", 16))}
+    ${row("appearance", "Appearance", icon("palette", 16))}
+    ${row("badges", "Badges", icon("award", 16))}
+    ${row("vanity", "Vanity links", icon("link", 16))}
     ${srv ? `<div class="grp">Server — ${esc(srv.name)}</div>
-      ${row("server-overview", "Overview", "🏠")}
-      ${row("server-channels", "Channels", "#")}
-      ${row("server-roles", "Roles", "🎭")}
-      ${row("server-members", "Members", "👥")}` : ""}
+      ${row("server-overview", "Overview", icon("home", 16))}
+      ${row("server-channels", "Channels", icon("hash", 16))}
+      ${row("server-roles", "Roles", icon("layers", 16))}
+      ${row("server-members", "Members", icon("users", 16))}` : ""}
     ${me.is_owner ? `<div class="grp">Owner tools</div>
-      ${row("admin-stats", "Dashboard", "📊")}
-      ${row("admin-vanity", "Vanity queue", "◆")}
-      ${row("admin-badges", "Badge studio", "🏅")}
-      ${row("admin-users", "Users", "🛡")}` : ""}
+      ${row("admin-stats", "Dashboard", icon("barChart", 16))}
+      ${row("admin-vanity", "Vanity queue", icon("link", 16))}
+      ${row("admin-badges", "Badge studio", icon("award", 16))}
+      ${row("admin-users", "Users", icon("shield", 16))}` : ""}
     <div class="grp">&nbsp;</div>
     <div class="nav-row danger" data-logout>
-      <span class="hash">⎋</span><span class="row-name">Log Out</span></div>
+      <span class="hash">${icon("logOut", 16)}</span><span class="row-name">Log Out</span></div>
   </nav>`;
 }
 
@@ -2522,7 +2570,7 @@ function renderSettings(section) {
       ${settingsSidebarHTML()}
       <main class="settings-pane" id="settingsPane"></main>
       <div class="settings-close">
-        <button class="circ" id="settingsClose" title="Close (Esc)" aria-label="Close settings">✕</button>
+        <button class="circ" id="settingsClose" title="Close (Esc)" aria-label="Close settings">${icon("x", 18)}</button>
       </div>
     </div>`;
   wireSettingsSidebar();
@@ -2988,7 +3036,7 @@ SETTINGS_SECTIONS["server-channels"] = async function (pane) {
         </div>
         ${chans.map((c) => `
           <div class="list-card" data-cid="${c.id}">
-            <span class="role-icon-thumb">${c.kind === "voice" ? "🔊" : c.kind === "announce" ? "📢" : "#"}</span>
+            <span class="role-icon-thumb">${c.kind === "voice" ? icon("volume", 15) : c.kind === "announce" ? icon("message", 15) : "#"}</span>
             <div style="flex:1;min-width:0">
               <div class="lc-name">${esc(c.name)}</div>
               <div class="lc-sub">${esc(c.kind)}${c.topic ? " · " + esc(c.topic) : ""}</div>
@@ -3820,13 +3868,17 @@ function syncCallButtons() {
   const deaf = $("#deafenBtn");
   if (mute) {
     mute.classList.toggle("on", !!call.mic && !call.muted);
-    mute.textContent = call.muted ? "🔇" : "🎤";
+    mute.classList.toggle("danger", !!call.muted);
+    mute.innerHTML = icon(call.muted ? "micOff" : "mic", 18);
     mute.title = call.muted ? "Unmute microphone" : "Mute microphone";
+    mute.setAttribute("aria-label", mute.title);
   }
   if (deaf) {
     deaf.classList.toggle("on", !call.deaf);
-    deaf.textContent = call.deaf ? "🔕" : "🎧";
+    deaf.classList.toggle("danger", !!call.deaf);
+    deaf.innerHTML = icon(call.deaf ? "headphonesOff" : "headphones", 18);
     deaf.title = call.deaf ? "Undeafen" : "Deafen";
+    deaf.setAttribute("aria-label", deaf.title);
   }
 }
 
@@ -4229,8 +4281,8 @@ function renderRingOverlay() {
         <strong>Incoming call</strong>
         <span>${esc(r.name)}${r.username ? " · @" + esc(r.username) : ""}</span>
       </div>
-      <button class="ring-btn accept" id="ringAccept" title="Accept" aria-label="Accept call">📞</button>
-      <button class="ring-btn decline" id="ringDecline" title="Decline" aria-label="Decline call">✕</button>
+      <button class="ring-btn accept" id="ringAccept" title="Accept" aria-label="Accept call">${icon("phone", 18)}</button>
+      <button class="ring-btn decline" id="ringDecline" title="Decline" aria-label="Decline call">${icon("x", 18)}</button>
     </div>`;
   $("#ringAccept").onclick = async () => {
     const room = r.room;
@@ -4281,10 +4333,8 @@ function stageHTML(st) {
     </div>`;
   }
   return `<div class="stage"><div class="stage-empty">
-      <div style="font-size:30px">🖥</div>
       <strong>No one is sharing yet</strong>
-      <span class="hint">Voice is live — hit “Share screen” to broadcast. P2P keeps it under 80&nbsp;ms;
-        the server relay kicks in automatically if your network blocks direct connections.</span>
+      <span class="hint">Hit “Share screen” to start streaming to everyone in the call.</span>
     </div></div>`;
 }
 
@@ -4312,8 +4362,8 @@ function tilesHTML(st) {
   return `<div class="tiles">${users.map((u) => `
     <div class="tile ${u.uid === me && !call.muted && !call.deaf ? "speaking" : ""}" data-tile="${u.uid}">
       ${avatarHTML(u, "mini-avatar", true)}
-      <span class="t-name">${esc(u.nickname || u.display_name || u.username)}${u.uid === st.host ? " 🖥" : ""}</span>
-      ${(u.uid === me && (call.muted || call.deaf)) ? `<span class="t-mute">🔇</span>` : ""}
+      <span class="t-name">${esc(u.nickname || u.display_name || u.username)}${u.uid === st.host ? ` <span class="t-host" title="Sharing">${icon("monitor", 12)}</span>` : ""}</span>
+      ${(u.uid === me && (call.muted || call.deaf)) ? `<span class="t-mute">${icon(call.deaf ? "headphonesOff" : "micOff", 13)}</span>` : ""}
       <audio data-remote data-remote-stream="${u.uid}" autoplay></audio>
     </div>`).join("")}</div>`;
 }
@@ -4322,13 +4372,13 @@ function callControlsHTML(st) {
   const sharing = !!call.share;
   const isHost = call.isHost;
   return `<div class="call-strip" style="border-radius:0 0 10px 10px;border-top:1px solid var(--line);margin-top:-1px">
-    <span class="c-state">🔊 ${esc(callTitle(state.activeRoom))}</span>
+    <span class="c-state">${icon("volume", 15)} ${esc(callTitle(state.activeRoom))}</span>
     <span class="c-mode">${call.mode === "relay" ? "relay" : "p2p"} · ${(st.members || []).length} in call</span>
     <span class="c-users">${usersForCall(st.members || []).slice(0, 8).map((u) => avatarHTML(u, "mini-avatar", false)).join("")}</span>
     <span class="c-ctl">
-      <button class="btn sm ${call.muted ? "danger" : "secondary"}" data-call="mute">${call.muted ? "🔇 Unmute" : "🎤 Mute"}</button>
-      <button class="btn sm ${call.deaf ? "danger" : "secondary"}" data-call="deafen">${call.deaf ? "🔕 Undeafen" : "🎧 Deafen"}</button>
-      <button class="btn sm ${sharing ? "danger" : ""}" data-call="share">${sharing ? "⏹ Stop sharing" : "🖥 Share screen"}</button>
+      <button class="btn sm ${call.muted ? "danger" : "secondary"}" data-call="mute">${icon(call.muted ? "micOff" : "mic", 15)} ${call.muted ? "Unmute" : "Mute"}</button>
+      <button class="btn sm ${call.deaf ? "danger" : "secondary"}" data-call="deafen">${icon(call.deaf ? "headphonesOff" : "headphones", 15)} ${call.deaf ? "Undeafen" : "Deafen"}</button>
+      <button class="btn sm ${sharing ? "danger" : ""}" data-call="share">${icon(sharing ? "monitorOff" : "monitor", 15)} ${sharing ? "Stop sharing" : "Share screen"}</button>
       ${isHost ? `<button class="btn sm ghost" data-call="mode">${call.mode === "p2p" ? "Switch to relay" : "Switch to P2P"}</button>` : ""}
       <button class="btn sm danger" data-call="leave">Disconnect</button>
     </span>
@@ -4338,7 +4388,7 @@ function callControlsHTML(st) {
 function stripHTML() {
   const st = call.state || { members: [] };
   return `<div class="call-strip">
-    <span class="c-state">🔊 In call — ${esc(callTitle(state.activeRoom))}</span>
+    <span class="c-state">${icon("volume", 15)} In call — ${esc(callTitle(state.activeRoom))}</span>
     <span class="c-mode">${call.mode === "relay" ? "relay" : "p2p"} · ${(st.members || []).length} user${(st.members || []).length === 1 ? "" : "s"}</span>
     <span class="c-users">${usersForCall(st.members || []).slice(0, 10).map((u) => avatarHTML(u, "mini-avatar", false)).join("")}</span>
     <span class="c-ctl">
@@ -4354,10 +4404,9 @@ function renderVoicePanel(panel) {
   const active = room && state.activeRoom === room;
   if (!active) {
     panel.innerHTML = `<div class="stage"><div class="stage-empty">
-        <div style="font-size:30px">🔊</div>
-        <strong>Voice channel</strong>
-        <span class="hint">Jump in to talk with everyone here. Screenshare and free roles come with it.</span>
-        <button class="btn" data-call="join">Join voice</button>
+        <strong>Voice Channel</strong>
+        <span class="hint">Jump in to talk with everyone here.</span>
+        <button class="btn" data-call="join">Join Voice</button>
       </div></div>`;
     return;
   }
