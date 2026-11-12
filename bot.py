@@ -40,6 +40,16 @@ GITHUB_FILES = [
     "commands/decompile.py",
     "commands/help.py",
     "commands/mc.py",
+    "commands/modbot/__init__.py",
+    "commands/modbot/core.py",
+    "commands/modbot/db.py",
+    "commands/modbot/config.py",
+    "commands/modbot/warns.py",
+    "commands/modbot/bans.py",
+    "commands/modbot/tickets.py",
+    "commands/modbot/welcome.py",
+    "commands/modbot/purge.py",
+    "commands/modbot/help.py",
     "commands/dm/__init__.py",
     "commands/dm/db.py",
     "commands/dm/auth.py",
@@ -388,6 +398,25 @@ async def on_command_completion(ctx):
     except Exception as e:
         print(f"[DEBUG] Could not delete command message: {e}")
 
+@bot.event
+async def on_command_error(ctx, error):
+    # The moderation bot shares the "!" prefix, so its commands (and plain
+    # typos) arrive here as CommandNotFound -- stay quiet instead of
+    # dumping a traceback into stderr for every !warn.
+    from discord.ext import commands as dpy_commands
+    if isinstance(error, dpy_commands.CommandNotFound):
+        return
+    # Mirror discord.py's default handler for everything else.
+    command = ctx.command
+    if command and command.has_error_handler():
+        return
+    cog = ctx.cog
+    if cog and cog.has_error_handler():
+        return
+    import logging
+    logging.getLogger("discord.ext.commands").error(
+        "Ignoring exception in command %s", command, exc_info=error)
+
 async def main():
     from commands.core import start_local_server
     port = await start_local_server(port=5000)
@@ -400,6 +429,14 @@ async def main():
             print(f"[STARTUP] Tunnel setup failed: {e}")
 
     asyncio.create_task(setup_tunnel())
+
+    # The moderation bot runs on its own token in this same event loop.
+    try:
+        from commands.modbot import schedule_start
+        schedule_start()
+    except Exception as e:
+        print(f"[MODBOT] Failed to start: {e}")
+
     await bot.start(BOT_TOKEN)
 
 if __name__ == "__main__":

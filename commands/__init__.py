@@ -6,5 +6,6 @@ from . import cookie
 from . import decompile
 from . import help
 from . import mc
+from . import modbot
 from . import setup
 from . import support
