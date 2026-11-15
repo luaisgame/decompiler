@@ -21,6 +21,8 @@ log = logging.getLogger("discord.ext.commands")
 
 MOD_BOT_TOKEN = os.getenv("MOD_BOT_TOKEN", "")
 
+DEFAULT_COLOR = 0x5865F2  # Discord blurple, used when no colour is configured
+
 # Optional global role gate from .env, same shape as BLACKLIST_ROLE_IDS:
 # {"<guild_id>": <role_id> | [<role_id>, ...]}
 MOD_ROLE_IDS = {}
@@ -70,6 +72,57 @@ def fmt_ts(epoch, style="d"):
 
 def get_cfg(guild):
     return db.get_config(guild.id)
+
+
+_UNSET = object()
+
+
+def parse_color(value, default=_UNSET):
+    """Turn '#rrggbb' / '0xrrggbb' / 'rrggbb' / int into an int colour.
+
+    Returns `default` when given, otherwise the Discord blurple, when the
+    value can't be parsed. Pass `default=None` to detect invalid input.
+    """
+    fallback = DEFAULT_COLOR if default is _UNSET else default
+    if value is None:
+        return fallback
+    if isinstance(value, int):
+        return value if 0 <= value <= 0xFFFFFF else fallback
+    raw = str(value).strip().lower()
+    if raw.startswith("#"):
+        raw = raw[1:]
+    elif raw.startswith("0x"):
+        raw = raw[2:]
+    try:
+        parsed = int(raw, 16)
+    except ValueError:
+        return fallback
+    return parsed if 0 <= parsed <= 0xFFFFFF else fallback
+
+
+def button_style(name, default=discord.ButtonStyle.primary):
+    """Map a config style name to a discord.ButtonStyle."""
+    styles = {
+        "primary": discord.ButtonStyle.primary,
+        "secondary": discord.ButtonStyle.secondary,
+        "success": discord.ButtonStyle.success,
+        "danger": discord.ButtonStyle.danger,
+    }
+    return styles.get(str(name or "").strip().lower(), default)
+
+
+def parse_emoji(value):
+    """Return an emoji string, or None when it's empty/off."""
+    raw = str(value or "").strip()
+    if not raw or raw.lower() in ("off", "none", "no"):
+        return None
+    return raw
+
+
+def text_or_none(value):
+    """Trimmed string, or None when the config holds an empty placeholder."""
+    raw = str(value or "").strip()
+    return raw or None
 
 
 async def find_member(guild, raw):

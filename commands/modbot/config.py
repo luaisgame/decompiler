@@ -15,6 +15,23 @@ async def modconfig(ctx, key: str = None, value: str = None):
     if key is None:
         roles = cfg_all.get("mod_roles") or []
         role_text = ", ".join(f"<@&{r}>" for r in roles) or "none (admins count)"
+        welcome_cfg = cfg_all["welcome"]
+        autoroles = list(welcome_cfg.get("autoroles") or [])
+        if welcome_cfg.get("autorole"):
+            autoroles.append(welcome_cfg["autorole"])
+        welcome_text = "on" if welcome_cfg.get("enabled") else "off"
+        if welcome_cfg.get("channel"):
+            welcome_text += f" \u00b7 <#{welcome_cfg['channel']}>"
+        if autoroles:
+            welcome_text += f" \u00b7 {len(set(autoroles))} autorole(s)"
+        if welcome_cfg.get("embed_enabled"):
+            welcome_text += " \u00b7 embed"
+        if welcome_cfg.get("dm_enabled"):
+            welcome_text += " \u00b7 DM"
+        tickets_text = (f"category <#{cfg_all['tickets']['category']}>"
+                        if cfg_all["tickets"].get("category") else "not set up")
+        if cfg_all["tickets"].get("panel_message_id"):
+            tickets_text += " \u00b7 panel posted"
         embed = action_embed(
             "Moderation Settings", SETTINGS_COLOR,
             mod_roles=role_text,
@@ -24,11 +41,8 @@ async def modconfig(ctx, key: str = None, value: str = None):
             warn_policy=(f"threshold {cfg_all['warns']['threshold']} \u2192 "
                          f"{cfg_all['warns']['action']} \u00b7 "
                          f"expires {cfg_all['warns']['expire_days'] or 'never'}d"),
-            welcome=("on" if cfg_all["welcome"].get("enabled") else "off")
-                    + (f" \u00b7 <#{cfg_all['welcome']['channel']}>"
-                       if cfg_all["welcome"].get("channel") else ""),
-            tickets=(f"category <#{cfg_all['tickets']['category']}>"
-                     if cfg_all["tickets"].get("category") else "not set up"),
+            welcome=welcome_text,
+            tickets=tickets_text,
         )
         embed.description = (
             "`!modrole add|remove @role` \u00b7 `!modlog #channel|off` \u00b7 "
