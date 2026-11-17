@@ -8,6 +8,7 @@ Everything lives in storage/modbot/ next to the other bot data:
   tickets.json  open tickets per guild
   transcripts/  saved ticket transcripts
 """
+import copy
 import json
 import os
 
@@ -19,8 +20,19 @@ STORAGE_DIR = os.path.join(BASE_DIR, "storage", "modbot")
 TRANSCRIPT_DIR = os.path.join(STORAGE_DIR, "transcripts")
 
 DEFAULT_WELCOME = "Welcome to {server}, {user}! You are member #{count}."
+DEFAULT_WELCOME_DM = ("Hey {name}, welcome to {server}! You are member #{count}. "
+                      "If you need anything, just ask.")
 DEFAULT_PURGE_MESSAGE = "\U0001f9f9 Purged {count} message(s) in {channel} (filter: {filter})."
 DEFAULT_PANEL_MESSAGE = "Need help with something? Click the button below to open a ticket."
+DEFAULT_PANEL_TITLE = "Support Tickets"
+DEFAULT_PANEL_FOOTER = "Click the button below \u2014 staff will see it instantly"
+DEFAULT_PANEL_BUTTON = "Open Ticket"
+DEFAULT_TICKET_TITLE = "\U0001f3ab Ticket opened"
+DEFAULT_TICKET_WELCOME = ("Thanks for opening a ticket, {user}. "
+                          "A member of staff will be with you shortly.")
+DEFAULT_TICKET_FOOTER = "Ticket #{index} \u00b7 staff will be with you shortly"
+DEFAULT_CLAIM_MESSAGE = "{user} claimed this ticket."
+DEFAULT_CLOSE_MESSAGE = "Ticket closed by {user}. Deleting in 5 seconds\u2026"
 
 DEFAULT_CONFIG = {
     "mod_roles": [],
@@ -36,17 +48,56 @@ DEFAULT_CONFIG = {
         "enabled": True,
         "channel": None,
         "message": DEFAULT_WELCOME,
+        # Autoroles: `autorole` is the old single-role key, `autoroles` the new
+        # list. Both are honoured; grant reads the list first.
         "autorole": None,
+        "autoroles": [],
+        "autorole_delay": 0,      # seconds to wait before granting (0 = instant)
+        "dm_enabled": False,
+        "dm_message": DEFAULT_WELCOME_DM,
+        "embed_enabled": False,
+        "embed_color": "#5865F2",
+        "embed_title": "",
+        "embed_thumbnail": "user",  # user | server | off
+        "embed_image": "",
+        "embed_footer": "",
     },
     "purge_message": DEFAULT_PURGE_MESSAGE,
     "tickets": {
         "category": None,
         "prefix": "ticket",
         "panel_channel": None,
+        "panel_message_id": None,
         "log_channel": None,
         "panel_message": DEFAULT_PANEL_MESSAGE,
+        # panel look
+        "panel_title": DEFAULT_PANEL_TITLE,
+        "panel_color": "#5865F2",
+        "panel_thumbnail": "",
+        "panel_image": "",
+        "panel_footer": DEFAULT_PANEL_FOOTER,
+        "panel_button_label": DEFAULT_PANEL_BUTTON,
+        "panel_button_emoji": "\U0001f3ab",
+        "panel_button_style": "primary",  # primary|secondary|success|danger
+        "panel_ping": "",                 # optional role mention above the panel
+        "modal_title": "Open a Ticket",
+        "modal_label": "What do you need help with?",
+        # what happens inside a new ticket
+        "ticket_title": DEFAULT_TICKET_TITLE,
+        "ticket_color": "#5865F2",
+        "ticket_welcome": DEFAULT_TICKET_WELCOME,
+        "ticket_footer": DEFAULT_TICKET_FOOTER,
+        "claim_message": DEFAULT_CLAIM_MESSAGE,
+        "close_message": DEFAULT_CLOSE_MESSAGE,
+        "claim_button_label": "Claim",
+        "claim_button_emoji": "\u2705",
+        "close_button_label": "Close",
+        "close_button_emoji": "\U0001f512",
     },
 }
+
+# Panel/ticket styles accepted by the config commands.
+BUTTON_STYLES = ("primary", "secondary", "success", "danger")
 
 
 def _path(name):
@@ -73,12 +124,15 @@ def _save(name, data):
 
 
 def _merge(base, override):
-    out = dict(base)
+    # Deep-copy the defaults so callers can mutate the returned config
+    # (e.g. welcome.autoroles.append(...)) without leaking into DEFAULT_CONFIG
+    # and therefore into every other guild.
+    out = copy.deepcopy(base)
     for key, value in (override or {}).items():
         if isinstance(value, dict) and isinstance(out.get(key), dict):
             out[key] = _merge(out[key], value)
         else:
-            out[key] = value
+            out[key] = copy.deepcopy(value)
     return out
 
 

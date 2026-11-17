@@ -38,8 +38,13 @@ links like `/settings/profile` on the `dm.*` host only.
   nobody out** and half-finished Discord logins still complete.
 * Passwords: PBKDF2-HMAC-SHA256, 300k iterations, per-user salt.
 * A user is either email+password, Discord, or both (linked). `id` in the API
-  stays the Discord snowflake (or `"0"`) so the pre-existing storage/MC
-  permission files (`mc_permissions.json`) keep working; `uid` is the internal id.
+  stays the Discord snowflake (or `"0"`) so the pre-existing storage checks and
+  the MC ACL (`mc_permissions.json`) keep working; `uid` is the internal id.
+* The MC ACL is a versioned file: `admins` (every server + access grants),
+  `create` (may create servers), and `servers` (`owner` + per-user privilege
+  lists). Legacy `{server: [user_id, ...]}` files are migrated on read to full
+  per-server privileges; no owner is inferred. Server creators become owners,
+  and only the bot owner can grant global `admin`.
 
 ### Owner
 

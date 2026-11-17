@@ -116,7 +116,6 @@ def _request_is_mc_host(request) -> bool:
     host = (request.host or "").lower().split(":")[0]
     return host.startswith("mc.")
 BOT_OWNER_ID = int(os.environ.get("BOT_OWNER_ID", "1293889121374179328"))
-MC_OWNER_ID = 1325914599383498782
 DISCORD_REDIRECT_URI_DM = os.environ.get("DISCORD_REDIRECT_URI_DM",
                                          "https://dm.luaisgame.com/api/auth/callback")
 
@@ -1421,10 +1420,17 @@ async def handle_auth_me(request):
     user = _get_user_info(request)
     if not user:
         return web.json_response({"authenticated": False}, status=401)
-    mc_admin = int(user.get("id", 0)) in (BOT_OWNER_ID, MC_OWNER_ID)
-    authorized = mc_admin or _mc_has_any_access(str(user.get("id", "")))
-    return web.json_response({"authenticated": True, "mc_authorized": authorized, "mc_admin": mc_admin,
-                              "mc_owner": int(user.get("id", 0)) in (BOT_OWNER_ID, MC_OWNER_ID), **user})
+    user_id = str(user.get("id", ""))
+    acl = _mc_load_acl()
+    admin = _is_mc_admin(request)
+    return web.json_response({
+        "authenticated": True,
+        "mc_authorized": _is_mc_authorized(request),
+        "mc_admin": admin,
+        "mc_owner": user_id == str(BOT_OWNER_ID),
+        "mc_create": admin or user_id in acl["create"],
+        **user,
+    })
 
 def _get_user_info(request):
     """Signed-in user for any luaisgame.com host, backed by accounts.db.
@@ -1440,45 +1446,204 @@ def _is_admin(request):
         return False
     return int(user.get("id", 0)) == BOT_OWNER_ID
 
-def _is_mc_admin(request):
-    user = _get_user_info(request)
-    if not user:
-        return False
-    return int(user.get("id", 0)) in (BOT_OWNER_ID, MC_OWNER_ID)
+# ---------------------------------------------------------------------------
+# Minecraft console permissions
+#
+# mc_permissions.json is a small ACL:
+#   {
+#     "version": 2,
+#     "admins": ["discord-id"],          # global: every server + access grants
+#     "create": ["discord-id"],          # global: may create servers
+#     "servers": {
+#       "survival": {
+#         "owner": "discord-id",         # full access to this server
+#         "users": {"discord-id": ["start", "console", ...]}
+#       }
+#     }
+#   }
+#
+# The old layout ({server: [user_id, ...]}) is migrated on read: every listed
+# user keeps the full access they had before.
+# ---------------------------------------------------------------------------
+MC_PRIVILEGES = (
+    "start", "stop", "console", "command", "files", "mods",
+    "backup", "version", "players", "icon", "delete", "access",
+)
+MC_GLOBAL_PRIVILEGES = ("create", "admin")
+MC_PERMISSION_LABELS = {
+    "start": "Start server",
+    "stop": "Stop server",
+    "console": "View console",
+    "command": "Send commands",
+    "files": "Files & folders",
+    "mods": "Mods",
+    "backup": "Backups",
+    "version": "Change version",
+    "players": "Players & bans",
+    "icon": "Server icon",
+    "delete": "Delete server",
+    "access": "Manage access",
+    "create": "Create servers",
+    "admin": "Global admin",
+}
 
-def _load_mc_permissions():
+def _mc_normalize_user_id(value):
+    value = str(value or "").strip()
+    return value if value.isdigit() else ""
+
+def _mc_normalize_privileges(values):
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    given = {str(value).strip().lower() for value in values}
+    return [privilege for privilege in MC_PRIVILEGES if privilege in given]
+
+def _mc_empty_acl():
+    return {"admins": [], "create": [], "servers": {}}
+
+def _mc_acl_from_raw(raw):
+    acl = _mc_empty_acl()
+    if not isinstance(raw, dict):
+        return acl
+
+    admins = set()
+    create = set()
+    if isinstance(raw.get("admins"), list):
+        admins = {user_id for user_id in (_mc_normalize_user_id(value) for value in raw["admins"]) if user_id}
+    if isinstance(raw.get("create"), list):
+        create = {user_id for user_id in (_mc_normalize_user_id(value) for value in raw["create"]) if user_id}
+
+    servers = {}
+    raw_servers = raw.get("servers")
+    if isinstance(raw_servers, dict):
+        for name, entry in raw_servers.items():
+            if not isinstance(entry, dict):
+                continue
+            users = {}
+            raw_users = entry.get("users")
+            if isinstance(raw_users, dict):
+                for user_id, privileges in raw_users.items():
+                    user_id = _mc_normalize_user_id(user_id)
+                    if user_id:
+                        users[user_id] = _mc_normalize_privileges(privileges)
+            servers[str(name)] = {
+                "owner": _mc_normalize_user_id(entry.get("owner", "")),
+                "users": users,
+            }
+
+    # Legacy per-server lists: everyone listed had unrestricted access.
+    for name, value in raw.items():
+        if name in ("version", "admins", "create", "servers") or not isinstance(value, list):
+            continue
+        server = servers.setdefault(str(name), {"owner": "", "users": {}})
+        for raw_user_id in value:
+            user_id = _mc_normalize_user_id(raw_user_id)
+            if user_id:
+                server["users"].setdefault(user_id, list(MC_PRIVILEGES))
+
+    acl["admins"] = sorted(admins)
+    acl["create"] = sorted(create)
+    acl["servers"] = servers
+    return acl
+
+def _mc_load_acl():
     if not os.path.exists(MC_PERMISSIONS_FILE):
-        return {}
+        return _mc_empty_acl()
     try:
-        with open(MC_PERMISSIONS_FILE, "r") as f:
-            data = json.load(f)
-        return {
-            str(server): [str(user_id) for user_id in user_ids]
-            for server, user_ids in data.items()
-            if isinstance(user_ids, list)
+        with open(MC_PERMISSIONS_FILE, "r", encoding="utf-8") as f:
+            return _mc_acl_from_raw(json.load(f))
+    except Exception as e:
+        print(f"[MINECRAFT] Could not read permissions: {e}")
+        return _mc_empty_acl()
+
+def _mc_save_acl(acl):
+    data = {
+        "version": 2,
+        "admins": sorted(set(acl.get("admins", []))),
+        "create": sorted(set(acl.get("create", []))),
+        "servers": {},
+    }
+    for name, entry in (acl.get("servers") or {}).items():
+        users = {}
+        for user_id, privileges in (entry.get("users") or {}).items():
+            user_id = _mc_normalize_user_id(user_id)
+            if user_id:
+                users[user_id] = _mc_normalize_privileges(privileges)
+        data["servers"][str(name)] = {
+            "owner": _mc_normalize_user_id(entry.get("owner", "")),
+            "users": users,
         }
-    except Exception:
-        return {}
-
-def _save_mc_permissions(data):
-    with open(MC_PERMISSIONS_FILE, "w") as f:
+    temp_path = MC_PERMISSIONS_FILE + ".tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
+    os.replace(temp_path, MC_PERMISSIONS_FILE)
 
-def _mc_has_any_access(user_id):
-    return any(str(user_id) in user_ids for user_ids in _load_mc_permissions().values())
+def _mc_user_id(request):
+    user = _get_user_info(request)
+    return str(user.get("id", "")) if user else ""
+
+def _is_mc_owner(request):
+    """Only the bot owner may view/control this PC (screencast)."""
+    return _mc_user_id(request) == str(BOT_OWNER_ID)
+
+def _is_mc_admin(request):
+    user_id = _mc_user_id(request)
+    if not user_id:
+        return False
+    if user_id == str(BOT_OWNER_ID):
+        return True
+    return user_id in _mc_load_acl()["admins"]
+
+def _mc_has_any_access(user_id, acl=None):
+    user_id = str(user_id or "")
+    if not user_id:
+        return False
+    if user_id == str(BOT_OWNER_ID):
+        return True
+    acl = acl or _mc_load_acl()
+    if user_id in acl["admins"] or user_id in acl["create"]:
+        return True
+    for server in acl["servers"].values():
+        if user_id == server.get("owner") or user_id in server.get("users", {}):
+            return True
+    return False
+
+def _mc_can_create(request):
+    user_id = _mc_user_id(request)
+    if not user_id:
+        return False
+    if user_id == str(BOT_OWNER_ID):
+        return True
+    acl = _mc_load_acl()
+    return user_id in acl["admins"] or user_id in acl["create"]
+
+def _mc_server_privileges(request, server_name, acl=None):
+    user_id = _mc_user_id(request)
+    if not user_id:
+        return frozenset()
+    if user_id == str(BOT_OWNER_ID):
+        return frozenset(MC_PRIVILEGES)
+    acl = acl or _mc_load_acl()
+    if user_id in acl["admins"]:
+        return frozenset(MC_PRIVILEGES)
+    server = acl["servers"].get(str(server_name)) or {}
+    if user_id == server.get("owner"):
+        return frozenset(MC_PRIVILEGES)
+    return frozenset(server.get("users", {}).get(user_id, []))
+
+def _mc_can(request, server_name, privilege, acl=None):
+    return privilege in _mc_server_privileges(request, server_name, acl)
 
 def _can_access_mc_server(request, server_name):
-    if _is_mc_admin(request):
-        return True
-    user = _get_user_info(request)
-    if not user:
-        return False
-    permissions = _load_mc_permissions()
-    return str(user.get("id", "")) in permissions.get(str(server_name), [])
+    return bool(_mc_server_privileges(request, server_name))
 
 def _is_mc_authorized(request):
-    user = _get_user_info(request)
-    return bool(user and (_is_mc_admin(request) or _mc_has_any_access(str(user.get("id", "")))))
+    user_id = _mc_user_id(request)
+    if not user_id:
+        return False
+    acl = _mc_load_acl()
+    if user_id == str(BOT_OWNER_ID) or user_id in acl["admins"] or user_id in acl["create"]:
+        return True
+    return _mc_has_any_access(user_id, acl)
 
 async def handle_admin_data(request):
     if not _is_admin(request):
@@ -2017,8 +2182,16 @@ def _mc_get_servers():
             })
     return servers
 
+def _mc_valid_server_name(name):
+    """Server names double as directory names, so keep them to one safe segment."""
+    return bool(
+        name
+        and name == os.path.basename(name)
+        and all(c.isalnum() or c in "-_" for c in name)
+    )
+
 def _mc_safe_server_dir(name):
-    if not name or name != os.path.basename(name) or not all(c.isalnum() or c in "-_" for c in name):
+    if not _mc_valid_server_name(name):
         return None
     server_dir = os.path.join(MC_DIR, name)
     return server_dir if os.path.isdir(server_dir) else None
@@ -2143,7 +2316,7 @@ async def mc_api_change_version(request):
     data = await request.json()
     name = data.get("name", "").strip()
     version = data.get("version", "").strip()
-    if not _can_access_mc_server(request, name):
+    if not _mc_can(request, name, "version"):
         return web.json_response({"error": "unauthorized"}, status=401)
     server_dir = _mc_safe_server_dir(name)
     if not server_dir:
@@ -2169,7 +2342,7 @@ async def mc_api_change_version(request):
 async def mc_api_delete_server(request):
     data = await request.json()
     name = data.get("name", "").strip()
-    if not _can_access_mc_server(request, name):
+    if not _mc_can(request, name, "delete"):
         return web.json_response({"error": "unauthorized"}, status=401)
     server_dir = _mc_safe_server_dir(name)
     if not server_dir:
@@ -2182,9 +2355,15 @@ async def mc_api_delete_server(request):
     mc_console_buffers.pop(name, None)
     mc_ws_clients.pop(name, None)
     shutil.rmtree(server_dir)
+    acl = _mc_load_acl()
+    if name in acl["servers"]:
+        acl["servers"].pop(name, None)
+        _mc_save_acl(acl)
     return web.json_response({"ok": True})
 
 def _mc_create_backup(server_name, server_dir):
+    if not _mc_valid_server_name(server_name):
+        raise ValueError("Invalid server name")
     backup_dir = os.path.join(MC_DIR, "backups", server_name)
     os.makedirs(backup_dir, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -2202,7 +2381,7 @@ def _mc_create_backup(server_name, server_dir):
 async def mc_api_backup(request):
     data = await request.json()
     name = data.get("name", "").strip()
-    if not _can_access_mc_server(request, name):
+    if not _mc_can(request, name, "backup"):
         return web.json_response({"error": "unauthorized"}, status=401)
     server_dir = _mc_safe_server_dir(name)
     if not server_dir:
@@ -2215,8 +2394,10 @@ async def mc_api_backup(request):
 
 async def mc_api_backups(request):
     name = request.query.get("name", "")
-    if not _can_access_mc_server(request, name):
+    if not _mc_can(request, name, "backup"):
         return web.json_response({"error": "unauthorized"}, status=401)
+    if not _mc_valid_server_name(name):
+        return web.json_response({"error": "Invalid server name"}, status=400)
     backup_dir = os.path.join(MC_DIR, "backups", name)
     if not os.path.isdir(backup_dir):
         return web.json_response({"backups": []})
@@ -2230,8 +2411,10 @@ async def mc_api_backups(request):
 async def mc_api_backup_download(request):
     name = request.query.get("name", "")
     filename = os.path.basename(request.query.get("file", ""))
-    if not _can_access_mc_server(request, name):
+    if not _mc_can(request, name, "backup"):
         return web.json_response({"error": "unauthorized"}, status=401)
+    if not _mc_valid_server_name(name):
+        return web.json_response({"error": "Invalid server name"}, status=400)
     if not filename.endswith(".zip"):
         return web.json_response({"error": "Invalid backup"}, status=400)
     path = os.path.join(MC_DIR, "backups", name, filename)
@@ -2405,13 +2588,28 @@ async def _mc_read_output(name, proc):
 async def mc_api_servers(request):
     if not _is_mc_authorized(request):
         return web.json_response({"error": "unauthorized"}, status=401)
-    servers = _mc_get_servers()
-    if not _is_mc_admin(request):
-        user = _get_user_info(request)
-        user_id = str(user.get("id", ""))
-        allowed = _load_mc_permissions()
-        servers = [server for server in servers if user_id in allowed.get(server["name"], [])]
-    return web.json_response({"servers": servers})
+    acl = _mc_load_acl()
+    admin = _is_mc_admin(request)
+    user_id = _mc_user_id(request)
+    servers = []
+    for server in _mc_get_servers():
+        name = server["name"]
+        entry = acl["servers"].get(name) or {}
+        owner_id = entry.get("owner", "")
+        if admin or user_id == owner_id:
+            privileges = list(MC_PRIVILEGES)
+        else:
+            privileges = _mc_normalize_privileges((entry.get("users") or {}).get(user_id, []))
+            if not privileges:
+                continue
+        server["owner"] = bool(owner_id and owner_id == user_id)
+        server["privileges"] = privileges
+        servers.append(server)
+    return web.json_response({
+        "servers": servers,
+        "can_create": _mc_can_create(request),
+        "is_admin": admin,
+    })
 
 async def _mc_discord_profile(user_id):
     user_id = str(user_id)
@@ -2431,48 +2629,143 @@ async def _mc_discord_profile(user_id):
         mc_discord_profile_cache[user_id] = (now + 30, profile)
         return profile
 
+async def _mc_access_profile(user_id, owner_id, privileges):
+    profile = dict(await _mc_discord_profile(user_id))
+    profile["privileges"] = list(privileges)
+    profile["owner"] = bool(owner_id and user_id == owner_id)
+    return profile
+
 async def mc_api_permissions(request):
-    if not _is_mc_admin(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
     name = request.query.get("name", "")
+    if not _mc_can(request, name, "access"):
+        return web.json_response({"error": "unauthorized"}, status=401)
     if not _mc_safe_server_dir(name):
         return web.json_response({"error": "Server not found"}, status=404)
-    user_ids = _load_mc_permissions().get(name, [])
-    profiles = [await _mc_discord_profile(user_id) for user_id in user_ids]
-    return web.json_response({"users": profiles})
+    acl = _mc_load_acl()
+    entry = acl["servers"].get(name) or {"owner": "", "users": {}}
+    owner_id = entry.get("owner", "")
+    profiles = []
+    if owner_id:
+        profiles.append(await _mc_access_profile(owner_id, owner_id, list(MC_PRIVILEGES)))
+    for user_id in sorted((entry.get("users") or {}).keys()):
+        if user_id == owner_id:
+            continue
+        profiles.append(await _mc_access_profile(user_id, owner_id, entry["users"].get(user_id, [])))
+    payload = {
+        "server": name,
+        "owner": owner_id,
+        "users": profiles,
+        "privileges": list(MC_PRIVILEGES),
+        "is_admin": _is_mc_admin(request),
+        "can_grant_admin": _is_mc_owner(request),
+    }
+    if _is_mc_admin(request):
+        payload["global"] = {
+            "admins": [await _mc_discord_profile(user_id) for user_id in acl["admins"]],
+            "create": [await _mc_discord_profile(user_id) for user_id in acl["create"]],
+        }
+    return web.json_response(payload)
 
 async def mc_api_add_permission(request):
-    if not _is_mc_admin(request):
-        return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
     name = data.get("name", "").strip()
-    user_id = str(data.get("user_id", "")).strip()
+    user_id = _mc_normalize_user_id(data.get("user_id", ""))
+    if not _mc_can(request, name, "access"):
+        return web.json_response({"error": "unauthorized"}, status=401)
     if not _mc_safe_server_dir(name):
         return web.json_response({"error": "Server not found"}, status=404)
-    if not user_id.isdigit():
+    if not user_id:
         return web.json_response({"error": "Enter a numeric Discord user ID"}, status=400)
-    permissions = _load_mc_permissions()
-    permissions.setdefault(name, [])
-    if user_id not in permissions[name]:
-        permissions[name].append(user_id)
-        _save_mc_permissions(permissions)
-    return web.json_response({"ok": True, "profile": await _mc_discord_profile(user_id)})
+    raw_privileges = data.get("privileges")
+    privileges = list(MC_PRIVILEGES) if raw_privileges is None else _mc_normalize_privileges(raw_privileges)
+    if not privileges:
+        return web.json_response({"error": "Choose at least one privilege"}, status=400)
+    actor_privileges = _mc_server_privileges(request, name)
+    if not set(privileges).issubset(actor_privileges):
+        return web.json_response({"error": "You cannot grant privileges you do not have"}, status=403)
+    acl = _mc_load_acl()
+    entry = acl["servers"].setdefault(name, {"owner": "", "users": {}})
+    if user_id == entry.get("owner"):
+        return web.json_response({"ok": True, "profile": await _mc_access_profile(user_id, user_id, list(MC_PRIVILEGES))})
+    entry.setdefault("users", {})[user_id] = privileges
+    _mc_save_acl(acl)
+    return web.json_response({"ok": True, "profile": await _mc_access_profile(user_id, entry.get("owner", ""), privileges)})
 
 async def mc_api_remove_permission(request):
+    data = await request.json()
+    name = data.get("name", "").strip()
+    user_id = _mc_normalize_user_id(data.get("user_id", ""))
+    if not _mc_can(request, name, "access"):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not user_id:
+        return web.json_response({"error": "Enter a numeric Discord user ID"}, status=400)
+    acl = _mc_load_acl()
+    entry = acl["servers"].get(name) or {}
+    if user_id == entry.get("owner"):
+        return web.json_response({"error": "The owner always has access. Transfer ownership first."}, status=400)
+    users = entry.setdefault("users", {}) if entry else None
+    if users is not None and user_id in users:
+        users.pop(user_id, None)
+        _mc_save_acl(acl)
+    return web.json_response({"ok": True})
+
+async def mc_api_set_server_owner(request):
+    data = await request.json()
+    name = data.get("name", "").strip()
+    user_id = _mc_normalize_user_id(data.get("user_id", ""))
+    if not _mc_can(request, name, "access"):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _mc_safe_server_dir(name):
+        return web.json_response({"error": "Server not found"}, status=404)
+    if not user_id:
+        return web.json_response({"error": "Enter a numeric Discord user ID"}, status=400)
+    acl = _mc_load_acl()
+    entry = acl["servers"].setdefault(name, {"owner": "", "users": {}})
+    actor_id = _mc_user_id(request)
+    if not (_is_mc_admin(request) or actor_id == entry.get("owner")):
+        return web.json_response({"error": "Only the server owner or a global admin can transfer ownership"}, status=403)
+    entry["owner"] = user_id
+    entry.setdefault("users", {}).pop(user_id, None)
+    _mc_save_acl(acl)
+    return web.json_response({"ok": True, "profile": await _mc_access_profile(user_id, user_id, list(MC_PRIVILEGES))})
+
+async def mc_api_global_access(request):
+    if not _is_mc_admin(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    acl = _mc_load_acl()
+    return web.json_response({
+        "admins": [await _mc_discord_profile(user_id) for user_id in acl["admins"]],
+        "create": [await _mc_discord_profile(user_id) for user_id in acl["create"]],
+        "can_grant_admin": _is_mc_owner(request),
+    })
+
+async def mc_api_set_global_access(request):
     if not _is_mc_admin(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
-    name = data.get("name", "").strip()
-    user_id = str(data.get("user_id", "")).strip()
-    permissions = _load_mc_permissions()
-    if name in permissions:
-        permissions[name] = [value for value in permissions[name] if value != user_id]
-        if permissions[name]:
-            _save_mc_permissions(permissions)
-        else:
-            permissions.pop(name, None)
-            _save_mc_permissions(permissions)
-    return web.json_response({"ok": True})
+    user_id = _mc_normalize_user_id(data.get("user_id", ""))
+    scope = str(data.get("scope", "create")).strip().lower()
+    action = str(data.get("action", "add")).strip().lower()
+    if not user_id:
+        return web.json_response({"error": "Enter a numeric Discord user ID"}, status=400)
+    if scope not in MC_GLOBAL_PRIVILEGES:
+        return web.json_response({"error": "Unknown global privilege"}, status=400)
+    if action not in ("add", "remove"):
+        return web.json_response({"error": "Unknown action"}, status=400)
+    if user_id == str(BOT_OWNER_ID):
+        return web.json_response({"error": "The bot owner always has access"}, status=400)
+    if scope == "admin" and not _is_mc_owner(request):
+        return web.json_response({"error": "Only the bot owner can grant global admin"}, status=403)
+    acl = _mc_load_acl()
+    key = "admins" if scope == "admin" else "create"
+    values = set(acl[key])
+    if action == "add":
+        values.add(user_id)
+    else:
+        values.discard(user_id)
+    acl[key] = sorted(values)
+    _mc_save_acl(acl)
+    return web.json_response({"ok": True, key: [await _mc_discord_profile(value) for value in acl[key]]})
 
 def _mc_command_result_matches(command, text):
     lowered = text.lower()
@@ -2619,7 +2912,7 @@ def _mc_get_server_bans(server_name):
 
 async def mc_api_players(request):
     name = request.query.get("name", "")
-    if not _can_access_mc_server(request, name):
+    if not _mc_can(request, name, "players"):
         return web.json_response({"error": "unauthorized"}, status=401)
     online = await _mc_get_live_players(name)
     server_dir = _mc_safe_server_dir(name)
@@ -2642,13 +2935,28 @@ async def mc_api_players(request):
             "online": player_name in online,
         })
     players.sort(key=lambda p: (not p["online"], p["name"].lower()))
-    profiles = []
-    for user_id in _load_mc_permissions().get(name, []):
-        profiles.append(await _mc_discord_profile(user_id))
+    access = None
+    if _mc_can(request, name, "access"):
+        acl = _mc_load_acl()
+        entry = acl["servers"].get(name) or {"owner": "", "users": {}}
+        owner_id = entry.get("owner", "")
+        users = []
+        if owner_id:
+            users.append(await _mc_access_profile(owner_id, owner_id, list(MC_PRIVILEGES)))
+        for user_id in sorted((entry.get("users") or {}).keys()):
+            if user_id != owner_id:
+                users.append(await _mc_access_profile(user_id, owner_id, entry["users"].get(user_id, [])))
+        access = {
+            "owner": owner_id,
+            "users": users,
+            "privileges": list(MC_PRIVILEGES),
+            "is_admin": _is_mc_admin(request),
+            "can_grant_admin": _is_mc_owner(request),
+        }
     bans = _mc_get_server_bans(name)
     return web.json_response({
         "players": players,
-        "profiles": profiles,
+        "access": access,
         **bans,
     })
 
@@ -3031,7 +3339,7 @@ async def _mc_run_command_capture(server_name, command, timeout=2.0, silent=Fals
 async def mc_api_player(request):
     server_name = request.query.get("server", "")
     player_name = request.query.get("player", "").strip()
-    if not _can_access_mc_server(request, server_name):
+    if not _mc_can(request, server_name, "players"):
         return web.json_response({"error": "unauthorized"}, status=401)
     if not _valid_mc_player_name(player_name):
         return web.json_response({"error": "Invalid player name"}, status=400)
@@ -3087,7 +3395,7 @@ async def mc_api_inventory_move(request):
     player_name = str(data.get("player", "")).strip()
     source = data.get("source", "")
     destination = data.get("destination", "")
-    if not _can_access_mc_server(request, server_name):
+    if not _mc_can(request, server_name, "players"):
         return web.json_response({"error": "unauthorized"}, status=401)
     slot_pattern = r"(?:hotbar\.\d+|inventory\.\d+|armor\.(?:head|chest|legs|feet)|weapon\.(?:mainhand|offhand))"
     if not _valid_mc_player_name(player_name) or not re.fullmatch(slot_pattern, source or "") or not re.fullmatch(slot_pattern, destination or ""):
@@ -3138,7 +3446,7 @@ async def mc_api_player_action(request):
     player_name = str(data.get("player", "")).strip()
     action = data.get("action", "")
     reason = str(data.get("reason", "Website action")).replace("\n", " ").strip()[:200]
-    if not _can_access_mc_server(request, server_name):
+    if not _mc_can(request, server_name, "players"):
         return web.json_response({"error": "unauthorized"}, status=401)
     if not _valid_mc_player_name(player_name):
         return web.json_response({"error": "Invalid player name"}, status=400)
@@ -3199,7 +3507,7 @@ async def mc_api_unban(request):
     server_name = str(data.get("server", "")).strip()
     ban_type = str(data.get("type", "")).strip().lower()
     target = str(data.get("target", "")).strip()
-    if not _can_access_mc_server(request, server_name):
+    if not _mc_can(request, server_name, "players"):
         return web.json_response({"error": "unauthorized"}, status=401)
     server_dir = _mc_safe_server_dir(server_name)
     if not server_dir:
@@ -3267,7 +3575,7 @@ async def mc_api_unban(request):
 async def mc_api_player_skin(request):
     name = request.query.get("server", "")
     player = request.query.get("player", "").strip()
-    if not player or not _can_access_mc_server(request, name):
+    if not player or not _mc_can(request, name, "players"):
         return web.json_response({"error": "unauthorized"}, status=401)
     server_dir = _mc_safe_server_dir(name)
     skin_url = _mc_find_skin_url(server_dir, player) if server_dir else None
@@ -3285,7 +3593,7 @@ async def mc_api_player_skin(request):
 async def mc_api_start(request):
     data = await request.json()
     name = data.get("name", "")
-    if not _can_access_mc_server(request, name):
+    if not _mc_can(request, name, "start"):
         return web.json_response({"error": "unauthorized"}, status=401)
     loader_type = data.get("loader", "fabric")
     server_dir = _mc_safe_server_dir(name)
@@ -3388,7 +3696,7 @@ async def mc_api_start(request):
     return web.json_response({"ok": True, "pid": proc.pid})
 
 async def mc_api_create(request):
-    if not _is_mc_admin(request):
+    if not _mc_can_create(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     data = await request.json()
     name = data.get("name", "").strip()
@@ -3402,6 +3710,13 @@ async def mc_api_create(request):
     if os.path.exists(server_dir):
         return web.json_response({"error": "Server folder already exists"}, status=409)
     os.makedirs(server_dir, exist_ok=True)
+    owner_id = _mc_user_id(request)
+    if owner_id:
+        acl = _mc_load_acl()
+        entry = acl["servers"].setdefault(name, {"owner": "", "users": {}})
+        entry["owner"] = owner_id
+        entry.setdefault("users", {}).pop(owner_id, None)
+        _mc_save_acl(acl)
     with open(os.path.join(server_dir, ".loader"), "w") as f:
         f.write(loader)
     if version:
@@ -3412,7 +3727,7 @@ async def mc_api_create(request):
 async def mc_api_stop(request):
     data = await request.json()
     name = data.get("name", "")
-    if not _can_access_mc_server(request, name):
+    if not _mc_can(request, name, "stop"):
         return web.json_response({"error": "unauthorized"}, status=401)
     proc = mc_processes.get(name)
     if not proc or proc.returncode is not None:
@@ -3439,7 +3754,7 @@ async def mc_api_command(request):
     data = await request.json()
     name = data.get("name", "")
     cmd = data.get("command", "")
-    if not _can_access_mc_server(request, name):
+    if not _mc_can(request, name, "command"):
         return web.json_response({"error": "unauthorized"}, status=401)
     proc = mc_processes.get(name)
     if not proc or proc.returncode is not None:
@@ -3453,7 +3768,7 @@ async def mc_api_command(request):
 
 async def mc_api_console(request):
     name = request.query.get("name", "")
-    if not _can_access_mc_server(request, name):
+    if not _mc_can(request, name, "console"):
         return web.json_response({"error": "unauthorized"}, status=401)
     buf = mc_console_buffers.get(name, [])
     return web.json_response({"lines": buf[-200:]})
@@ -3461,12 +3776,14 @@ async def mc_api_console(request):
 
 async def mc_api_mods(request):
     name = request.query.get("name", "")
-    if not _can_access_mc_server(request, name):
+    if not _mc_can(request, name, "mods"):
         return web.json_response({"error": "unauthorized"}, status=401)
     server_dir = _mc_safe_server_dir(name)
     if not server_dir:
         return web.json_response({"error": "Server not found"}, status=404)
-    mods_dir = os.path.join(server_dir, "mods")
+    mods_dir = _mc_resolve_server_path(server_dir, "mods")
+    if not mods_dir:
+        return web.json_response({"mods": []})
     if not os.path.isdir(mods_dir):
         return web.json_response({"mods": []})
     mods = []
@@ -3483,30 +3800,38 @@ async def mc_api_icon(request):
     server_dir = _mc_safe_server_dir(name)
     if not server_dir:
         return web.json_response({"error": "Server not found"}, status=404)
-    icon_path = os.path.join(server_dir, "server-icon.png")
-    if not os.path.isfile(icon_path):
+    icon_path = _mc_resolve_server_path(server_dir, "server-icon.png")
+    if not icon_path or not os.path.isfile(icon_path):
         return web.Response(status=404)
     return web.FileResponse(icon_path, headers={"Cache-Control": "no-cache"})
 
 async def mc_api_upload_icon(request):
     reader = await request.multipart()
     server_name = None
+    server_dir = None
     icon_data = None
     while True:
         field = await reader.next()
         if not field:
             break
         if field.name == "server":
-            server_name = (await field.read()).decode().strip()
+            server_name = (await field.read()).decode(errors="replace").strip()
+            # Check permission before buffering the image.
+            if not _mc_can(request, server_name, "icon"):
+                return web.json_response({"error": "unauthorized"}, status=401)
+            server_dir = _mc_safe_server_dir(server_name)
+            if not server_dir:
+                return web.json_response({"error": "Server not found"}, status=404)
         elif field.name == "icon":
+            if not server_dir:
+                return web.json_response({"error": "Send the server before the icon"}, status=400)
             if not field.filename or not field.filename.lower().endswith(".png"):
                 return web.json_response({"error": "Upload a PNG image."}, status=400)
             icon_data = await field.read()
-    server_dir = _mc_safe_server_dir(server_name or "")
+    if not _mc_can(request, server_name or "", "icon"):
+        return web.json_response({"error": "unauthorized"}, status=401)
     if not server_dir:
         return web.json_response({"error": "Server not found"}, status=404)
-    if not _can_access_mc_server(request, server_name):
-        return web.json_response({"error": "unauthorized"}, status=401)
     if not icon_data or len(icon_data) > 2 * 1024 * 1024:
         return web.json_response({"error": "Icon must be smaller than 2 MB."}, status=400)
     if icon_data[:8] != b"\x89PNG\r\n\x1a\n" or len(icon_data) < 24:
@@ -3517,7 +3842,10 @@ async def mc_api_upload_icon(request):
     height = int.from_bytes(icon_data[20:24], "big")
     if width != 64 or height != 64:
         return web.json_response({"error": "Minecraft icons must be exactly 64x64 pixels."}, status=400)
-    with open(os.path.join(server_dir, "server-icon.png"), "wb") as f:
+    icon_path = _mc_resolve_server_path(server_dir, "server-icon.png")
+    if not icon_path:
+        return web.json_response({"error": "Invalid path"}, status=400)
+    with open(icon_path, "wb") as f:
         f.write(icon_data)
     return web.json_response({"ok": True})
 
@@ -3525,18 +3853,35 @@ async def mc_api_upload_icon(request):
 async def mc_api_upload_mod(request):
     reader = await request.multipart()
     server_name = None
+    server_dir = None
     filename = None
     temp_path = None
     max_size = 512 * 1024 * 1024
+
+    def cleanup():
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
     while True:
         part = await reader.next()
         if not part:
             break
-        if part.name == "file":
+        if part.name == "server":
+            server_name = (await part.read()).decode(errors="replace").strip()
+            # Authorize before accepting any mod bytes.
+            if not _mc_can(request, server_name, "mods"):
+                cleanup()
+                return web.json_response({"error": "unauthorized"}, status=401)
+            server_dir = _mc_safe_server_dir(server_name)
+            if not server_dir:
+                cleanup()
+                return web.json_response({"error": "Server not found"}, status=404)
+        elif part.name == "file":
+            if not server_dir:
+                return web.json_response({"error": "Send the server before the file"}, status=400)
             filename = os.path.basename(part.filename or "")
             if not filename or not filename.lower().endswith(".jar"):
                 return web.json_response({"error": "Only .jar files allowed"}, status=400)
-            os.makedirs(MC_DIR, exist_ok=True)
             temp_path = os.path.join(MC_DIR, f".mod-upload-{uuid.uuid4().hex}.tmp")
             total = 0
             try:
@@ -3547,33 +3892,32 @@ async def mc_api_upload_mod(request):
                             break
                         total += len(chunk)
                         if total > max_size:
-                            os.remove(temp_path)
+                            cleanup()
                             return web.json_response({"error": "Mod must be smaller than 512 MB."}, status=400)
                         temp_file.write(chunk)
             except Exception:
-                if temp_path and os.path.exists(temp_path):
-                    os.remove(temp_path)
+                cleanup()
                 raise
-        elif part.name == "server":
-            server_name = (await part.read()).decode()
-    server_name = (server_name or "").strip()
-    if not _can_access_mc_server(request, server_name):
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
+    if not _mc_can(request, server_name or "", "mods"):
+        cleanup()
         return web.json_response({"error": "unauthorized"}, status=401)
-    server_dir = _mc_safe_server_dir(server_name)
     if not server_dir:
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
+        cleanup()
         return web.json_response({"error": "Server not found"}, status=404)
     if not filename or not temp_path or not os.path.isfile(temp_path):
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
+        cleanup()
         return web.json_response({"error": "No mod file"}, status=400)
-    mods_dir = os.path.join(server_dir, "mods")
-    os.makedirs(mods_dir, exist_ok=True)
-    dest = os.path.join(mods_dir, filename)
-    os.replace(temp_path, dest)
+    mods_dir = _mc_resolve_server_path(server_dir, "mods")
+    dest = _mc_resolve_server_path(server_dir, _mc_join_rel_path("mods", filename))
+    if not mods_dir or not dest or (os.path.exists(mods_dir) and not os.path.isdir(mods_dir)):
+        cleanup()
+        return web.json_response({"error": "Invalid path"}, status=400)
+    try:
+        os.makedirs(mods_dir, exist_ok=True)
+        os.replace(temp_path, dest)
+    except OSError as e:
+        cleanup()
+        return web.json_response({"error": str(e)}, status=500)
     buf = mc_console_buffers.setdefault(server_name, [])
     buf.append(f"[{time.strftime('%H:%M:%S')}] Mod installed: {filename}")
     return web.json_response({"ok": True, "name": filename})
@@ -3581,13 +3925,18 @@ async def mc_api_upload_mod(request):
 
 async def mc_api_delete_mod(request):
     data = await request.json()
-    name = data.get("name", "")
-    mod = data.get("mod", "")
-    if not _can_access_mc_server(request, name):
+    name = str(data.get("name", "")).strip()
+    mod = os.path.basename(str(data.get("mod", "")).strip())
+    if not _mc_can(request, name, "mods"):
         return web.json_response({"error": "unauthorized"}, status=401)
-    if not name or not mod:
+    if not name or not mod or mod in (".", ".."):
         return web.json_response({"error": "Missing params"}, status=400)
-    mod_path = os.path.join(MC_DIR, name, "mods", mod)
+    server_dir = _mc_safe_server_dir(name)
+    if not server_dir:
+        return web.json_response({"error": "Server not found"}, status=404)
+    mod_path = _mc_resolve_server_path(server_dir, _mc_join_rel_path("mods", mod))
+    if not mod_path:
+        return web.json_response({"error": "Invalid mod name"}, status=400)
     if not os.path.isfile(mod_path):
         return web.json_response({"error": "Mod not found"}, status=404)
     os.remove(mod_path)
@@ -3597,8 +3946,9 @@ async def mc_api_delete_mod(request):
 
 async def mc_ws_console(request):
     name = request.match_info.get("name", "")
-    if not _can_access_mc_server(request, name):
+    if not _mc_can(request, name, "console"):
         return web.Response(status=401)
+    can_send = _mc_can(request, name, "command")
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     ws_list = mc_ws_clients.setdefault(name, [])
@@ -3608,7 +3958,7 @@ async def mc_ws_console(request):
             if msg.type == web.WSMsgType.TEXT:
                 try:
                     d = json.loads(msg.data)
-                    if d.get("type") == "command":
+                    if d.get("type") == "command" and can_send:
                         proc = mc_processes.get(name)
                         if proc and proc.returncode is None and proc.stdin:
                             proc.stdin.write((d.get("command", "") + "\n").encode("utf-8"))
@@ -3737,8 +4087,8 @@ button:disabled{opacity:.5;cursor:not-allowed}
 }
 .console-header .actions button:hover{background:rgba(255,255,255,.05);color:#fff}
 .console-header .actions .start{border-color:rgba(34,197,94,.25);color:#22c55e}
-.console-header .actions .props{border-color:rgba(0,220,120,.25);color:#00dc78}
-.console-header .actions .props:hover{background:rgba(0,220,120,.08);border-color:rgba(0,220,120,.35);color:#00dc78}
+.console-header .actions .files{border-color:rgba(0,220,120,.25);color:#00dc78}
+.console-header .actions .files:hover{background:rgba(0,220,120,.08);border-color:rgba(0,220,120,.35);color:#00dc78}
 .console-header .actions .version{border-color:rgba(168,85,247,.3);color:#c084fc}
 .console-header .actions .version:hover{background:rgba(168,85,247,.1);color:#d8b4fe}
 .console-header .actions .people{border-color:rgba(45,212,191,.3);color:#5eead4}
@@ -3931,8 +4281,8 @@ body{background:var(--mc-bg);color:var(--mc-txt);font-family:var(--mc-font);lett
 .console-header .actions .start:hover{background:rgba(34,197,94,.16);border-color:rgba(34,197,94,.5);color:#86efac}
 .console-header .actions .stop{border-color:rgba(239,68,68,.3);color:#f87171;background:rgba(239,68,68,.07)}
 .console-header .actions .stop:hover{background:rgba(239,68,68,.16);border-color:rgba(239,68,68,.5);color:#fca5a5}
-.console-header .actions .props{border-color:var(--mc-accent-line);color:var(--mc-accent);background:var(--mc-accent-soft)}
-.console-header .actions .props:hover{background:rgba(0,220,120,.16);color:#00ff8a}
+.console-header .actions .files{border-color:var(--mc-accent-line);color:var(--mc-accent);background:var(--mc-accent-soft)}
+.console-header .actions .files:hover{background:rgba(0,220,120,.16);color:#00ff8a}
 .console-header .actions .version{border-color:rgba(168,85,247,.3);color:#c084fc}
 .console-header .actions .version:hover{background:rgba(168,85,247,.12);color:#d8b4fe}
 .console-header .actions .people{border-color:rgba(45,212,191,.3);color:#5eead4}
@@ -4010,8 +4360,63 @@ body{background:var(--mc-bg);color:var(--mc-txt);font-family:var(--mc-font);lett
 .ban-row-info strong{color:#f4f4f5}
 .ban-empty{border:1px dashed var(--mc-line);border-radius:11px;color:var(--mc-faint)}
 
-/* full-screen overlay panels (props/people) */
-#propsPanel,#peoplePanel{background:rgba(5,5,8,.96);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);padding:32px}
+/* full-screen overlay panels (files/people) */
+#filesPanel,#peoplePanel{background:rgba(5,5,8,.96);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);padding:32px}
+
+/* file manager */
+.files-shell{max-width:1120px;width:100%;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+.files-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}
+.files-head h2{color:#fff;font-size:18px;font-weight:650}
+.files-crumb{color:var(--mc-dim);font-size:12px;margin-top:5px;word-break:break-all}
+.files-crumb button{background:none;border:0;color:var(--mc-dim);font-size:12px;font-family:inherit;padding:0;cursor:pointer}
+.files-crumb button:hover{color:var(--mc-accent);text-decoration:underline}
+.files-toolbar{display:flex;gap:8px;flex-wrap:wrap}
+.files-toolbar button,.files-toolbar label{padding:8px 12px;border-radius:8px;border:1px solid var(--mc-line);background:rgba(255,255,255,.04);
+  color:var(--mc-txt);font-size:12px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:6px}
+.files-toolbar button:hover,.files-toolbar label:hover{background:rgba(0,220,120,.1);border-color:var(--mc-accent-line);color:#fff}
+.files-toolbar .primary{background:rgba(0,220,120,.12);border-color:var(--mc-accent-line);color:var(--mc-accent)}
+.files-list{display:flex;flex-direction:column;gap:6px}
+.file-row{display:flex;align-items:center;gap:10px;padding:9px 12px;background:rgba(255,255,255,.025);
+  border:1px solid var(--mc-line);border-radius:9px}
+.file-row:hover{background:rgba(255,255,255,.05)}
+.file-row .ficon{width:20px;text-align:center;font-size:14px;flex-shrink:0}
+.file-row .fname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--mc-txt);font-size:13px;background:none;border:0;text-align:left;padding:0;cursor:pointer}
+.file-row .fname:hover{color:var(--mc-accent)}
+.file-row .fmeta{font-size:11px;color:var(--mc-faint);flex-shrink:0}
+.file-row .factions{display:flex;gap:5px;flex-shrink:0}
+.file-row .factions button,.file-row .factions a{padding:4px 8px;border-radius:6px;border:1px solid var(--mc-line);
+  background:rgba(255,255,255,.03);color:var(--mc-dim);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer}
+.file-row .factions button:hover,.file-row .factions a:hover{color:#fff;border-color:var(--mc-accent-line)}
+.file-editor{margin-top:6px;background:#0a0c11;border:1px solid var(--mc-line);border-radius:12px;padding:16px}
+.file-editor-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px}
+.file-editor-head h3{color:#fff;font-size:14px;font-weight:650;word-break:break-all}
+.file-editor textarea{width:100%;min-height:46vh;background:#05070b;color:#d7dde5;border:1px solid var(--mc-line);
+  border-radius:9px;padding:12px;font-family:Consolas,monospace;font-size:12.5px;line-height:1.55;resize:vertical;outline:none}
+.prop-row{display:flex;align-items:center;gap:10px;padding:7px 10px;border:1px solid rgba(255,255,255,.05);
+  border-radius:8px;margin-bottom:5px;background:rgba(13,17,23,.55)}
+.prop-row .prop-key{flex:1;min-width:0;color:var(--mc-txt);font-size:12.5px;word-break:break-all}
+.prop-row .prop-help{display:block;color:var(--mc-faint);font-size:11px;margin-top:2px;font-weight:400}
+.prop-row input[type=text],.prop-row input[type=number]{width:min(260px,45%);background:#05070b;border:1px solid var(--mc-line);
+  color:var(--mc-txt);padding:6px 9px;border-radius:6px;font-size:12.5px;outline:none}
+.prop-row input[type=text]:focus,.prop-row input[type=number]:focus{border-color:var(--mc-accent-line)}
+.prop-row.comment{justify-content:flex-start;background:transparent;border-color:transparent;padding:2px 10px}
+.prop-row.comment span{color:var(--mc-faint);font-size:11.5px;font-style:italic;white-space:pre-wrap}
+.prop-row.blank{height:8px;padding:0;border:0;background:transparent;margin:0}
+.prop-row.raw{padding:2px 10px;border-color:transparent;background:transparent;color:var(--mc-faint);font-family:Consolas,monospace;font-size:11.5px;white-space:pre-wrap}
+.access-user{display:flex;gap:10px;align-items:flex-start;background:rgba(255,255,255,.04);padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,.05)}
+.access-user .access-avatar{width:36px;height:36px;border-radius:50%;flex-shrink:0;background:rgba(255,255,255,.08)}
+.access-user .access-main{flex:1;min-width:0}
+.access-user .access-main strong{color:#fff;font-size:13px}
+.access-user .access-main small{display:block;color:var(--mc-faint);font-size:11px;margin-top:1px}
+.priv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:4px 10px;margin-top:8px}
+.priv-grid label{display:flex;align-items:center;gap:5px;font-size:11.5px;color:var(--mc-dim);cursor:pointer}
+.priv-grid input{accent-color:#00dc78}
+.access-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.access-actions button{padding:5px 9px;border-radius:6px;border:1px solid var(--mc-line);background:rgba(255,255,255,.03);
+  color:var(--mc-dim);font-size:11px;font-weight:600;cursor:pointer}
+.access-actions button:hover{color:#fff;border-color:var(--mc-accent-line)}
+.access-actions .danger{color:#f87171;border-color:rgba(239,68,68,.28)}
+.access-actions .gold{color:#fbbf24;border-color:rgba(251,191,36,.28)}
 
 /* ---- TOASTS ---- */
 #toastWrap{position:fixed;top:16px;right:16px;z-index:500;display:flex;flex-direction:column;gap:9px;pointer-events:none}
@@ -4096,6 +4501,7 @@ body{background:var(--mc-bg);color:var(--mc-txt);font-family:var(--mc-font);lett
   <div class="logo"><span class="lua">MC</span> Console</div>
   <a class="nav-link" href="https://storage.luaisgame.com/" target="_blank" rel="noopener">&#8592; Storage</a>
   <a class="nav-link" href="https://dm.luaisgame.com/" target="_blank" rel="noopener">💬 DM</a>
+  <a class="nav-link" id="globalAccessBtn" href="#" style="display:none" onclick="openGlobalAccess();return false">Access</a>
   <div class="user" id="userInfo"></div>
 </div>
 <div class="main">
@@ -4129,6 +4535,15 @@ body{background:var(--mc-bg);color:var(--mc-txt);font-family:var(--mc-font);lett
 </div>
 <script>
 var userInfo=null,activeServer=null,ws=null,autoScroll=true;
+var serversByName={},canCreateServer=false;
+var MC_PRIVILEGES=['start','stop','console','command','files','mods','backup','version','players','icon','delete','access'];
+var MC_PRIVILEGE_LABELS={start:'Start',stop:'Stop',console:'View console',command:'Send commands',files:'Files',mods:'Mods',backup:'Backups',version:'Version',players:'Players & bans',icon:'Icon',delete:'Delete server',access:'Manage access'};
+function canPriv(privilege){
+  if(!userInfo)return false;
+  if(userInfo.mc_admin)return true;
+  var server=serversByName[activeServer];
+  return !!(server&&server.privileges&&server.privileges.indexOf(privilege)!==-1);
+}
 async function checkAuth(){
   try{
     var response=await fetch('/api/auth/me',{credentials:'include'});
@@ -4141,20 +4556,28 @@ async function checkAuth(){
   var avatar=userInfo.avatar?'<img src="https://cdn.discordapp.com/avatars/'+userInfo.id+'/'+userInfo.avatar+'.png">':'';
   var websiteLink=userInfo.mc_authorized?'<a class="nav-link" href="/">Website</a>':'';
   document.getElementById('userInfo').innerHTML=avatar+'<span class="name">'+userInfo.username+'</span>'+websiteLink;
-  var createEl=document.getElementById('createServer');if(createEl)createEl.style.display=userInfo.mc_admin?'':'none';
+  var createEl=document.getElementById('createServer');if(createEl)createEl.style.display=(userInfo.mc_create||userInfo.mc_admin)?'':'none';
+  var accessEl=document.getElementById('globalAccessBtn');if(accessEl)accessEl.style.display=userInfo.mc_admin?'':'none';
   return true;
 }
- function loadServers(){
+ function loadServers(after){
   fetch('/api/mc/servers',{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
+    if(d.error)return;
+    canCreateServer=!!d.can_create;
+    serversByName={};
     var el=document.getElementById('serverList');if(!el)return;el.innerHTML='';
     (d.servers||[]).forEach(function(s){
+      serversByName[s.name]=s;
       var item=document.createElement('div');
       item.className='server-item'+(activeServer===s.name?' active':'');
        var icon=s.icon?'<img class="server-icon" src="/api/mc/icon?name='+encodeURIComponent(s.name)+'" alt="">':'';
-       item.innerHTML=icon+'<span class="name">'+s.name+'<small style="display:block;color:rgba(255,255,255,.35);font-size:10px">'+(s.version||'auto')+'</small></span><span class="loader-tag">'+s.loader+'</span><span class="dot '+(s.running?'on':'off')+'"></span>';
+       item.innerHTML=icon+'<span class="name">'+escapeHtml(s.name)+'<small style="display:block;color:rgba(255,255,255,.35);font-size:10px">'+(s.version||'auto')+'</small></span><span class="loader-tag">'+s.loader+'</span><span class="dot '+(s.running?'on':'off')+'"></span>';
       item.onclick=function(){selectServer(s.name)};
       el.appendChild(item);
     });
+    var createEl=document.getElementById('createServer');
+    if(createEl)createEl.style.display=(userInfo&&(userInfo.mc_create||userInfo.mc_admin))?'':'none';
+    if(typeof after==='function')after();
   });
 }
 function createServer(){
@@ -4167,7 +4590,7 @@ function createServer(){
   if(!name)return;
   fetch('/api/mc/create',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:name,loader:loader,version:version})}).then(function(r){return r.json()}).then(function(d){
     if(d.error){alert(d.error);return}
-    inp.value='';loadServers();selectServer(name);
+    inp.value='';loadServers(function(){selectServer(name)});
   });
 }
 function loadVersions(){
@@ -4181,41 +4604,77 @@ function loadVersions(){
 }
 var lastLineCount=0;
 var lastWSServer='';
+function consoleShell(name){
+  var h='<div class="console-header"><div class="server-name">'+escapeHtml(name)+'</div><div class="actions">';
+  if(canPriv('start'))h+='<button class="start" onclick="startServer()">Start</button>';
+  if(canPriv('stop'))h+='<button class="stop" onclick="stopServer()">Stop</button>';
+  if(userInfo&&userInfo.mc_owner)h+='<button class="live" id="ssBtn" onclick="openSS()"><span class="live-dot"></span>Screenshare</button>';
+  if(canPriv('mods'))h+='<button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button>';
+  if(canPriv('files'))h+='<button class="files" onclick="openFiles()">Folders</button>';
+  if(canPriv('players'))h+='<button class="people" onclick="openPeople()">People</button>';
+  if(canPriv('access'))h+='<button class="access" onclick="openAccess()">Access</button>';
+  if(canPriv('backup'))h+='<button class="backup" onclick="createBackup()">Backup</button>';
+  if(canPriv('version'))h+='<button class="version" onclick="changeServerVersion()">Version</button>';
+  if(canPriv('icon'))h+='<button class="icon-upload" onclick="document.getElementById(\'serverIconInput\').click()">Icon</button>';
+  if(canPriv('delete'))h+='<button class="delete" onclick="deleteServer()">Delete</button>';
+  h+='<input id="serverIconInput" type="file" accept="image/*" style="display:none" onchange="openIconCrop(this)"></div></div>';
+  h+='<div class="mods-panel" id="modsPanel" style="display:none"></div>';
+  h+='<div class="console-output" id="consoleOutput"></div>';
+  var canSend=canPriv('command');
+  h+='<div class="console-input-wrap"><span class="prompt">&gt;</span><input type="text" id="cmdInput" placeholder="'+(canSend?'Type a command...':'Command access not granted')+'" '+(canSend?'':'disabled')+' onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
+  return h;
+}
 function selectServer(name){
   activeServer=name;
   autoScroll=true;
   modsVisible=false;
+  closeFiles();
+  closePeople();
   loadServers();
-  if(lastWSServer!==name){connectWS(name);lastWSServer=name;lastLineCount=0}
-  fetch('/api/mc/console?name='+encodeURIComponent(name),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
+  var viewConsole=canPriv('console');
+  if(viewConsole){
+    if(lastWSServer!==name){connectWS(name);lastWSServer=name;lastLineCount=0}
+  }else{
+    if(ws){ws.close();ws=null}
+    lastWSServer='';lastLineCount=0;
+  }
+  function render(lines){
     var wrap=document.getElementById('consoleWrap');
     var out=document.getElementById('consoleOutput');
     if(out&&out.dataset.server===name){
-      var lines=d.lines||[];
-      if(lines.length>lastLineCount){
-        for(var i=lastLineCount;i<lines.length;i++)appendLine(out,lines[i],false);
-        lastLineCount=lines.length;
+      var fresh=lines||[];
+      if(fresh.length>lastLineCount){
+        for(var i=lastLineCount;i<fresh.length;i++)appendLine(out,fresh[i],false);
+        lastLineCount=fresh.length;
         if(autoScroll)out.scrollTop=out.scrollHeight;
       }
-      document.getElementById('cmdInput').focus();
+      var existingInput=document.getElementById('cmdInput');
+      if(existingInput&&!existingInput.disabled)existingInput.focus();
       return;
     }
-     wrap.innerHTML='<div class="console-header"><div class="server-name">'+name+'</div><div class="actions"><button class="start" onclick="startServer()">Start</button><button class="stop" onclick="stopServer()">Stop</button><button class="live" id="ssBtn" onclick="openSS()"><span class="live-dot"></span>Screenshare</button><button class="mods" id="modsBtn" onclick="toggleMods()">Mods</button><button class="props" onclick="openProps()">Properties</button><button class="people" onclick="openPeople()">People</button><button class="backup" onclick="createBackup()">Backup</button><button class="version" onclick="changeServerVersion()">Version</button><button class="icon-upload" onclick="document.getElementById(\'serverIconInput\').click()">Icon</button><button class="delete" onclick="deleteServer()">Delete</button><button id="accessBtn" class="access" onclick="openPeople()">Access</button><input id="serverIconInput" type="file" accept="image/*" style="display:none" onchange="openIconCrop(this)"></div></div><div class="mods-panel" id="modsPanel" style="display:none"></div><div class="console-output" id="consoleOutput"></div><div class="console-input-wrap"><span class="prompt">\u003e</span><input type="text" id="cmdInput" placeholder="Type a command..." onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
-     var accessBtn=document.getElementById('accessBtn');if(accessBtn&&!userInfo.mc_admin)accessBtn.style.display='none';
-     var ssBtn=document.getElementById('ssBtn');if(ssBtn&&(!userInfo||!userInfo.mc_admin))ssBtn.style.display='none';else if(ssBtn)ssStartIdle();
+    wrap.innerHTML=consoleShell(name);
+    var ssBtn=document.getElementById('ssBtn');if(ssBtn)ssStartIdle();
     out=document.getElementById('consoleOutput');
     out.dataset.server=name;
     out.addEventListener('scroll',function(){
       var atBottom=out.scrollHeight-out.scrollTop-out.clientHeight<50;
       autoScroll=atBottom;
     });
-    var lines=d.lines||[];
-    lines.forEach(function(line){appendLine(out,line,false)});
-    lastLineCount=lines.length;
+    (lines||[]).forEach(function(line){appendLine(out,line,false)});
+    if(!viewConsole)appendLine(out,'Console access is not granted for this server.',false);
+    lastLineCount=(lines||[]).length;
     out.scrollTop=out.scrollHeight;
-    document.getElementById('cmdInput').focus();
-    if(userInfo)loadMods();
-  });
+    var input=document.getElementById('cmdInput');
+    if(input&&!input.disabled)input.focus();
+    if(canPriv('mods'))loadMods();
+  }
+  if(viewConsole){
+    fetch('/api/mc/console?name='+encodeURIComponent(name),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
+      render(d.lines||[]);
+    }).catch(function(){render([])});
+  }else{
+    render([]);
+  }
 }
 var modsVisible=false;
 function toggleMods(){
@@ -4227,9 +4686,9 @@ function toggleMods(){
   else{panel.style.display='none';btn.classList.remove('active')}
 }
 function loadMods(){
-  if(!activeServer)return;
+  if(!activeServer||!canPriv('mods'))return;
   fetch('/api/mc/mods?name='+encodeURIComponent(activeServer),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
-    var panel=document.getElementById('modsPanel');if(!panel)return;
+    var panel=document.getElementById('modsPanel');if(!panel||d.error)return;
     var mods=d.mods||[];
     var h='<div class="mods-title">Installed Mods ('+mods.length+')<label>Upload Mod<input type="file" accept=".jar" style="display:none" onchange="uploadMod(this)"></label></div>';
     if(mods.length===0){h+='<div class="no-mods">No mods installed</div>'}
@@ -4242,7 +4701,7 @@ function loadMods(){
 function formatSize(b){if(b>1048576)return(b/1048576).toFixed(1)+'MB';return(b/1024).toFixed(0)+'KB'}
 function uploadMod(input){
   var file=input.files[0];if(!file)return;
-  var fd=new FormData();fd.append('file',file);fd.append('server',activeServer);
+  var fd=new FormData();fd.append('server',activeServer);fd.append('file',file);
   fetch('/api/mc/upload-mod',{method:'POST',body:fd,credentials:'include'}).then(function(r){return r.json()}).then(function(d){
     if(d.error){alert(d.error);return}loadMods();
     var out=document.getElementById('consoleOutput');if(out)appendLine(out,'['+new Date().toTimeString().slice(0,8)+'] Mod installed: '+d.name,false);
@@ -4263,7 +4722,8 @@ function appendLine(out,line,isWs){
   out.appendChild(div);
   if(autoScroll||!isWs){out.scrollTop=out.scrollHeight}
 }
-function escapeHtml(t){var d=document.createElement('div');d.textContent=t;return d.innerHTML}
+function escapeHtml(t){var d=document.createElement('div');d.textContent=t==null?'':String(t);return d.innerHTML}
+function escapeAttr(t){return escapeHtml(t).replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 function connectWS(name){
   if(ws){ws.close();ws=null}
   var proto=location.protocol==='https:'?'wss:':'ws:';
@@ -4277,14 +4737,19 @@ function connectWS(name){
       }
     }catch(e){}
   };
-  ws.onclose=function(){setTimeout(function(){if(activeServer===name&&lastWSServer===name)connectWS(name)},3000)};
+  ws.onclose=function(){setTimeout(function(){if(activeServer===name&&lastWSServer===name&&canPriv('console'))connectWS(name)},3000)};
 }
 function sendCmd(){
   var inp=document.getElementById('cmdInput');
-  if(!inp||!ws)return;
+  if(!inp)return;
   var cmd=inp.value.trim();
   if(!cmd)return;
-  ws.send(JSON.stringify({type:'command',command:cmd}));
+  if(!canPriv('command')){toast('Command access not granted.','error');return}
+  if(ws&&ws.readyState===1){
+    ws.send(JSON.stringify({type:'command',command:cmd}));
+  }else{
+    fetch('/api/mc/command',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer,command:cmd})}).then(function(r){return r.json()}).then(function(d){if(d.error)toast(d.error,'error')});
+  }
   inp.value='';
 }
 function changeServerVersion(){
@@ -4304,7 +4769,7 @@ function deleteServer(){
   var deleting=activeServer;
   fetch('/api/mc/delete',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:deleting})}).then(function(r){return r.json()}).then(function(d){
     if(d.error){alert(d.error);return}
-    if(ws){ws.close();ws=null}activeServer=null;lastWSServer='';loadServers();
+    if(ws){ws.close();ws=null}activeServer=null;lastWSServer='';loadServers();closeFiles();closePeople();
     document.getElementById('consoleWrap').innerHTML='<div class="no-servers" id="noSelect">Select a server</div>';
   });
 }
@@ -4396,9 +4861,10 @@ function stopServer(){
   if(!activeServer)return;
   fetch('/api/mc/stop',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer})}).then(function(r){return r.json()}).then(function(){loadServers()});
 }
-function closeProps(){document.getElementById('propsPanel').style.display='none'}
+function closeFiles(){filesPath='';var panel=document.getElementById('filesPanel');if(panel)panel.style.display='none'}
+var peopleMode='people',peopleGlobal=false;
 var peopleTimer=null,peopleRefreshBusy=false,playerDetailsTimer=null,playerDetailsRefreshBusy=false;
-function closePeople(){if(peopleTimer){clearInterval(peopleTimer);peopleTimer=null}if(playerDetailsTimer){clearInterval(playerDetailsTimer);playerDetailsTimer=null}document.getElementById('peoplePanel').style.display='none'}
+function closePeople(){if(peopleTimer){clearInterval(peopleTimer);peopleTimer=null}if(playerDetailsTimer){clearInterval(playerDetailsTimer);playerDetailsTimer=null}peopleGlobal=false;document.getElementById('peoplePanel').style.display='none'}
 function renderSkinHeads(){
   document.querySelectorAll('.player-head[data-skin]').forEach(function(canvas){
     var image=new Image();image.onload=function(){
@@ -4413,22 +4879,222 @@ function renderSkinHeads(){
 loadVersions();
 loadServers();
 checkAuth();
-function openProps(){
+var filesPath='',filesParentPath='',filesEntries=[],filesCrumbPaths=[],filesEditorPath='',filesEditorKind='',filesEditorData=null;
+function postJson(url,payload){
+  return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(payload)}).then(function(r){return r.json()});
+}
+function openFiles(){
   if(!activeServer)return;
-  fetch('/api/mc/properties?name='+encodeURIComponent(activeServer),{credentials:'include'})
-    .then(r=>r.json()).then(d=>{
-      if(d.properties){
-        buildPropsEditor(d.properties);
-         document.getElementById('propsPanel').style.display='flex';
+  if(!canPriv('files')){toast('File access is not granted for this server.','error');return}
+  filesPath='';filesParentPath='';filesEditorPath='';filesEditorKind='';filesEditorData=null;
+  document.getElementById('filesEditorWrap').style.display='none';
+  document.getElementById('filesPanel').style.display='flex';
+  loadFiles('');
+}
+function loadFiles(path,after){
+  if(!activeServer||!canPriv('files'))return;
+  fetch('/api/mc/files?name='+encodeURIComponent(activeServer)+'&path='+encodeURIComponent(path||''),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
+    if(d.error){toast(d.error,'error');return}
+    filesPath=d.path||'';
+    filesParentPath=d.parent||'';
+    filesEntries=d.entries||[];
+    renderFiles(d);
+    if(typeof after==='function')after(d);
+  });
+}
+function loadFilesParent(){loadFiles(filesParentPath)}
+function loadFilesPathIndex(index){
+  var path=filesCrumbPaths[index];
+  if(path!==undefined)loadFiles(path);
+}
+function enterFolder(index){
+  var entry=filesEntries[index];
+  if(entry&&entry.type==='dir')loadFiles(entry.path);
+}
+function renderFiles(data){
+  var crumb='<button onclick="loadFiles(\'\')">'+escapeHtml(activeServer)+'</button>';
+  filesCrumbPaths=[];
+  var accumulated='';
+  (data.path?data.path.split('/'):[]).forEach(function(part){
+    accumulated=accumulated?accumulated+'/'+part:part;
+    filesCrumbPaths.push(accumulated);
+    crumb+=' <span style="opacity:.35">/</span> <button onclick="loadFilesPathIndex('+(filesCrumbPaths.length-1)+')">'+escapeHtml(part)+'</button>';
+  });
+  var crumbEl=document.getElementById('filesCrumb');
+  if(crumbEl)crumbEl.innerHTML=crumb;
+  var list=document.getElementById('filesList');
+  if(!list)return;
+  if(!filesEntries.length){list.innerHTML='<div class="ban-empty" style="padding:18px">This folder is empty.</div>';return}
+  var h='';
+  if(data.path)h+='<div class="file-row"><span class="ficon">↰</span><button class="fname" onclick="loadFilesParent()">..</button><span class="fmeta">Parent folder</span></div>';
+  filesEntries.forEach(function(entry,index){
+    var icon=entry.type==='dir'?'📁':entry.type==='link'?'🔗':'📄';
+    var meta=entry.type==='dir'?'Folder':entry.type==='link'?'Link':formatSize(entry.size||0);
+    h+='<div class="file-row"><span class="ficon">'+icon+'</span><button class="fname" onclick="'+(entry.type==='dir'?'enterFolder('+index+')':'openFileEntry('+index+')')+'">'+escapeHtml(entry.name)+'</button><span class="fmeta">'+meta+'</span><span class="factions">';
+    if(entry.type==='file')h+='<a href="/api/mc/file-download?name='+encodeURIComponent(activeServer)+'&path='+encodeURIComponent(entry.path)+'">Download</a>';
+    h+='<button onclick="renameFileEntry('+index+')">Rename</button><button onclick="deleteFileEntry('+index+')">Delete</button></span></div>';
+  });
+  list.innerHTML=h;
+}
+function promptNewFolder(){
+  var name=prompt('New folder name:');if(!name)return;
+  var target=filesPath?filesPath+'/'+name.trim():name.trim();
+  postJson('/api/mc/files/folder',{name:activeServer,path:target}).then(function(d){
+    if(d.error){toast(d.error,'error');return}
+    toast('Folder created.');loadFiles(filesPath);
+  });
+}
+function promptNewFile(){
+  var name=prompt('New file name:');if(!name)return;
+  var target=filesPath?filesPath+'/'+name.trim():name.trim();
+  postJson('/api/mc/files/create',{name:activeServer,path:target}).then(function(d){
+    if(d.error){toast(d.error,'error');return}
+    toast('File created.');loadFiles(filesPath,function(){openFileEntryByName(target)});
+  });
+}
+function openFileEntryByName(path){
+  var entry=filesEntries.filter(function(item){return item.path===path})[0];
+  if(entry)openFileEntry(filesEntries.indexOf(entry));
+}
+function uploadFiles(input){
+  if(!input||!input.files||!input.files.length)return;
+  var form=new FormData();
+  form.append('server',activeServer);form.append('path',filesPath);
+  Array.prototype.forEach.call(input.files,function(file){form.append('file',file,file.name)});
+  var count=input.files.length;
+  toast('Uploading '+count+(count===1?' file...':' files...'));
+  fetch('/api/mc/files/upload',{method:'POST',credentials:'include',body:form}).then(function(r){return r.json()}).then(function(d){
+    input.value='';
+    if(d.error){toast(d.error,'error');return}
+    toast('Uploaded '+(d.files||[]).length+' file(s).');loadFiles(filesPath);
+  }).catch(function(){input.value='';toast('Upload failed.','error')});
+}
+function renameFileEntry(index){
+  var entry=filesEntries[index];if(!entry)return;
+  var name=prompt('Rename '+entry.name+' to:',entry.name);
+  if(!name||name===entry.name)return;
+  postJson('/api/mc/files/rename',{name:activeServer,path:entry.path,new_name:name.trim()}).then(function(d){
+    if(d.error){toast(d.error,'error');return}
+    toast('Renamed.');loadFiles(filesPath);
+  });
+}
+function deleteFileEntry(index){
+  var entry=filesEntries[index];if(!entry)return;
+  if(!confirm('Delete '+(entry.type==='dir'?'folder':'file')+' "'+entry.name+'"'+(entry.type==='dir'?' and everything inside it':'')+'? This cannot be undone.'))return;
+  postJson('/api/mc/files/delete',{name:activeServer,path:entry.path}).then(function(d){
+    if(d.error){toast(d.error,'error');return}
+    toast('Deleted.');loadFiles(filesPath);
+  });
+}
+function openFileEntry(index){
+  var entry=filesEntries[index];if(!entry||entry.type==='dir')return;
+  fetch('/api/mc/file?name='+encodeURIComponent(activeServer)+'&path='+encodeURIComponent(entry.path),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
+    if(d.error){toast(d.error,'error');return}
+    filesEditorPath=entry.path;filesEditorKind=d.kind;filesEditorData=d;
+    renderFileEditor(d);
+  });
+}
+function closeFileEditor(){
+  filesEditorPath='';filesEditorKind='';filesEditorData=null;
+  var wrap=document.getElementById('filesEditorWrap');if(wrap){wrap.style.display='none';wrap.innerHTML=''}
+}
+function renderConfigRows(rows){
+  var h='';
+  (rows||[]).forEach(function(row,index){
+    if(row.type==='blank'){h+='<div class="prop-row blank"></div>'}
+    else if(row.type==='comment'){h+='<div class="prop-row comment"><span>'+escapeHtml(row.text)+'</span></div>'}
+    else if(row.type==='raw'){h+='<div class="prop-row raw">'+escapeHtml(row.text)+'</div>'}
+    else{
+      var help=row.help?'<span class="prop-help">'+escapeHtml(row.help)+'</span>':'';
+      h+='<div class="prop-row"><span class="prop-key">'+escapeHtml(row.key)+help+'</span>';
+      if(row.value_type==='bool'){
+        h+='<label class="toggle"><input type="checkbox" data-row="'+index+'" '+(String(row.value).toLowerCase()==='true'?'checked':'')+'><span class="toggle-slider"></span></label>';
+      }else if(row.value_type==='number'){
+        h+='<input type="number" step="any" data-row="'+index+'" value="'+escapeAttr(row.value)+'">';
+      }else{
+        h+='<input type="text" data-row="'+index+'" value="'+escapeAttr(row.value)+'">';
       }
+      h+='</div>';
+    }
+  });
+  return h;
+}
+function renderFileEditor(data){
+  var wrap=document.getElementById('filesEditorWrap');if(!wrap)return;
+  var body='';
+  if(data.kind==='config'){
+    body='<div style="max-height:52vh;overflow:auto;padding-right:4px">'+renderConfigRows(data.rows)+'</div>';
+  }else if(data.kind==='text'){
+    body='<textarea id="fileTextEditor" spellcheck="false">'+escapeHtml(data.content||'')+'</textarea>';
+  }else{
+    body='<div class="ban-empty" style="padding:18px">'+escapeHtml(data.reason||'This file cannot be edited in the browser.')+'</div>';
+  }
+  var save=data.editable?'<button onclick="saveFileEditor()" style="padding:8px 16px;border-radius:8px;border:1px solid rgba(0,220,120,.35);background:rgba(0,220,120,.14);color:#00dc78;font-weight:700;cursor:pointer">Save file</button>':'';
+  wrap.innerHTML='<div class="file-editor"><div class="file-editor-head"><h3>'+escapeHtml(data.path)+'</h3><div style="display:flex;gap:8px;flex-shrink:0">'+
+    '<a href="/api/mc/file-download?name='+encodeURIComponent(activeServer)+'&path='+encodeURIComponent(data.path)+'" style="padding:7px 11px;border-radius:7px;border:1px solid var(--mc-line);color:var(--mc-dim);font-size:11px;font-weight:600;text-decoration:none">Download</a>'+
+    '<button onclick="closeFileEditor()" style="padding:7px 11px;border-radius:7px;border:1px solid var(--mc-line);background:rgba(255,255,255,.03);color:var(--mc-dim);font-size:11px;font-weight:600;cursor:pointer">Close</button>'+
+    save+'</div></div>'+body+'</div>';
+  wrap.style.display='block';
+}
+function saveFileEditor(){
+  if(!filesEditorPath)return;
+  var payload={name:activeServer,path:filesEditorPath};
+  if(filesEditorKind==='config'){
+    var rows=JSON.parse(JSON.stringify(filesEditorData&&filesEditorData.rows||[]));
+    document.querySelectorAll('#filesEditorWrap input[data-row]').forEach(function(input){
+      var row=rows[parseInt(input.dataset.row,10)];
+      if(!row)return;
+      row.value=input.type==='checkbox'?(input.checked?'true':'false'):input.value;
     });
+    payload.rows=rows;
+  }else if(filesEditorKind==='text'){
+    var textarea=document.getElementById('fileTextEditor');
+    payload.content=textarea?textarea.value:'';
+  }else{
+    return;
+  }
+  postJson('/api/mc/file',payload).then(function(d){
+    if(d.error){toast(d.error,'error');return}
+    if(filesEditorData)filesEditorData.size=d.size;
+    toast('Saved '+filesEditorPath);
+  });
 }
 function openPeople(){
   if(!activeServer)return;
+  if(!canPriv('players')){toast('Player access is not granted for this server.','error');return}
+  peopleMode='people';
   if(playerDetailsTimer){clearInterval(playerDetailsTimer);playerDetailsTimer=null}
   currentPlayerName='';
+  var content=document.getElementById('peopleContent');
+  content.dataset.peopleServer='';content.dataset.accessSnapshot='';
   document.getElementById('peoplePanel').style.display='flex';
-  document.getElementById('peopleContent').dataset.peopleServer='';
+  refreshPeople();
+  if(peopleTimer)clearInterval(peopleTimer);
+  peopleTimer=setInterval(refreshPeople,100);
+}
+function openAccess(){
+  if(!activeServer)return;
+  if(!canPriv('access')){toast('Access management is not granted for this server.','error');return}
+  peopleMode='access';
+  peopleGlobal=false;
+  if(playerDetailsTimer){clearInterval(playerDetailsTimer);playerDetailsTimer=null}
+  currentPlayerName='';
+  var content=document.getElementById('peopleContent');
+  content.dataset.peopleServer='';content.dataset.accessSnapshot='';
+  document.getElementById('peoplePanel').style.display='flex';
+  refreshPeople();
+  if(peopleTimer)clearInterval(peopleTimer);
+  peopleTimer=setInterval(refreshPeople,100);
+}
+function openGlobalAccess(){
+  if(!userInfo||!userInfo.mc_admin){toast('Admin only.','error');return}
+  peopleMode='access';
+  peopleGlobal=true;
+  if(playerDetailsTimer){clearInterval(playerDetailsTimer);playerDetailsTimer=null}
+  currentPlayerName='';
+  var content=document.getElementById('peopleContent');
+  content.dataset.peopleServer='';content.dataset.accessSnapshot='';
+  document.getElementById('peoplePanel').style.display='flex';
   refreshPeople();
   if(peopleTimer)clearInterval(peopleTimer);
   peopleTimer=setInterval(refreshPeople,100);
@@ -4443,10 +5109,73 @@ function onlinePlayersHtml(players){
   if(!(players||[]).length)h='<span style="color:#8b949e">No players reported.</span>';
   return h;
 }
-function discordAccessHtml(profiles){
+function myServerPrivileges(){
+  if(userInfo&&userInfo.mc_admin)return MC_PRIVILEGES;
+  var server=serversByName[activeServer];
+  return (server&&server.privileges)||[];
+}
+function privilegeCheckboxes(profile){
+  var selected=profile.privileges||[];
+  var allowed=myServerPrivileges();
+  var h='<div class="priv-grid">';
+  MC_PRIVILEGES.forEach(function(privilege){
+    var blocked=allowed.indexOf(privilege)===-1&&selected.indexOf(privilege)===-1;
+    h+='<label'+(blocked?' title="You do not have this privilege" style="opacity:.45"':'')+'><input type="checkbox" data-access-user="'+profile.id+'" data-privilege="'+privilege+'" '+(selected.indexOf(privilege)!==-1?'checked':'')+' '+(blocked?'disabled':'')+'>'+escapeHtml(MC_PRIVILEGE_LABELS[privilege]||privilege)+'</label>';
+  });
+  return h+'</div>';
+}
+function canTransferOwner(access){
+  if(!userInfo)return false;
+  return !!userInfo.mc_admin || (access&&access.owner===userInfo.id);
+}
+function accessUsersHtml(access){
+  if(!access)return '';
   var h='';
-  (profiles||[]).forEach(function(profile){h+='<div style="display:flex;align-items:center;gap:10px;background:rgba(255,255,255,.04);padding:8px;border-radius:10px">'+(profile.avatar?'<img src="'+profile.avatar+'" style="width:36px;height:36px;border-radius:50%">':'')+'<div style="flex:1"><strong style="color:#fff">'+escapeHtml(profile.username)+'</strong><small style="display:block;color:#8b949e">'+profile.id+'</small></div>'+(userInfo.mc_admin?'<button onclick="removeServerAccess(\''+profile.id+'\')" style="background:none;border:1px solid rgba(239,68,68,.3);color:#f87171;border-radius:6px;padding:5px 8px;cursor:pointer">Remove</button>':'')+'</div>'});
-  if(userInfo.mc_admin)h+='<div style="display:flex;gap:8px;margin-top:14px"><input id="accessUserId" placeholder="Discord user ID" style="flex:1;background:#0d1117;border:1px solid rgba(255,255,255,.1);color:#fff;padding:9px;border-radius:8px"><button onclick="addServerAccess()" style="background:#fbbf24;color:#211600;border:0;border-radius:8px;padding:9px 12px;font-weight:600;cursor:pointer">Add</button></div>';
+  var users=access.users||[];
+  var transfer=canTransferOwner(access);
+  if(!users.length)h+='<div class="ban-empty" style="padding:14px">No one has access yet.</div>';
+  users.forEach(function(profile){
+    var avatar=profile.avatar?'<img class="access-avatar" src="'+escapeAttr(profile.avatar)+'" alt="">':'<span class="access-avatar"></span>';
+    h+='<div class="access-user">'+avatar+'<div class="access-main"><strong>'+escapeHtml(profile.username||profile.id)+'</strong><small>'+escapeHtml(profile.id)+(profile.owner?' · Owner':'')+'</small>';
+    if(profile.owner){
+      h+='<div class="access-actions"><span style="font-size:11px;color:#fbbf24">Full access (owner)</span></div>';
+    }else{
+      h+=privilegeCheckboxes(profile);
+      h+='<div class="access-actions"><button onclick="saveAccessUser(\''+profile.id+'\')">Save privileges</button>'+(transfer?'<button class="gold" onclick="setServerOwner(\''+profile.id+'\')">Make owner</button>':'')+'<button class="danger" onclick="removeServerAccess(\''+profile.id+'\')">Remove</button></div>';
+    }
+    h+='</div></div>';
+  });
+  h+='<div style="display:flex;gap:8px;margin-top:10px"><input id="accessUserId" placeholder="Discord user ID" style="flex:1;background:#0d1117;border:1px solid var(--mc-line);color:#fff;padding:9px;border-radius:8px"><button onclick="addServerAccess()" style="background:#fbbf24;color:#211600;border:0;border-radius:8px;padding:9px 12px;font-weight:600;cursor:pointer">Add user</button></div>';
+  h+='<p style="color:var(--mc-faint);font-size:11px;margin-top:7px">New users inherit the privileges you have; untick anything they should not have, then save.</p>';
+  return h;
+}
+function globalListHtml(title, users, scope, canRemove){
+  var h='<div style="margin-top:12px"><strong style="color:var(--mc-txt);font-size:12.5px">'+escapeHtml(title)+'</strong>';
+  if(!users||!users.length)h+='<div class="ban-empty" style="padding:10px;margin-top:6px">None</div>';
+  (users||[]).forEach(function(profile){
+    h+='<div class="access-user" style="margin-top:6px">'+(profile.avatar?'<img class="access-avatar" src="'+escapeAttr(profile.avatar)+'" alt="">':'<span class="access-avatar"></span>')+'<div class="access-main"><strong>'+escapeHtml(profile.username||profile.id)+'</strong><small>'+escapeHtml(profile.id)+'</small></div>'+(canRemove?'<button onclick="removeGlobalAccess(\''+profile.id+'\',\''+scope+'\')" style="align-self:center;padding:5px 9px;border-radius:6px;border:1px solid rgba(239,68,68,.28);background:rgba(255,255,255,.03);color:#f87171;font-size:11px;font-weight:600;cursor:pointer">Remove</button>':'')+'</div>';
+  });
+  return h+'</div>';
+}
+function globalAccessHtml(global, canGrantAdmin, standalone){
+  if(!global)return '';
+  var h='<div'+(standalone?'':' style="margin-top:28px;border-top:1px solid var(--mc-line);padding-top:18px"')+'><h3 style="color:#fff;font-size:14px;margin-bottom:4px">Global access</h3><p style="color:var(--mc-faint);font-size:11.5px">Global admins can manage every server. The create permission only allows making new servers.</p>';
+  h+=globalListHtml('Global admins',global.admins,'admin',!!canGrantAdmin);
+  h+=globalListHtml('Can create servers',global.create,'create',true);
+  h+='<div style="display:flex;gap:8px;margin-top:12px"><input id="globalUserId" placeholder="Discord user ID" style="flex:1;background:#0d1117;border:1px solid var(--mc-line);color:#fff;padding:9px;border-radius:8px"><select id="globalScope" style="background:#0d1117;border:1px solid var(--mc-line);color:#fff;padding:9px;border-radius:8px"><option value="create">Can create servers</option>'+(canGrantAdmin?'<option value="admin">Global admin</option>':'')+'</select><button onclick="addGlobalAccess()" style="background:#fbbf24;color:#211600;border:0;border-radius:8px;padding:9px 12px;font-weight:600;cursor:pointer">Add</button></div>';
+  return h+'</div>';
+}
+function renderAccessPanel(data, server){
+  var h='<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="color:#fff;font-size:20px">'+escapeHtml(server)+' · Access</h2><button onclick="closePeople()" style="background:none;border:none;color:#8b949e;font-size:24px;cursor:pointer">X</button></div>';
+  h+='<p style="color:var(--mc-faint);font-size:12px;margin:8px 0 16px">Owners have full access automatically. Everyone else only gets the privileges you tick.</p>';
+  h+=accessUsersHtml(data);
+  if(data.is_admin)h+=globalAccessHtml(data.global,data.can_grant_admin);
+  return h;
+}
+function renderGlobalAccessPanel(data){
+  var h='<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="color:#fff;font-size:20px">Global access</h2><button onclick="closePeople()" style="background:none;border:none;color:#8b949e;font-size:24px;cursor:pointer">X</button></div>';
+  h+='<p style="color:var(--mc-faint);font-size:12px;margin:8px 0 16px">Global admins can manage every server. The create permission only allows making new servers.</p>';
+  h+=globalAccessHtml(data,data.can_grant_admin,true);
   return h;
 }
 function bannedPlayersHtml(bans){
@@ -4468,20 +5197,49 @@ function bannedIpsHtml(bans){
   }).join('');
 }
 function refreshPeople(){
-  if(!activeServer||peopleRefreshBusy||currentPlayerName)return;
+  if(peopleRefreshBusy||currentPlayerName)return;
+  if(!peopleGlobal&&!activeServer)return;
   var server=activeServer;
   peopleRefreshBusy=true;
+  if(peopleMode==='access'&&peopleGlobal){
+    fetch('/api/mc/global-access',{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
+      var panel=document.getElementById('peoplePanel');
+      if(!peopleGlobal||!panel||panel.style.display==='none'||currentPlayerName)return;
+      if(d.error){toast(d.error,'error');closePeople();return}
+      var content=document.getElementById('peopleContent');
+      var snapshot=JSON.stringify(d);
+      if(content.dataset.accessSnapshot!==snapshot){
+        content.innerHTML=renderGlobalAccessPanel(d);
+        content.dataset.accessSnapshot=snapshot;
+      }
+    }).catch(function(err){console.error('Global access refresh failed:',err)}).finally(function(){peopleRefreshBusy=false});
+    return;
+  }
+  if(peopleMode==='access'){
+    fetch('/api/mc/permissions?name='+encodeURIComponent(server),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
+      var panel=document.getElementById('peoplePanel');
+      if(server!==activeServer||!panel||panel.style.display==='none'||currentPlayerName)return;
+      if(d.error){toast(d.error,'error');closePeople();return}
+      var content=document.getElementById('peopleContent');
+      var snapshot=JSON.stringify(d);
+      if(content.dataset.accessSnapshot!==snapshot){
+        content.innerHTML=renderAccessPanel(d,server);
+        content.dataset.accessSnapshot=snapshot;
+      }
+    }).catch(function(err){console.error('Access refresh failed:',err)}).finally(function(){peopleRefreshBusy=false});
+    return;
+  }
   fetch('/api/mc/players?name='+encodeURIComponent(server),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
     var panel=document.getElementById('peoplePanel');
     if(server!==activeServer||!panel||panel.style.display==='none'||currentPlayerName)return;
-    if(d.error){alert(d.error);closePeople();return}
+    if(d.error){toast(d.error,'error');closePeople();return}
     var content=document.getElementById('peopleContent');
-    var players=d.players||[],profiles=d.profiles||[],bannedPlayers=d.banned_players||[],bannedIps=d.banned_ips||[];
-    var playerSnapshot=JSON.stringify(players),profileSnapshot=JSON.stringify(profiles),bannedPlayersSnapshot=JSON.stringify(bannedPlayers),bannedIpsSnapshot=JSON.stringify(bannedIps);
-    var online=document.getElementById('onlinePlayers'),access=document.getElementById('discordAccess'),playerBans=document.getElementById('bannedPlayers'),ipBans=document.getElementById('bannedIps');
-    if(content.dataset.peopleServer===server&&online&&access&&playerBans&&ipBans){
+    var players=d.players||[],bannedPlayers=d.banned_players||[],bannedIps=d.banned_ips||[],access=d.access||null;
+    var playerSnapshot=JSON.stringify(players),bannedPlayersSnapshot=JSON.stringify(bannedPlayers),bannedIpsSnapshot=JSON.stringify(bannedIps),accessSnapshot=JSON.stringify(access);
+    var online=document.getElementById('onlinePlayers'),accessEl=document.getElementById('discordAccess'),playerBans=document.getElementById('bannedPlayers'),ipBans=document.getElementById('bannedIps');
+    if(content.dataset.peopleServer===server&&online&&playerBans&&ipBans&&(accessEl||!access)){
       if(online.dataset.snapshot!==playerSnapshot){online.innerHTML=onlinePlayersHtml(players);online.dataset.snapshot=playerSnapshot;renderSkinHeads()}
-      if(access.dataset.snapshot!==profileSnapshot){access.innerHTML=discordAccessHtml(profiles);access.dataset.snapshot=profileSnapshot}
+      if(accessEl&&accessEl.dataset.snapshot!==accessSnapshot){accessEl.innerHTML=accessUsersHtml(access);accessEl.dataset.snapshot=accessSnapshot}
       if(playerBans.dataset.snapshot!==bannedPlayersSnapshot){playerBans.innerHTML=bannedPlayersHtml(bannedPlayers);playerBans.dataset.snapshot=bannedPlayersSnapshot}
       if(ipBans.dataset.snapshot!==bannedIpsSnapshot){ipBans.innerHTML=bannedIpsHtml(bannedIps);ipBans.dataset.snapshot=bannedIpsSnapshot}
       var playerCount=document.getElementById('bannedPlayerCount'),ipCount=document.getElementById('bannedIpCount');
@@ -4491,12 +5249,12 @@ function refreshPeople(){
     }
     var h='<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="color:#fff;font-size:20px">'+escapeHtml(server)+'</h2><button onclick="closePeople()" style="background:none;border:none;color:#8b949e;font-size:24px;cursor:pointer">X</button></div>';
     h+='<p style="color:#8b949e;font-size:12px;margin:8px 0 20px">All players <span style="color:#00dc78">Live · 0.1s</span></p><div id="onlinePlayers" style="display:flex;flex-wrap:wrap;gap:10px"></div>';
-    h+='<p style="color:#8b949e;font-size:12px;margin:24px 0 10px">Discord access</p><div id="discordAccess" style="display:grid;gap:8px"></div>';
+    if(access)h+='<div style="display:flex;justify-content:space-between;align-items:center;margin:24px 0 10px"><p style="color:#8b949e;font-size:12px">Discord access</p><button onclick="openAccess()" style="background:none;border:1px solid var(--mc-line);color:var(--mc-accent);border-radius:7px;padding:4px 9px;font-size:11px;font-weight:600;cursor:pointer">Manage</button></div><div id="discordAccess" style="display:grid;gap:8px"></div>';
     h+='<section class="ban-section"><h3>Banned players <span id="bannedPlayerCount">'+bannedPlayers.length+'</span></h3><div id="bannedPlayers" class="ban-list"></div></section>';
     h+='<section class="ban-section"><h3>Banned IPs <span id="bannedIpCount">'+bannedIps.length+'</span></h3><div id="bannedIps" class="ban-list"></div></section>';
-    content.innerHTML=h;content.dataset.peopleServer=server;
+    content.innerHTML=h;content.dataset.peopleServer=server;content.dataset.accessSnapshot='';
     online=document.getElementById('onlinePlayers');online.innerHTML=onlinePlayersHtml(players);online.dataset.snapshot=playerSnapshot;
-    access=document.getElementById('discordAccess');access.innerHTML=discordAccessHtml(profiles);access.dataset.snapshot=profileSnapshot;
+    if(access){accessEl=document.getElementById('discordAccess');accessEl.innerHTML=accessUsersHtml(access);accessEl.dataset.snapshot=accessSnapshot}
     playerBans=document.getElementById('bannedPlayers');playerBans.innerHTML=bannedPlayersHtml(bannedPlayers);playerBans.dataset.snapshot=bannedPlayersSnapshot;
     ipBans=document.getElementById('bannedIps');ipBans.innerHTML=bannedIpsHtml(bannedIps);ipBans.dataset.snapshot=bannedIpsSnapshot;
     renderSkinHeads();
@@ -4581,54 +5339,79 @@ function unbanServerItem(type,target){
   if(!confirm('Unban '+target+'?'))return;
   fetch('/api/mc/unban',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({server:activeServer,type:type,target:target})}).then(function(r){return r.json()}).then(function(d){if(d.error){alert(d.error);return}refreshPeople()}).catch(function(){alert('Could not unban '+target+'.')});
 }
+function saveAccessUser(userId){
+  var selected=[];
+  document.querySelectorAll('input[data-access-user="'+userId+'"]').forEach(function(input){
+    if(input.checked)selected.push(input.dataset.privilege);
+  });
+  if(!selected.length){toast('Choose at least one privilege.','error');return}
+  postJson('/api/mc/permissions',{name:activeServer,user_id:userId,privileges:selected}).then(function(d){
+    if(d.error){toast(d.error,'error');return}
+    toast('Privileges saved.');refreshPeople();
+  });
+}
 function addServerAccess(){
   var input=document.getElementById('accessUserId');if(!input||!input.value.trim())return;
-  fetch('/api/mc/permissions',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer,user_id:input.value.trim()})}).then(function(r){return r.json()}).then(function(d){if(d.error){alert(d.error);return}openPeople()});
+  var privileges=myServerPrivileges().slice();
+  if(!privileges.length){toast('You have no privileges to grant.','error');return}
+  postJson('/api/mc/permissions',{name:activeServer,user_id:input.value.trim(),privileges:privileges}).then(function(d){
+    if(d.error){toast(d.error,'error');return}
+    toast('Access granted.');refreshPeople();
+  });
 }
 function removeServerAccess(userId){
-  fetch('/api/mc/permissions',{method:'DELETE',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer,user_id:userId})}).then(function(){openPeople()});
+  if(!confirm('Remove access for this user?'))return;
+  fetch('/api/mc/permissions',{method:'DELETE',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer,user_id:userId})}).then(function(r){return r.json()}).then(function(d){
+    if(d.error){toast(d.error,'error');return}
+    toast('Access removed.');refreshPeople();
+  });
 }
-function buildPropsEditor(props){
-  propsCache=JSON.parse(JSON.stringify(props||{}));
-  var html='<h3 style="color:#00dc78;margin-bottom:12px">Server Properties</h3>';
-  for(var k in props){
-    var p=props[k];
-    if(p.type==='bool'){
-      html+='<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:rgba(13,17,23,.6);border-radius:8px;margin-bottom:6px;border:1px solid rgba(0,220,120,.1)">';
-      html+='<span style="color:#c9d1d9;font-size:13px">'+k+'</span>';
-      html+='<label class="toggle"><input type="checkbox" '+(p.value==='true'?'checked':'')+' onchange="setProp(\''+k+'\',this.checked)"><span class="toggle-slider"></span></label>';
-      html+='</div>';
-    } else if(p.type==='number'){
-      html+='<div style="margin-bottom:6px"><label style="color:#8b949e;font-size:12px">'+k+'</label>';
-      html+='<input type="number" value="'+p.value+'" style="width:100%;background:#0d1117;border:1px solid rgba(255,255,255,.06);color:#c9d1d9;padding:6px 10px;border-radius:6px;font-size:13px;margin-top:4px;outline:none" onchange="setProp(\''+k+'\',this.value)" oninput="this.value=this.value.replace(/[^0-9\-.]/g,\'\')"></div>';
-    } else {
-      html+='<div style="margin-bottom:6px"><label style="color:#8b949e;font-size:12px">'+k+'</label>';
-      html+='<input type="text" value="'+p.value+'" style="width:100%;background:#0d1117;border:1px solid rgba(255,255,255,.06);color:#c9d1d9;padding:6px 10px;border-radius:6px;font-size:13px;margin-top:4px;outline:none" onchange="setProp(\''+k+'\',this.value)"></div>';
-    }
-  }
-  html+='<button onclick="saveProps()" style="margin-top:12px;width:100%;background:#00dc78;color:#050508;padding:10px;border:none;border-radius:8px;font-weight:600;cursor:pointer">Save Properties</button>';
-  document.getElementById('propsContent').innerHTML=html;
+function setServerOwner(userId){
+  if(!confirm('Make this user the owner? They will have full access.'))return;
+  postJson('/api/mc/permissions/owner',{name:activeServer,user_id:userId}).then(function(d){
+    if(d.error){toast(d.error,'error');return}
+    toast('Ownership transferred.');refreshPeople();
+  });
 }
-function setProp(k,v){
-  if(typeof v==='boolean'){
-    propsCache[k].value=v?'true':'false';
-  } else {
-    propsCache[k].value=v;
-  }
+function addGlobalAccess(){
+  var input=document.getElementById('globalUserId');
+  var scope=document.getElementById('globalScope');
+  if(!input||!input.value.trim())return;
+  postJson('/api/mc/global-access',{user_id:input.value.trim(),scope:scope?scope.value:'create',action:'add'}).then(function(d){
+    if(d.error){toast(d.error,'error');return}
+    toast('Global access granted.');refreshPeople();
+  });
 }
-var propsCache={};
-function saveProps(){
-  if(!activeServer)return;
-  fetch('/api/mc/properties',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer,properties:propsCache})})
-    .then(r=>r.json()).then(d=>{if(d.ok)alert('Saved!')});
+function removeGlobalAccess(userId,scope){
+  if(!confirm('Remove this global permission?'))return;
+  postJson('/api/mc/global-access',{user_id:userId,scope:scope,action:'remove'}).then(function(d){
+    if(d.error){toast(d.error,'error');return}
+    toast('Global permission removed.');refreshPeople();
+  });
 }
 </script>
-<div id="propsPanel" style="display:none;position:fixed;inset:0;width:auto;height:auto;flex-direction:column;background:rgba(5,5,8,.98);z-index:200;overflow-y:auto;padding:28px;backdrop-filter:blur(12px)">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-    <h2 style="color:#fff;font-size:16px">Server Properties</h2>
-    <button onclick="closeProps()" style="background:none;border:none;color:#8b949e;font-size:20px;cursor:pointer">Back to Console</button>
+<div id="filesPanel" style="display:none;position:fixed;inset:0;width:auto;height:auto;flex-direction:column;background:rgba(5,5,8,.98);z-index:200;overflow-y:auto;padding:28px;backdrop-filter:blur(12px)">
+  <div class="files-shell">
+    <div class="files-head">
+      <div>
+        <h2 id="filesTitle">Files</h2>
+        <div class="files-crumb" id="filesCrumb"></div>
+      </div>
+      <div style="display:flex;gap:8px;flex-shrink:0">
+        <button onclick="loadFiles(filesPath)" style="padding:8px 12px;border-radius:8px;border:1px solid var(--mc-line);background:rgba(255,255,255,.04);color:var(--mc-txt);font-size:12px;font-weight:600;cursor:pointer">Refresh</button>
+        <button onclick="closeFiles()" style="padding:8px 12px;border-radius:8px;border:1px solid var(--mc-line);background:rgba(255,255,255,.04);color:var(--mc-dim);font-size:12px;font-weight:600;cursor:pointer">Close</button>
+      </div>
+    </div>
+    <div class="files-toolbar">
+      <button class="primary" onclick="promptNewFolder()">+ Folder</button>
+      <button class="primary" onclick="promptNewFile()">+ File</button>
+      <label for="fileUploadInput">Upload files</label>
+      <input id="fileUploadInput" type="file" multiple style="display:none" onchange="uploadFiles(this)">
+    </div>
+    <p style="color:var(--mc-faint);font-size:11px;margin:0">Text and config files up to 2 MB can be edited in place; uploads are limited to 1 GB per file.</p>
+    <div class="files-list" id="filesList"></div>
+    <div id="filesEditorWrap" style="display:none"></div>
   </div>
-  <div id="propsContent"></div>
 </div>
 <div id="peoplePanel" style="display:none;position:fixed;inset:0;width:auto;height:auto;flex-direction:column;background:rgba(5,5,8,.98);z-index:200;overflow-y:auto;padding:28px;backdrop-filter:blur(12px)">
   <div id="peopleContent" style="max-width:900px;width:100%;margin:0 auto"></div>
@@ -4788,7 +5571,7 @@ function ssSeedFromPip(){
 }
 
 function openSS(){
-  if(!userInfo||!userInfo.mc_admin){toast('Admin only.','error');return}
+  if(!userInfo||!userInfo.mc_owner){toast('Owner only.','error');return}
   document.getElementById('ssOverlay').classList.add('open');
   ssOpen=true;
   ssSeedFromPip();
@@ -4898,7 +5681,7 @@ function ssStartIdle(){
 function ssStopIdle(){if(ssIdleTimer){clearInterval(ssIdleTimer);ssIdleTimer=null}}
 function ssIdleTick(){
   if(ssOpen)return;
-  if(!userInfo||!userInfo.mc_admin)return;
+  if(!userInfo||!userInfo.mc_owner)return;
   fetch('/api/screencast/frame',{credentials:'include',cache:'no-store'}).then(function(r){
     if(!r.ok)throw 0;return r.blob();
   }).then(function(b){
@@ -4912,7 +5695,7 @@ function ssIdleTick(){
 /* boot */
 ssBindInput();
 setTimeout(function(){
-  if(userInfo&&userInfo.mc_admin){
+  if(userInfo&&userInfo.mc_owner){
     fetch('/api/screencast/status',{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
       if(d.available)ssStartIdle();
     }).catch(function(){});
@@ -4942,63 +5725,484 @@ async def handle_mc_page(request):
     return resp
 
 
-def _parse_properties(server_dir):
-    props_path = os.path.join(server_dir, "server.properties")
-    props = {}
-    if os.path.exists(props_path):
-        with open(props_path, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" in line:
-                    k, v = line.split("=", 1)
-                    k = k.strip()
-                    v = v.strip()
-                    if v.lower() in ("true", "false"):
-                        props[k] = {"value": v, "type": "bool"}
-                    else:
-                        try:
-                            int(v)
-                            props[k] = {"value": v, "type": "number"}
-                        except ValueError:
-                            try:
-                                float(v)
-                                props[k] = {"value": v, "type": "number"}
-                            except ValueError:
-                                props[k] = {"value": v, "type": "string"}
-    return props
+# ---------------------------------------------------------------------------
+# Server file manager
+#
+# Every path is relative to the server folder and is resolved through
+# realpath() so symlinks cannot escape the sandbox. Config-like files are
+# returned as rows (bool/number/string) with `#` comments surfaced as help.
+# ---------------------------------------------------------------------------
+MC_FILE_EDIT_LIMIT = 2 * 1024 * 1024
+MC_FILE_UPLOAD_LIMIT = 1024 * 1024 * 1024
 
-def _save_properties(server_dir, props):
-    props_path = os.path.join(server_dir, "server.properties")
-    with open(props_path, "w") as f:
-        for k, v in props.items():
-            f.write(f"{k}={v['value']}\n")
+def _mc_clean_rel_path(value):
+    text = str(value or "").replace("\\", "/").strip()
+    if text.startswith("/"):
+        return None
+    parts = []
+    for part in text.split("/"):
+        if part in ("", "."):
+            continue
+        if part == ".." or "\x00" in part or ":" in part:
+            return None
+        parts.append(part)
+    return "/".join(parts)
 
-async def mc_api_properties(request):
+def _mc_resolve_server_path(server_dir, rel_path):
+    rel_path = _mc_clean_rel_path(rel_path)
+    if rel_path is None:
+        return None
+    root = os.path.realpath(server_dir)
+    target = os.path.realpath(os.path.join(root, rel_path)) if rel_path else root
+    try:
+        if os.path.commonpath([root, target]) != root:
+            return None
+    except ValueError:
+        return None
+    return target
+
+def _mc_join_rel_path(parent, name):
+    return f"{parent}/{name}" if parent else name
+
+def _mc_detect_value_type(value):
+    text = str(value).strip()
+    if text.lower() in ("true", "false"):
+        return "bool"
+    if re.fullmatch(r"-?\d+(?:\.\d+)?", text):
+        return "number"
+    return "string"
+
+def _mc_split_inline_comment(value):
+    match = re.search(r"\s#", value)
+    if not match:
+        return value.rstrip(), ""
+    return value[:match.start()].rstrip(), value[match.end():].strip()
+
+def _mc_parse_config_rows(text):
+    rows = []
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            rows.append({"type": "blank"})
+        elif stripped.startswith("#"):
+            rows.append({"type": "comment", "text": stripped})
+        elif "=" in raw_line:
+            key, value = raw_line.split("=", 1)
+            value, help_text = _mc_split_inline_comment(value.strip())
+            rows.append({
+                "type": "property",
+                "key": key.strip(),
+                "value": value,
+                "value_type": _mc_detect_value_type(value),
+                "help": help_text,
+            })
+        else:
+            rows.append({"type": "raw", "text": raw_line})
+    return rows
+
+def _mc_serialize_config_rows(rows):
+    if not isinstance(rows, list):
+        raise ValueError("Invalid property rows")
+    lines = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        kind = row.get("type")
+        if kind == "blank":
+            lines.append("")
+        elif kind == "comment":
+            text = str(row.get("text", "")).strip()
+            if text and not text.startswith("#"):
+                text = "# " + text
+            if "\n" in text or "\r" in text:
+                raise ValueError("Comments cannot contain newlines")
+            lines.append(text)
+        elif kind == "raw":
+            text = str(row.get("text", ""))
+            if "\n" in text or "\r" in text:
+                raise ValueError("Lines cannot contain newlines")
+            lines.append(text)
+        elif kind == "property":
+            key = str(row.get("key", "")).strip()
+            value = str(row.get("value", "")).strip()
+            help_text = str(row.get("help", "")).strip()
+            if not key or "=" in key or "\n" in key or "\r" in key:
+                raise ValueError("Property names cannot be empty or contain '='")
+            if "\n" in value or "\r" in value:
+                raise ValueError("Property values cannot contain newlines")
+            line = f"{key}={value}"
+            if help_text:
+                line += " # " + help_text.replace("\n", " ").replace("\r", " ")
+            lines.append(line)
+    return "\n".join(lines) + ("\n" if lines else "")
+
+def _mc_config_like(path, rows, text):
+    extension = os.path.splitext(path)[1].lower()
+    if extension in (".properties", ".conf", ".cfg", ".ini", ".env", ".toml"):
+        return True
+    if len(text) > 512 * 1024:
+        return False
+    property_rows = [row for row in rows if row.get("type") == "property"]
+    other_rows = [row for row in rows if row.get("type") not in ("property", "comment", "blank")]
+    return bool(property_rows) and not other_rows
+
+def _mc_file_entry(abs_path, rel_path):
+    try:
+        is_link = os.path.islink(abs_path)
+        is_dir = os.path.isdir(abs_path) and not is_link
+        info = os.lstat(abs_path)
+        return {
+            "name": os.path.basename(abs_path),
+            "path": rel_path,
+            "type": "link" if is_link else ("dir" if is_dir else "file"),
+            "size": 0 if is_dir or is_link else int(info.st_size),
+            "modified": float(info.st_mtime),
+        }
+    except OSError:
+        return None
+
+def _mc_remove_uploads(files):
+    for item in files:
+        temp_path = item.get("temp") if isinstance(item, dict) else None
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+async def mc_api_files(request):
     name = request.query.get("name", "")
-    if not _can_access_mc_server(request, name):
+    if not _mc_can(request, name, "files"):
         return web.json_response({"error": "unauthorized"}, status=401)
     server_dir = _mc_safe_server_dir(name)
     if not server_dir:
         return web.json_response({"error": "Server not found"}, status=404)
-    props_path = os.path.join(server_dir, "server.properties")
-    if not os.path.exists(props_path):
-        return web.json_response({"error": "server.properties not found"}, status=404)
-    props = _parse_properties(server_dir)
-    return web.json_response({"properties": props})
+    rel_path = _mc_clean_rel_path(request.query.get("path", ""))
+    if rel_path is None:
+        return web.json_response({"error": "Invalid path"}, status=400)
+    target = _mc_resolve_server_path(server_dir, rel_path)
+    if not target or not os.path.isdir(target):
+        return web.json_response({"error": "Folder not found"}, status=404)
+    entries = []
+    try:
+        with os.scandir(target) as iterator:
+            for item in iterator:
+                entry = _mc_file_entry(item.path, _mc_join_rel_path(rel_path, item.name))
+                if entry:
+                    entries.append(entry)
+    except OSError as e:
+        return web.json_response({"error": str(e)}, status=500)
+    entries.sort(key=lambda entry: (entry["type"] != "dir", entry["name"].lower()))
+    parent = "/".join(rel_path.split("/")[:-1]) if rel_path else ""
+    return web.json_response({"path": rel_path, "parent": parent, "entries": entries})
 
-async def mc_api_set_properties(request):
-    data = await request.json()
-    name = data.get("name", "")
-    if not _can_access_mc_server(request, name):
+async def mc_api_file_read(request):
+    name = request.query.get("name", "")
+    rel_path = _mc_clean_rel_path(request.query.get("path", ""))
+    if not _mc_can(request, name, "files"):
         return web.json_response({"error": "unauthorized"}, status=401)
+    if rel_path is None or not rel_path:
+        return web.json_response({"error": "Invalid path"}, status=400)
     server_dir = _mc_safe_server_dir(name)
     if not server_dir:
         return web.json_response({"error": "Server not found"}, status=404)
-    props = data.get("properties", {})
-    _save_properties(server_dir, props)
+    target = _mc_resolve_server_path(server_dir, rel_path)
+    if not target or not os.path.isfile(target):
+        return web.json_response({"error": "File not found"}, status=404)
+    size = os.path.getsize(target)
+    result = {
+        "path": rel_path,
+        "name": os.path.basename(target),
+        "size": size,
+        "editable": False,
+        "kind": "binary",
+    }
+    if size > MC_FILE_EDIT_LIMIT:
+        result["reason"] = "File is larger than 2 MB. Download it instead."
+        return web.json_response(result)
+    try:
+        with open(target, "rb") as f:
+            data = f.read(MC_FILE_EDIT_LIMIT + 1)
+    except OSError as e:
+        return web.json_response({"error": str(e)}, status=500)
+    if len(data) > MC_FILE_EDIT_LIMIT:
+        result["reason"] = "File is larger than 2 MB. Download it instead."
+        return web.json_response(result)
+    if b"\x00" in data:
+        result["reason"] = "This is a binary file. Download it instead."
+        return web.json_response(result)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        result["reason"] = "This file is not valid UTF-8. Download it instead."
+        return web.json_response(result)
+    rows = _mc_parse_config_rows(text)
+    config_like = _mc_config_like(target, rows, text)
+    result.update({
+        "editable": True,
+        "kind": "config" if config_like else "text",
+        "content": text,
+        "rows": rows if config_like else None,
+    })
+    return web.json_response(result)
+
+async def mc_api_file_save(request):
+    data = await request.json()
+    name = str(data.get("name", "")).strip()
+    rel_path = _mc_clean_rel_path(data.get("path", ""))
+    if not _mc_can(request, name, "files"):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if rel_path is None or not rel_path:
+        return web.json_response({"error": "Invalid path"}, status=400)
+    server_dir = _mc_safe_server_dir(name)
+    if not server_dir:
+        return web.json_response({"error": "Server not found"}, status=404)
+    target = _mc_resolve_server_path(server_dir, rel_path)
+    if not target:
+        return web.json_response({"error": "Invalid path"}, status=400)
+    if os.path.isdir(target):
+        return web.json_response({"error": "That path is a folder"}, status=400)
+    try:
+        if "rows" in data:
+            text = _mc_serialize_config_rows(data.get("rows"))
+        elif "content" in data:
+            text = str(data.get("content", ""))
+        else:
+            return web.json_response({"error": "Nothing to save"}, status=400)
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    encoded = text.encode("utf-8")
+    if len(encoded) > MC_FILE_EDIT_LIMIT:
+        return web.json_response({"error": "File is larger than 2 MB"}, status=413)
+    parent = os.path.dirname(target)
+    if not os.path.isdir(parent):
+        return web.json_response({"error": "Parent folder not found"}, status=404)
+    temp_path = os.path.join(parent, f".mc-save-{uuid.uuid4().hex}.tmp")
+    try:
+        with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        os.replace(temp_path, target)
+    except OSError as e:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        return web.json_response({"error": str(e)}, status=500)
+    return web.json_response({"ok": True, "size": len(encoded)})
+
+async def mc_api_create_folder(request):
+    data = await request.json()
+    name = str(data.get("name", "")).strip()
+    rel_path = _mc_clean_rel_path(data.get("path", ""))
+    if not _mc_can(request, name, "files"):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if rel_path is None or not rel_path:
+        return web.json_response({"error": "Invalid folder name"}, status=400)
+    server_dir = _mc_safe_server_dir(name)
+    if not server_dir:
+        return web.json_response({"error": "Server not found"}, status=404)
+    target = _mc_resolve_server_path(server_dir, rel_path)
+    if not target:
+        return web.json_response({"error": "Invalid folder name"}, status=400)
+    if os.path.exists(target):
+        return web.json_response({"error": "Something with that name already exists"}, status=409)
+    if not os.path.isdir(os.path.dirname(target)):
+        return web.json_response({"error": "Parent folder not found"}, status=404)
+    try:
+        os.mkdir(target)
+    except OSError as e:
+        return web.json_response({"error": str(e)}, status=500)
+    return web.json_response({"ok": True, "entry": _mc_file_entry(target, rel_path)})
+
+async def mc_api_create_file(request):
+    data = await request.json()
+    name = str(data.get("name", "")).strip()
+    rel_path = _mc_clean_rel_path(data.get("path", ""))
+    if not _mc_can(request, name, "files"):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if rel_path is None or not rel_path:
+        return web.json_response({"error": "Invalid file name"}, status=400)
+    server_dir = _mc_safe_server_dir(name)
+    if not server_dir:
+        return web.json_response({"error": "Server not found"}, status=404)
+    target = _mc_resolve_server_path(server_dir, rel_path)
+    if not target:
+        return web.json_response({"error": "Invalid file name"}, status=400)
+    if os.path.exists(target):
+        return web.json_response({"error": "Something with that name already exists"}, status=409)
+    if not os.path.isdir(os.path.dirname(target)):
+        return web.json_response({"error": "Parent folder not found"}, status=404)
+    content = str(data.get("content", ""))
+    if len(content.encode("utf-8")) > MC_FILE_EDIT_LIMIT:
+        return web.json_response({"error": "File is larger than 2 MB"}, status=413)
+    try:
+        with open(target, "x", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+    except OSError as e:
+        return web.json_response({"error": str(e)}, status=500)
+    return web.json_response({"ok": True, "entry": _mc_file_entry(target, rel_path)})
+
+async def mc_api_rename_file(request):
+    data = await request.json()
+    name = str(data.get("name", "")).strip()
+    rel_path = _mc_clean_rel_path(data.get("path", ""))
+    new_name = str(data.get("new_name", "")).strip()
+    if not _mc_can(request, name, "files"):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if rel_path is None or not rel_path or not new_name:
+        return web.json_response({"error": "Invalid path"}, status=400)
+    if "/" in new_name or "\\" in new_name or new_name in (".", "..") or "\x00" in new_name or ":" in new_name:
+        return web.json_response({"error": "Invalid new name"}, status=400)
+    server_dir = _mc_safe_server_dir(name)
+    if not server_dir:
+        return web.json_response({"error": "Server not found"}, status=404)
+    target = _mc_resolve_server_path(server_dir, rel_path)
+    if not target or not os.path.exists(target):
+        return web.json_response({"error": "File or folder not found"}, status=404)
+    parent_rel = "/".join(rel_path.split("/")[:-1])
+    new_rel = _mc_join_rel_path(parent_rel, new_name)
+    new_target = _mc_resolve_server_path(server_dir, new_rel)
+    if not new_target:
+        return web.json_response({"error": "Invalid new name"}, status=400)
+    if os.path.exists(new_target):
+        return web.json_response({"error": "Something with that name already exists"}, status=409)
+    try:
+        os.rename(target, new_target)
+    except OSError as e:
+        return web.json_response({"error": str(e)}, status=500)
+    return web.json_response({"ok": True, "entry": _mc_file_entry(new_target, new_rel)})
+
+async def mc_api_delete_file(request):
+    data = await request.json()
+    name = str(data.get("name", "")).strip()
+    rel_path = _mc_clean_rel_path(data.get("path", ""))
+    if not _mc_can(request, name, "files"):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if rel_path is None or not rel_path:
+        return web.json_response({"error": "Invalid path"}, status=400)
+    server_dir = _mc_safe_server_dir(name)
+    if not server_dir:
+        return web.json_response({"error": "Server not found"}, status=404)
+    target = _mc_resolve_server_path(server_dir, rel_path)
+    if not target or not os.path.exists(target):
+        return web.json_response({"error": "File or folder not found"}, status=404)
+    try:
+        if os.path.isdir(target) and not os.path.islink(target):
+            shutil.rmtree(target)
+        else:
+            os.remove(target)
+    except OSError as e:
+        return web.json_response({"error": str(e)}, status=500)
     return web.json_response({"ok": True})
+
+async def mc_api_upload_files(request):
+    reader = await request.multipart()
+    server_name = None
+    server_dir = None
+    rel_path = None
+    path_seen = False
+    target_dir = None
+    files = []
+
+    def fail(status, message):
+        _mc_remove_uploads(files)
+        return web.json_response({"error": message}, status=status)
+
+    def resolve_target():
+        nonlocal target_dir
+        if target_dir is None and server_dir is not None and path_seen:
+            target_dir = _mc_resolve_server_path(server_dir, rel_path)
+        return target_dir
+
+    try:
+        while True:
+            part = await reader.next()
+            if not part:
+                break
+            if part.name == "server":
+                server_name = (await part.read()).decode(errors="replace").strip()
+                # Authorize before any file bytes are written to disk.
+                if not _mc_can(request, server_name, "files"):
+                    return fail(401, "unauthorized")
+                server_dir = _mc_safe_server_dir(server_name)
+                if not server_dir:
+                    return fail(404, "Server not found")
+            elif part.name == "path":
+                path_seen = True
+                rel_path = _mc_clean_rel_path((await part.read()).decode(errors="replace").strip() or "")
+                if rel_path is None:
+                    return fail(400, "Invalid path")
+                target_dir = None
+            elif part.name == "file":
+                if not server_dir or not path_seen:
+                    raise ValueError("Send the server and path before the files")
+                if not resolve_target() or not os.path.isdir(target_dir):
+                    return fail(404, "Folder not found")
+                filename = os.path.basename(part.filename or "").strip()
+                if not filename or filename in (".", "..") or ":" in filename or "\x00" in filename:
+                    return fail(400, "Invalid file name")
+                if len(files) >= 50:
+                    raise ValueError("Upload at most 50 files at a time")
+                temp_path = os.path.join(MC_DIR, f".file-upload-{uuid.uuid4().hex}.tmp")
+                total = 0
+                try:
+                    with open(temp_path, "wb") as temp_file:
+                        while True:
+                            chunk = await part.read_chunk(1024 * 1024)
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                            if total > MC_FILE_UPLOAD_LIMIT:
+                                raise ValueError("Each file must be smaller than 1 GB")
+                            temp_file.write(chunk)
+                except Exception:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    raise
+                files.append({"name": filename, "temp": temp_path, "size": total})
+    except ValueError as e:
+        return fail(400, str(e))
+    except Exception as e:
+        return fail(400, str(e))
+
+    if not server_dir:
+        return fail(400, "Missing server")
+    if not path_seen:
+        return fail(400, "Missing path")
+    if not resolve_target() or not os.path.isdir(target_dir):
+        return fail(404, "Folder not found")
+    written = []
+    for item in files:
+        destination = os.path.join(target_dir, item["name"])
+        if not _mc_resolve_server_path(server_dir, _mc_join_rel_path(rel_path, item["name"])):
+            return fail(400, f"Invalid file name: {item['name']}")
+        try:
+            os.replace(item["temp"], destination)
+        except OSError as e:
+            return fail(500, str(e))
+        written.append({
+            "name": item["name"],
+            "path": _mc_join_rel_path(rel_path, item["name"]),
+            "size": item["size"],
+        })
+    return web.json_response({"ok": True, "files": written})
+
+async def mc_api_file_download(request):
+    name = request.query.get("name", "")
+    rel_path = _mc_clean_rel_path(request.query.get("path", ""))
+    if not _mc_can(request, name, "files"):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if rel_path is None or not rel_path:
+        return web.json_response({"error": "Invalid path"}, status=400)
+    server_dir = _mc_safe_server_dir(name)
+    if not server_dir:
+        return web.json_response({"error": "Server not found"}, status=404)
+    target = _mc_resolve_server_path(server_dir, rel_path)
+    if not target or not os.path.isfile(target):
+        return web.json_response({"error": "File not found"}, status=404)
+    filename = re.sub(r"[^A-Za-z0-9._ -]", "_", os.path.basename(target)) or "file"
+    return web.FileResponse(target, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 # ==========================================
 #      SCREENCAST (LIVE PC VIEW)
@@ -5008,7 +6212,7 @@ async def mc_api_set_properties(request):
 #    up to SCREENCAST_MAX_FPS.
 #  - When nobody is watching it takes a single screenshot every 30 seconds so the
 #    preview thumbnail stays fresh without wasting CPU.
-# Admin-only (BOT_OWNER_ID / MC_OWNER_ID).
+# Bot-owner only (BOT_OWNER_ID); global MC admins cannot view or control the PC.
 
 SCREENCAST_IDLE_INTERVAL = 30.0
 SCREENCAST_MAX_FPS = 100
@@ -5410,7 +6614,7 @@ async def _screencast_on_message(ws, msg: dict):
             pass
 
 async def screencast_status(request):
-    if not _is_mc_admin(request):
+    if not _is_mc_owner(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     return web.json_response({
         "available": _screencast_check_available(),
@@ -5422,7 +6626,7 @@ async def screencast_status(request):
 
 async def screencast_frame(request):
     """Latest screenshot (30s cadence when idle, live frame when someone watches)."""
-    if not _is_mc_admin(request):
+    if not _is_mc_owner(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     if not _screencast_check_available():
         return web.json_response({"error": "Screencast unavailable (install pillow + mss)"}, status=503)
@@ -5439,18 +6643,18 @@ async def screencast_frame(request):
                                  "X-Screen-Height": str(screencast_latest.get("screen_h", 0))})
 
 async def screencast_ws(request):
-    if not _is_mc_admin(request):
+    if not _is_mc_owner(request):
         return web.Response(status=403)
     ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024)
     await ws.prepare(request)
     screencast_viewers.add(ws)
-    screencast_meta[ws] = {"viewing": False, "quality": "720p", "fps": 15, "owner": _is_mc_admin(request)}
+    screencast_meta[ws] = {"viewing": False, "quality": "720p", "fps": 15, "owner": _is_mc_owner(request)}
     try:
         await ws.send_json({
             "type": "hello",
             "available": _screencast_check_available(),
             "control": _screencast_check_control(),
-            "owner": _is_mc_admin(request),
+            "owner": _is_mc_owner(request),
             "screen": {"width": screencast_latest.get("screen_w", 0), "height": screencast_latest.get("screen_h", 0)},
             "max_fps": SCREENCAST_MAX_FPS,
         })
@@ -5528,8 +6732,18 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_get("/api/screencast/status", screencast_status)
     app.router.add_get("/api/screencast/frame", screencast_frame)
     app.router.add_get("/ws/screencast", screencast_ws)
-    app.router.add_get("/api/mc/properties", mc_api_properties)
-    app.router.add_post("/api/mc/properties", mc_api_set_properties)
+    app.router.add_post("/api/mc/permissions/owner", mc_api_set_server_owner)
+    app.router.add_get("/api/mc/global-access", mc_api_global_access)
+    app.router.add_post("/api/mc/global-access", mc_api_set_global_access)
+    app.router.add_get("/api/mc/files", mc_api_files)
+    app.router.add_get("/api/mc/file", mc_api_file_read)
+    app.router.add_post("/api/mc/file", mc_api_file_save)
+    app.router.add_get("/api/mc/file-download", mc_api_file_download)
+    app.router.add_post("/api/mc/files/folder", mc_api_create_folder)
+    app.router.add_post("/api/mc/files/create", mc_api_create_file)
+    app.router.add_post("/api/mc/files/rename", mc_api_rename_file)
+    app.router.add_post("/api/mc/files/delete", mc_api_delete_file)
+    app.router.add_post("/api/mc/files/upload", mc_api_upload_files)
     # Missing route: the archived/local pages still request /api/thumb for game icons.
     app.router.add_get("/api/thumb", handle_thumbnail)
     # Asset pack pages + downloads (must come before the catch-all below).

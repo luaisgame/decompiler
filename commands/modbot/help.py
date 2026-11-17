@@ -45,20 +45,32 @@ def help_embed():
     embed.add_field(
         name="Tickets",
         value=(
-            "**`!tickets setup`** \u2014 post the panel (or use `/ticket`).\n"
+            "**`!tickets setup [#channel]`** \u2014 post the customizable panel "
+            "(or use `/ticket`).\n"
             "**`!tickets category #channel`** \u2014 where tickets are created.\n"
-            "**`!tickets prefix|message|log|list|close`** \u2014 configure, "
-            "list and close. Claim/Close buttons live inside each ticket; "
-            "transcripts are saved automatically."
+            "**Panel:** `!tickets title|message|footer|color|thumbnail|image|button|ping`\n"
+            "**Ticket:** `!tickets ticket_title|ticket_color|welcome|claimmsg|closemsg|"
+            "claimbtn|closebtn|modal`\n"
+            "**`!tickets preview`** \u2014 see the panel \u00b7 "
+            "**`!tickets reset`** \u2014 reset the look/messages.\n"
+            "**`!tickets list|close|log|prefix`** \u2014 manage open tickets. "
+            "Claim/Close buttons live inside each ticket; transcripts are saved "
+            "automatically."
         ),
         inline=False,
     )
     embed.add_field(
         name="Welcoming",
         value=(
-            "**`!welcome channel #ch`** \u00b7 **`!welcome message <text>`** \u00b7 "
-            "**`!welcome on|off`** \u00b7 **`!welcome autorole @role`** \u00b7 "
-            "**`!welcome test`** / `/welcome`.\n"
+            "**`!welcome channel #ch|off`** \u00b7 **`!welcome message <text|reset>`** "
+            "\u00b7 **`!welcome on|off`** \u00b7 **`!welcome test`** / `/welcome`.\n"
+            "**Autoroles:** `!welcome autorole add|remove|list|off` (or "
+            "`!welcome autorole @role`) \u00b7 `!welcome autorole_delay <seconds|off>`.\n"
+            "**DM:** `!welcome dm on|off` \u00b7 `!welcome dm_message <text|reset>`.\n"
+            "**Embed:** `!welcome embed on|off` \u00b7 `embed_color` \u00b7 "
+            "`embed_title` \u00b7 `embed_thumbnail user|server|off` \u00b7 "
+            "`embed_image` \u00b7 `embed_footer`.\n"
+            "**`!welcome reset`** \u2014 restore the defaults (keeps channel and autoroles).\n"
             "Variables: `{user}` `{server}` `{count}` `{name}`."
         ),
         inline=False,
