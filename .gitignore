@@ -23,6 +23,7 @@ accounts.db
 accounts.db-*
 dm_uploads/
 dm_media/
+keepinv-mod
 # dm SPA assets staged by bot.py when everything is fetched from GitHub
 dm_static/
 
