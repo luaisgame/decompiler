@@ -4866,7 +4866,7 @@ function consoleShell(name){
   h+='<div class="mods-panel" id="modsPanel" style="display:none"></div>';
   h+='<div class="console-output" id="consoleOutput"></div>';
   var canSend=canPriv('command');
-  h+='<div class="console-input-wrap"><span class="prompt">&gt;</span><div class="cmd-box"><input type="text" id="cmdInput" placeholder="'+(canSend?'Type a command... (\u2191/\u2193 history)':'Command access not granted')+'" autocomplete="off" '+(canSend?'':'disabled')+' onkeydown="cmdKey(event)" oninput="cmdFilter()" onfocus="cmdFocus(true)" onblur="cmdFocus(false)"><div class="cmd-palette" id="cmdPalette"></div></div></div>';
+  h+='<div class="console-input-wrap"><span class="prompt">&gt;</span><div class="cmd-box"><input type="text" id="cmdInput" placeholder="'+(canSend?'Type a command... (Tab autocomplete \u00b7 \u2191/\u2193 history)':'Command access not granted')+'" autocomplete="off" '+(canSend?'':'disabled')+' onkeydown="cmdKey(event)" oninput="cmdFilter()" onfocus="cmdFocus(true)" onblur="cmdFocus(false)"><div class="cmd-palette" id="cmdPalette"></div></div></div>';
   return h;
 }
 function selectServer(name){
@@ -4966,22 +4966,21 @@ function escapeAttr(t){return escapeHtml(t).replace(/"/g,'&quot;').replace(/'/g,
 /* ---- console reliability: watchdog, history, command palette, rename ---- */
 var wsAlive=false,wsPingTimer=null;
 var cmdHistory=[],cmdHistIndex=-1,cmdDraft='',cmdPalItems=[];
+var cmdTabBase='',cmdTabIndex=-1,cmdTabCands=[];
 var CMD_SUGGESTIONS=[
   {c:'list',d:'List online players'},
   {c:'say <message>',d:'Broadcast a message to everyone'},
-  {c:'kick <player> <reason>',d:'Kick a player (mod)'},
-  {c:'ban <player> <reason>',d:'Ban a player (mod)'},
-  {c:'pardon <player>',d:'Unban a player (mod)'},
-  {c:'op <player>',d:'Grant operator (mod)'},
-  {c:'deop <player>',d:'Remove operator (mod)'},
-  {c:'gamemode creative <player>',d:'Set a player to creative (mod)'},
-  {c:'gamemode survival <player>',d:'Set a player to survival (mod)'},
-  {c:'tp <player> <target>',d:'Teleport a player (mod)'},
-  {c:'time set day',d:'Set the time to day'},
-  {c:'time set night',d:'Set the time to night'},
-  {c:'weather clear',d:'Clear the weather'},
-  {c:'whitelist add <player>',d:'Whitelist a player'},
-  {c:'whitelist remove <player>',d:'Remove from the whitelist'},
+  {c:'kick <player> [reason]',d:'Kick a player (mod)',t:[['<player>'],['<reason>']]},
+  {c:'ban <player> [reason]',d:'Ban a player (mod)',t:[['<player>'],['<reason>']]},
+  {c:'pardon <player>',d:'Unban a player (mod)',t:[['<player>']]},
+  {c:'op <player>',d:'Grant operator (mod)',t:[['<player>']]},
+  {c:'deop <player>',d:'Remove operator (mod)',t:[['<player>']]},
+  {c:'gamemode <mode> [player]',d:'Set a gamemode (mod)',t:[['survival','creative','adventure','spectator'],['<player>']]},
+  {c:'tp <player> [target]',d:'Teleport a player (mod)',t:[['<player>'],['<player>']]},
+  {c:'time set <value>',d:'Set the time',t:[['set'],['day','night','noon','midnight','sunrise','sunset']]},
+  {c:'weather <type>',d:'Set the weather',t:[['clear','rain','thunder']]},
+  {c:'difficulty <level>',d:'Set the difficulty',t:[['peaceful','easy','normal','hard']]},
+  {c:'whitelist <action> [player]',d:'Whitelist a player',t:[['add','remove','list','on','off'],['<player>']]},
   {c:'seed',d:'Show the world seed'},
   {c:'save-all',d:'Force a world save'},
   {c:'stop',d:'Stop the server'}
@@ -5004,6 +5003,7 @@ function pushCmdHistory(cmd){
 }
 function cmdKey(e){
   if(e.key==='Enter'){sendCmd();return}
+  if(e.key==='Tab'){e.preventDefault();cmdComplete(e.target);return}
   if(e.key==='ArrowUp'){
     e.preventDefault();
     if(cmdHistIndex===-1)cmdDraft=e.target.value;
@@ -5019,8 +5019,14 @@ function cmdKey(e){
   if(e.key==='Escape'){var pal=document.getElementById('cmdPalette');if(pal)pal.style.display='none'}
 }
 function cmdFocus(show){
-  if(show){loadCmdHistory();cmdFilter()}
-  else{setTimeout(function(){var pal=document.getElementById('cmdPalette');if(pal)pal.style.display='none'},130)}
+  if(show){
+    loadCmdHistory();cmdFilter();
+    loadKnownPlayers();
+    if(!mcPlayersTimer)mcPlayersTimer=setInterval(loadKnownPlayers,60000);
+  }else{
+    if(mcPlayersTimer){clearInterval(mcPlayersTimer);mcPlayersTimer=null}
+    setTimeout(function(){var pal=document.getElementById('cmdPalette');if(pal)pal.style.display='none'},130);
+  }
 }
 function cmdFilter(){
   var inp=document.getElementById('cmdInput'),pal=document.getElementById('cmdPalette');
@@ -5043,6 +5049,108 @@ function palPick(i){
   inp.value=cmdPalItems[i].c;
   inp.focus();
   cmdFilter();
+}
+/* ---- in-game style autocomplete: Tab completes commands AND arguments ---- */
+var mcKnownPlayers=[],mcPlayersTimer=null;
+function loadKnownPlayers(){
+  if(!activeServer)return;
+  fetch('/api/mc/players?name='+encodeURIComponent(activeServer),{credentials:'include'})
+    .then(function(r){return r.json()})
+    .then(function(d){if(d&&d.players)mcKnownPlayers=d.players.map(function(p){return p.name})})
+    .catch(function(){});
+}
+function cmdTokensFor(name){
+  name=name.toLowerCase();
+  for(var i=0;i<CMD_SUGGESTIONS.length;i++){
+    if(CMD_SUGGESTIONS[i].c.split(' ')[0].toLowerCase()===name)return CMD_SUGGESTIONS[i];
+  }
+  return null;
+}
+function lcpCmd(list){
+  if(!list.length)return '';
+  var p=list[0];
+  var pl=p.toLowerCase();
+  for(var i=1;i<list.length;i++){
+    var q=list[i].toLowerCase();
+    while(q.indexOf(pl)!==0){p=p.slice(0,-1);pl=pl.slice(0,-1);if(!p)return ''}
+  }
+  return p;
+}
+function cmdComplete(inp){
+  var val=inp.value||'';
+  /* Cycling: Tab pressed again right after a completion. */
+  if(cmdTabIndex!==-1&&cmdTabBase===val&&cmdTabCands.length){
+    var cw=val.trim().split(/\s+/);
+    cw.pop();
+    var crest=cw.join(' ');
+    cmdTabIndex=(cmdTabIndex+1)%cmdTabCands.length;
+    inp.value=crest+(crest?' ':'')+cmdTabCands[cmdTabIndex];
+    cmdTabBase=inp.value;
+    inp.setSelectionRange(inp.value.length,inp.value.length);
+    cmdFilter();
+    return;
+  }
+  /* Fresh completion. */
+  var trailing=/\s$/.test(val);
+  var words=val.trim().split(/\s+/);
+  var cur=trailing?'':(words.pop()||'');
+  var rest=words.join(' ');
+  var cands=[];
+  var fromHistory=false;
+  if(!rest){
+    /* completing the command name */
+    CMD_SUGGESTIONS.forEach(function(s){var w=s.c.split(' ')[0];if(cands.indexOf(w)===-1)cands.push(w)});
+    cmdHistory.forEach(function(h){var w=h.trim().split(/\s+/)[0];if(w&&cands.indexOf(w)===-1)cands.push(w)});
+  }else{
+    var s=cmdTokensFor(rest.split(' ')[0]);
+    var argIndex=rest.split(' ').length-1;
+    if(s&&s.t&&s.t[argIndex]){
+      var tok=s.t[argIndex];
+      if(tok.indexOf('<player>')!==-1)cands=cands.concat(mcKnownPlayers);
+      else cands=cands.concat(tok);
+    }
+    if(!cands.length){
+      /* fall back to whole-input history matches (filtered by the full input) */
+      fromHistory=true;
+      cmdHistory.forEach(function(h){if(h.toLowerCase().indexOf(val.toLowerCase())===0&&h.toLowerCase()!==val.toLowerCase())cands.push(h)});
+      cands=uniqueCmd(cands);
+    }
+  }
+  if(fromHistory){
+    if(!cands.length)return;
+  }else{
+    cands=cands.filter(function(c){
+      if(cur===''&&c.charAt(0)==='<')return false;  /* never auto-insert placeholders */
+      return c.toLowerCase().indexOf(cur.toLowerCase())===0&&c.toLowerCase()!==cur.toLowerCase();
+    });
+    cands=uniqueCmd(cands);
+    if(!cands.length)return;
+  }
+  cmdTabBase=val;cmdTabIndex=-1;
+  cmdTabCands=cands.slice();
+  var common=lcpCmd(cands);
+  if(fromHistory){
+    /* candidates are full commands, not single words */
+    if(common.length>val.length){
+      inp.value=common;
+    }else{
+      cmdTabIndex=0;
+      inp.value=cmdTabCands[0];
+    }
+  }else if(common.length>cur.length){
+    inp.value=rest+(rest?' ':'')+common;
+  }else{
+    cmdTabIndex=0;
+    inp.value=rest+(rest?' ':'')+cmdTabCands[0];
+  }
+  cmdTabBase=inp.value;
+  inp.setSelectionRange(inp.value.length,inp.value.length);
+  cmdFilter();
+}
+function uniqueCmd(list){
+  var seen={},out=[];
+  list.forEach(function(c){var k=c.toLowerCase();if(!seen[k]){seen[k]=1;out.push(c)}});
+  return out;
 }
 function appendEcho(cmd){
   var out=document.getElementById('consoleOutput');if(!out)return;
