@@ -2141,6 +2141,133 @@ mc_players_locks = {}
 mc_discord_profile_cache = {}
 mc_bans_cache = {}
 mc_skin_cache = {}
+mc_line_counters = {}        # server name -> monotonic console line number
+mc_restart_tasks = {}        # server name -> crash-restart task
+mc_restart_attempts = {}     # server name -> consecutive restart failures
+
+RESTART_DELAYS = (5, 15, 30, 60, 120)
+
+
+def _mc_keepalive_path(name):
+    return os.path.join(MC_DIR, name, ".keepalive")
+
+
+def _mc_mark_keepalive(name, enabled=True):
+    """A .keepalive marker means 'this server should be running'."""
+    try:
+        path = _mc_keepalive_path(name)
+        if enabled:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write("1")
+        elif os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
+def _mc_ram_ok():
+    """Is there plausibly enough free RAM to start another server?"""
+    try:
+        vm = psutil.virtual_memory()
+        return vm.available >= 2 * (1024 ** 3) and vm.available >= vm.total * 0.15
+    except Exception:
+        return True
+
+
+async def _mc_broadcast(name, payload):
+    """Send a JSON payload to every live console client for `name`."""
+    dead = []
+    for ws in list(mc_ws_clients.get(name, [])):
+        try:
+            await asyncio.wait_for(ws.send_json(payload), timeout=3)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        ws_list = mc_ws_clients.get(name, [])
+        if ws in ws_list:
+            ws_list.remove(ws)
+
+
+def _mc_buf_push(name, entry, send=True):
+    """Append a formatted line to the buffer and broadcast it.
+
+    Returns the line's monotonic number (used by clients to dedupe).
+    """
+    n = mc_line_counters.get(name, 0) + 1
+    mc_line_counters[name] = n
+    buf = mc_console_buffers.setdefault(name, [])
+    buf.append((n, entry))
+    if len(buf) > 500:
+        buf[:] = buf[-500:]
+    if send:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            loop.create_task(_mc_broadcast(name, {"type": "output", "line": entry, "n": n}))
+    return n
+
+
+async def _mc_restart_with_backoff(name):
+    """Auto-restart a crashed server while its .keepalive marker exists."""
+    attempt = mc_restart_attempts.get(name, 0)
+    try:
+        while True:
+            if not os.path.exists(_mc_keepalive_path(name)):
+                break
+            proc = mc_processes.get(name)
+            if proc is not None and proc.returncode is None:
+                break
+            if not _mc_ram_ok():
+                _mc_buf_push(name, f"[{time.strftime('%H:%M:%S')}] >>> Not enough free RAM to restart \u2014 retrying in 60s.")
+                await asyncio.sleep(60)
+                continue
+            delay = RESTART_DELAYS[min(attempt, len(RESTART_DELAYS) - 1)]
+            _mc_buf_push(name, f"[{time.strftime('%H:%M:%S')}] >>> Server crashed \u2014 restarting in {delay}s (attempt {attempt + 1}).")
+            await asyncio.sleep(delay)
+            if not os.path.exists(_mc_keepalive_path(name)):
+                break
+            ok, err = await _mc_start_server(name, "auto", autostart=True)
+            if ok:
+                mc_restart_attempts[name] = 0
+                _mc_buf_push(name, f"[{time.strftime('%H:%M:%S')}] >>> Server back online (auto-restart succeeded).")
+                return
+            attempt += 1
+            mc_restart_attempts[name] = attempt
+            _mc_buf_push(name, f"[{time.strftime('%H:%M:%S')}] >>> Auto-restart failed: {err}")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"[MINECRAFT] Restart supervisor for {name} failed: {exc}")
+
+
+def schedule_mc_autostart():
+    """Recover servers that were online before a power/bot outage."""
+    try:
+        return asyncio.get_event_loop().create_task(_mc_autostart())
+    except Exception as exc:
+        print(f"[MINECRAFT] Could not schedule auto-start: {exc}")
+        return None
+
+
+async def _mc_autostart():
+    await asyncio.sleep(5)
+    for server in _mc_get_servers():
+        name = server["name"]
+        if not os.path.exists(_mc_keepalive_path(name)):
+            continue
+        proc = mc_processes.get(name)
+        if proc is not None and proc.returncode is None:
+            continue
+        if not _mc_ram_ok():
+            print(f"[MINECRAFT] Skipping auto-start of {name}: not enough free RAM")
+            continue
+        _mc_buf_push(name, f"[{time.strftime('%H:%M:%S')}] >>> Machine came back \u2014 auto-starting {name}.")
+        ok, err = await _mc_start_server(name, "auto", autostart=True)
+        if not ok:
+            _mc_buf_push(name, f"[{time.strftime('%H:%M:%S')}] >>> Auto-start failed: {err}")
 
 def _mc_memory_limit():
     configured = os.environ.get("MC_MEMORY", "auto").strip()
@@ -2347,12 +2474,18 @@ async def mc_api_delete_server(request):
     server_dir = _mc_safe_server_dir(name)
     if not server_dir:
         return web.json_response({"error": "Server not found"}, status=404)
+    _mc_mark_keepalive(name, False)
+    task = mc_restart_tasks.pop(name, None)
+    if task is not None and not task.done():
+        task.cancel()
+    mc_restart_attempts.pop(name, None)
     proc = mc_processes.get(name)
     if proc and proc.returncode is None:
         proc.kill()
         await proc.wait()
     mc_processes.pop(name, None)
     mc_console_buffers.pop(name, None)
+    mc_line_counters.pop(name, None)
     mc_ws_clients.pop(name, None)
     shutil.rmtree(server_dir)
     acl = _mc_load_acl()
@@ -2360,6 +2493,53 @@ async def mc_api_delete_server(request):
         acl["servers"].pop(name, None)
         _mc_save_acl(acl)
     return web.json_response({"ok": True})
+
+
+async def mc_api_rename(request):
+    data = await request.json()
+    name = data.get("name", "")
+    new_name = str(data.get("new_name", "")).strip()
+    if not _mc_can(request, name, "delete"):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _mc_valid_server_name(name):
+        return web.json_response({"error": "Server not found"}, status=404)
+    if not _mc_valid_server_name(new_name):
+        return web.json_response({"error": "Invalid name \u2014 use letters, numbers, - or _ only"}, status=400)
+    if new_name == name:
+        return web.json_response({"ok": True, "name": name})
+    server_dir = _mc_safe_server_dir(name)
+    if not server_dir:
+        return web.json_response({"error": "Server not found"}, status=404)
+    if os.path.exists(os.path.join(MC_DIR, new_name)):
+        return web.json_response({"error": "That name is already taken"}, status=409)
+    proc = mc_processes.get(name)
+    if proc is not None and proc.returncode is None:
+        return web.json_response({"error": "Stop the server before renaming it"}, status=400)
+    _mc_mark_keepalive(name, False)
+    task = mc_restart_tasks.pop(name, None)
+    if task is not None and not task.done():
+        task.cancel()
+    mc_restart_attempts.pop(name, None)
+    mc_processes.pop(name, None)
+    mc_console_buffers.pop(name, None)
+    mc_line_counters.pop(name, None)
+    mc_ws_clients.pop(name, None)
+    try:
+        os.rename(server_dir, os.path.join(MC_DIR, new_name))
+    except OSError as exc:
+        return web.json_response({"error": f"Rename failed: {exc}"}, status=500)
+    old_backups = os.path.join(MC_DIR, "backups", name)
+    new_backups = os.path.join(MC_DIR, "backups", new_name)
+    if os.path.isdir(old_backups) and not os.path.exists(new_backups):
+        try:
+            os.rename(old_backups, new_backups)
+        except OSError:
+            pass
+    acl = _mc_load_acl()
+    if name in acl.get("servers", {}):
+        acl["servers"][new_name] = acl["servers"].pop(name)
+        _mc_save_acl(acl)
+    return web.json_response({"ok": True, "name": new_name})
 
 def _mc_create_backup(server_name, server_dir):
     if not _mc_valid_server_name(server_name):
@@ -2553,8 +2733,6 @@ def _mc_find_forge_args(server_dir):
     return None
 
 async def _mc_read_output(name, proc):
-    buf = mc_console_buffers.setdefault(name, [])
-    ws_list = mc_ws_clients.setdefault(name, [])
     try:
         while True:
             line = await proc.stdout.readline()
@@ -2569,21 +2747,18 @@ async def _mc_read_output(name, proc):
                 capture["event"].set()
                 if capture.get("silent"):
                     continue
-            buf.append(entry)
-            if len(buf) > 500:
-                buf[:] = buf[-500:]
-            dead = []
-            for ws in ws_list:
-                try:
-                    await ws.send_json({"type": "output", "line": entry})
-                except Exception:
-                    dead.append(ws)
-            for ws in dead:
-                ws_list.remove(ws)
+            _mc_buf_push(name, entry)
     except Exception:
         pass
+    code = proc.returncode
     if name in mc_processes:
         mc_processes[name] = None
+    if os.path.exists(_mc_keepalive_path(name)):
+        _mc_buf_push(name, f"[{time.strftime('%H:%M:%S')}] >>> Server process exited (code {code}) \u2014 auto-restart is enabled.")
+        task = asyncio.create_task(_mc_restart_with_backoff(name))
+        mc_restart_tasks[name] = task
+    else:
+        _mc_buf_push(name, f"[{time.strftime('%H:%M:%S')}] >>> Server stopped (code {code}). Use Start to bring it back.")
 
 async def mc_api_servers(request):
     if not _is_mc_authorized(request):
@@ -3596,11 +3771,21 @@ async def mc_api_start(request):
     if not _mc_can(request, name, "start"):
         return web.json_response({"error": "unauthorized"}, status=401)
     loader_type = data.get("loader", "fabric")
+    ok, err = await _mc_start_server(name, loader_type)
+    if not ok:
+        status = 400 if err in ("Already running", "Server folder not found") else 500
+        return web.json_response({"error": err}, status=status)
+    proc = mc_processes.get(name)
+    return web.json_response({"ok": True, "pid": proc.pid if proc else None})
+
+
+async def _mc_start_server(name, loader_type="fabric", autostart=False):
+    """Start (installing if needed) a server; returns (ok, error)."""
     server_dir = _mc_safe_server_dir(name)
     if not server_dir:
-        return web.json_response({"error": "Server folder not found"}, status=404)
+        return False, "Server folder not found"
     if name in mc_processes and mc_processes[name] is not None and mc_processes[name].returncode is None:
-        return web.json_response({"error": "Already running"}, status=400)
+        return False, "Already running"
     loader_file = os.path.join(server_dir, ".loader")
     if os.path.exists(loader_file):
         with open(loader_file, "r") as f:
@@ -3613,87 +3798,93 @@ async def mc_api_start(request):
     jar = _mc_find_jar(server_dir)
     is_forge = _mc_is_forge(server_dir)
     if not jar and not is_forge:
-        buf = mc_console_buffers.setdefault(name, [])
-        buf.append(f"[{time.strftime('%H:%M:%S')}] No server.jar found, installing {loader_type.title()} server...")
+        _mc_buf_push(name, f"[{time.strftime('%H:%M:%S')}] No server.jar found, installing {loader_type.title()} server...")
         try:
             from minecraft_setup import setup_server
             ok = await asyncio.to_thread(setup_server, server_dir, loader_type, selected_version)
             if not ok:
-                buf.append(f"[{time.strftime('%H:%M:%S')}] Failed to install {loader_type.title()} server.")
-                return web.json_response({"error": f"{loader_type.title()} install failed"}, status=500)
-            buf.append(f"[{time.strftime('%H:%M:%S')}] {loader_type.title()} installed successfully.")
+                _mc_buf_push(name, f"[{time.strftime('%H:%M:%S')}] Failed to install {loader_type.title()} server.")
+                return False, f"{loader_type.title()} install failed"
+            _mc_buf_push(name, f"[{time.strftime('%H:%M:%S')}] {loader_type.title()} installed successfully.")
         except Exception as e:
-            buf.append(f"[{time.strftime('%H:%M:%S')}] Setup error: {e}")
-            return web.json_response({"error": str(e)}, status=500)
+            _mc_buf_push(name, f"[{time.strftime('%H:%M:%S')}] Setup error: {e}")
+            return False, str(e)
         jar = _mc_find_jar(server_dir)
         is_forge = _mc_is_forge(server_dir)
         if not jar and not is_forge:
-            buf.append(f"[{time.strftime('%H:%M:%S')}] Still no server.jar after install.")
-            return web.json_response({"error": "No server jar after install"}, status=500)
+            _mc_buf_push(name, f"[{time.strftime('%H:%M:%S')}] Still no server.jar after install.")
+            return False, "No server jar after install"
     mem = _mc_memory_limit()
     java = _mc_get_java(server_dir)
     forge_jvm_args_str = " ".join(FORGE_JVM_ARGS)
-    if is_forge:
-        run_bat = os.path.join(server_dir, "run.bat")
-        run_sh = os.path.join(server_dir, "run.sh")
-        forge_args = _mc_find_forge_args(server_dir)
-        user_jvm = _mc_find_user_jvm_args(server_dir)
-        if os.name == "nt" and os.path.exists(run_bat):
-            env = {**os.environ, "JAVA_FLAGS": f"-Xmx{mem} -Xms{mem} {forge_jvm_args_str}"}
-            proc = await asyncio.create_subprocess_exec(
-                "cmd", "/c", "run.bat",
-                cwd=server_dir,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env=env,
-            )
-        elif os.path.exists(run_sh):
-            env = {**os.environ, "JAVA_FLAGS": f"-Xmx{mem} -Xms{mem} {forge_jvm_args_str}"}
-            proc = await asyncio.create_subprocess_exec(
-                "bash", "run.sh",
-                cwd=server_dir,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env=env,
-            )
-        elif forge_args:
-            extra_args = []
-            if user_jvm:
-                with open(user_jvm, "r") as uf:
-                    extra_args = [l.strip() for l in uf.readlines() if l.strip() and not l.strip().startswith("#")]
+    try:
+        if is_forge:
+            run_bat = os.path.join(server_dir, "run.bat")
+            run_sh = os.path.join(server_dir, "run.sh")
+            forge_args = _mc_find_forge_args(server_dir)
+            user_jvm = _mc_find_user_jvm_args(server_dir)
+            if os.name == "nt" and os.path.exists(run_bat):
+                env = {**os.environ, "JAVA_FLAGS": f"-Xmx{mem} -Xms{mem} {forge_jvm_args_str}"}
+                proc = await asyncio.create_subprocess_exec(
+                    "cmd", "/c", "run.bat",
+                    cwd=server_dir,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    env=env,
+                )
+            elif os.path.exists(run_sh):
+                env = {**os.environ, "JAVA_FLAGS": f"-Xmx{mem} -Xms{mem} {forge_jvm_args_str}"}
+                proc = await asyncio.create_subprocess_exec(
+                    "bash", "run.sh",
+                    cwd=server_dir,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    env=env,
+                )
+            elif forge_args:
+                extra_args = []
+                if user_jvm:
+                    with open(user_jvm, "r") as uf:
+                        extra_args = [l.strip() for l in uf.readlines() if l.strip() and not l.strip().startswith("#")]
+                else:
+                    extra_args = FORGE_JVM_ARGS
+                proc = await asyncio.create_subprocess_exec(
+                    java, f"-Xmx{mem}", f"-Xms{mem}", *extra_args, f"@{forge_args}", "nogui",
+                    cwd=server_dir,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+            elif jar:
+                proc = await asyncio.create_subprocess_exec(
+                    java, f"-Xmx{mem}", f"-Xms{mem}", *FORGE_JVM_ARGS, "-jar", jar, "nogui",
+                    cwd=server_dir,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
             else:
-                extra_args = FORGE_JVM_ARGS
-            proc = await asyncio.create_subprocess_exec(
-                java, f"-Xmx{mem}", f"-Xms{mem}", *extra_args, f"@{forge_args}", "nogui",
-                cwd=server_dir,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-        elif jar:
-            proc = await asyncio.create_subprocess_exec(
-                java, f"-Xmx{mem}", f"-Xms{mem}", *FORGE_JVM_ARGS, "-jar", jar, "nogui",
-                cwd=server_dir,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
+                return False, "No Forge launch method found"
         else:
-            return web.json_response({"error": "No Forge launch method found"}, status=500)
-    else:
-        proc = await asyncio.create_subprocess_exec(
-            java, f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui",
-            cwd=server_dir,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
+            proc = await asyncio.create_subprocess_exec(
+                java, f"-Xmx{mem}", f"-Xms{mem}", "-jar", jar, "nogui",
+                cwd=server_dir,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+    except Exception as exc:
+        _mc_buf_push(name, f"[{time.strftime('%H:%M:%S')}] Launch failed: {exc}")
+        return False, str(exc)
     mc_processes[name] = proc
     mc_console_buffers.setdefault(name, [])
+    _mc_mark_keepalive(name, True)
     asyncio.create_task(_mc_read_output(name, proc))
-    return web.json_response({"ok": True, "pid": proc.pid})
+    if autostart:
+        _mc_buf_push(name, f"[{time.strftime('%H:%M:%S')}] >>> Auto-start engaged \u2014 this server will stay online.")
+    return True, ""
 
 async def mc_api_create(request):
     if not _mc_can_create(request):
@@ -3729,6 +3920,13 @@ async def mc_api_stop(request):
     name = data.get("name", "")
     if not _mc_can(request, name, "stop"):
         return web.json_response({"error": "unauthorized"}, status=401)
+    # Manual stop: take the server off the auto-restart list FIRST so the
+    # process exit below never triggers the crash supervisor.
+    _mc_mark_keepalive(name, False)
+    task = mc_restart_tasks.pop(name, None)
+    if task is not None and not task.done():
+        task.cancel()
+    mc_restart_attempts.pop(name, None)
     proc = mc_processes.get(name)
     if not proc or proc.returncode is not None:
         return web.json_response({"error": "Not running"}, status=400)
@@ -3771,7 +3969,8 @@ async def mc_api_console(request):
     if not _mc_can(request, name, "console"):
         return web.json_response({"error": "unauthorized"}, status=401)
     buf = mc_console_buffers.get(name, [])
-    return web.json_response({"lines": buf[-200:]})
+    lines = [text for _n, text in buf[-200:]]
+    return web.json_response({"lines": lines, "n": mc_line_counters.get(name, 0)})
 
 
 async def mc_api_mods(request):
@@ -3919,7 +4118,7 @@ async def mc_api_upload_mod(request):
         cleanup()
         return web.json_response({"error": str(e)}, status=500)
     buf = mc_console_buffers.setdefault(server_name, [])
-    buf.append(f"[{time.strftime('%H:%M:%S')}] Mod installed: {filename}")
+    _mc_buf_push(server_name, f"[{time.strftime('%H:%M:%S')}] Mod installed: {filename}")
     return web.json_response({"ok": True, "name": filename})
 
 
@@ -3940,8 +4139,7 @@ async def mc_api_delete_mod(request):
     if not os.path.isfile(mod_path):
         return web.json_response({"error": "Mod not found"}, status=404)
     os.remove(mod_path)
-    buf = mc_console_buffers.setdefault(name, [])
-    buf.append(f"[{time.strftime('%H:%M:%S')}] Mod removed: {mod}")
+    _mc_buf_push(name, f"[{time.strftime('%H:%M:%S')}] Mod removed: {mod}")
     return web.json_response({"ok": True})
 
 async def mc_ws_console(request):
@@ -3949,22 +4147,41 @@ async def mc_ws_console(request):
     if not _mc_can(request, name, "console"):
         return web.Response(status=401)
     can_send = _mc_can(request, name, "command")
-    ws = web.WebSocketResponse()
+    # heartbeat: aiohttp pings every 15s and closes sockets that never pong,
+    # so a half-dead wifi connection can't linger looking alive forever.
+    ws = web.WebSocketResponse(heartbeat=15.0)
     await ws.prepare(request)
     ws_list = mc_ws_clients.setdefault(name, [])
     ws_list.append(ws)
+    # Backfill anything the client missed while it was away.
+    buf = mc_console_buffers.get(name, [])
+    if buf:
+        try:
+            await ws.send_json({
+                "type": "history",
+                "lines": [text for _n, text in buf[-200:]],
+                "n": mc_line_counters.get(name, 0),
+            })
+        except Exception:
+            pass
     try:
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:
                 try:
                     d = json.loads(msg.data)
-                    if d.get("type") == "command" and can_send:
+                    if d.get("type") == "ping":
+                        await ws.send_json({"type": "pong"})
+                    elif d.get("type") == "command" and can_send:
                         proc = mc_processes.get(name)
                         if proc and proc.returncode is None and proc.stdin:
                             proc.stdin.write((d.get("command", "") + "\n").encode("utf-8"))
                             await proc.stdin.drain()
+                        else:
+                            await ws.send_json({"type": "error", "message": "Server not running"})
                 except Exception:
                     pass
+            elif msg.type == web.WSMsgType.ERROR:
+                break
     except Exception:
         pass
     if ws in ws_list:
@@ -4208,6 +4425,33 @@ button:disabled{opacity:.5;cursor:not-allowed}
   .ban-row-info{min-width:calc(100% - 60px)}
   .ban-row .mc-action-btn{margin-left:auto}
 }
+
+/* ============================================================
+   CONSOLE RELIABILITY + COMMAND PALETTE
+   ============================================================ */
+.ws-status{display:inline-flex;align-items:center;gap:6px;margin-left:12px;padding:3px 10px;border-radius:999px;
+  font-size:11px;font-weight:600;letter-spacing:.3px;border:1px solid var(--mc-line);
+  background:rgba(255,255,255,.02);color:var(--mc-dim);transition:all .2s}
+.ws-status .ws-dot{width:7px;height:7px;border-radius:50%;background:#8b949e;transition:all .2s}
+.ws-status.live{color:#86efac;border-color:rgba(34,197,94,.3);background:rgba(34,197,94,.06)}
+.ws-status.live .ws-dot{background:#22c55e;box-shadow:0 0 8px rgba(34,197,94,.7)}
+.ws-status.connecting,.ws-status.reconnecting{color:#fbbf24;border-color:rgba(251,191,36,.3);background:rgba(251,191,36,.06)}
+.ws-status.reconnecting .ws-dot{background:#f59e0b;animation:blink 1.2s infinite}
+.console-header .actions .rename{border-color:rgba(251,191,36,.3);color:#fbbf24}
+.console-header .actions .rename:hover{background:rgba(251,191,36,.12);border-color:rgba(251,191,36,.5);color:#fde68a}
+.console-output .cmd-echo{color:rgba(0,220,120,.65);font-weight:500}
+.cmd-box{position:relative;flex:1;display:flex;min-width:0}
+.cmd-box input{width:100%;min-width:0}
+.cmd-palette{position:absolute;left:0;right:0;bottom:calc(100% + 10px);display:none;max-height:240px;overflow-y:auto;
+  background:rgba(13,15,22,.98);border:1px solid var(--mc-line);border-radius:10px;
+  box-shadow:0 18px 50px rgba(0,0,0,.55);padding:6px;z-index:50;animation:palIn .12s ease}
+@keyframes palIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.cmd-palette .pal-head{font-size:10px;text-transform:uppercase;letter-spacing:1.2px;color:var(--mc-faint);padding:4px 8px 6px}
+.pal-item{display:flex;align-items:baseline;gap:10px;padding:7px 10px;border-radius:7px;cursor:pointer;transition:background .1s}
+.pal-item:hover{background:var(--mc-accent-soft)}
+.pal-item .pal-cmd{font-family:'Consolas','Courier New',monospace;font-size:12.5px;color:#7ee7b0;white-space:nowrap}
+.pal-item:hover .pal-cmd{color:#00ff8a}
+.pal-item .pal-desc{font-size:11px;color:var(--mc-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 /* ============================================================
    REDESIGN OVERRIDES — cleaner, modern dark UI
@@ -4602,10 +4846,10 @@ function loadVersions(){
     });
   });
 }
-var lastLineCount=0;
+var lastConsoleN=0;
 var lastWSServer='';
 function consoleShell(name){
-  var h='<div class="console-header"><div class="server-name">'+escapeHtml(name)+'</div><div class="actions">';
+  var h='<div class="console-header"><div class="server-name">'+escapeHtml(name)+'<span class="ws-status" id="wsStatus"><span class="ws-dot"></span>Connecting\u2026</span></div><div class="actions">';
   if(canPriv('start'))h+='<button class="start" onclick="startServer()">Start</button>';
   if(canPriv('stop'))h+='<button class="stop" onclick="stopServer()">Stop</button>';
   if(userInfo&&userInfo.mc_owner)h+='<button class="live" id="ssBtn" onclick="openSS()"><span class="live-dot"></span>Screenshare</button>';
@@ -4616,12 +4860,13 @@ function consoleShell(name){
   if(canPriv('backup'))h+='<button class="backup" onclick="createBackup()">Backup</button>';
   if(canPriv('version'))h+='<button class="version" onclick="changeServerVersion()">Version</button>';
   if(canPriv('icon'))h+='<button class="icon-upload" onclick="document.getElementById(\'serverIconInput\').click()">Icon</button>';
+  if(canPriv('delete'))h+='<button class="rename" onclick="renameServer()">Rename</button>';
   if(canPriv('delete'))h+='<button class="delete" onclick="deleteServer()">Delete</button>';
   h+='<input id="serverIconInput" type="file" accept="image/*" style="display:none" onchange="openIconCrop(this)"></div></div>';
   h+='<div class="mods-panel" id="modsPanel" style="display:none"></div>';
   h+='<div class="console-output" id="consoleOutput"></div>';
   var canSend=canPriv('command');
-  h+='<div class="console-input-wrap"><span class="prompt">&gt;</span><input type="text" id="cmdInput" placeholder="'+(canSend?'Type a command...':'Command access not granted')+'" '+(canSend?'':'disabled')+' onkeydown="if(event.key===\'Enter\')sendCmd()"></div>';
+  h+='<div class="console-input-wrap"><span class="prompt">&gt;</span><div class="cmd-box"><input type="text" id="cmdInput" placeholder="'+(canSend?'Type a command... (\u2191/\u2193 history)':'Command access not granted')+'" autocomplete="off" '+(canSend?'':'disabled')+' onkeydown="cmdKey(event)" oninput="cmdFilter()" onfocus="cmdFocus(true)" onblur="cmdFocus(false)"><div class="cmd-palette" id="cmdPalette"></div></div></div>';
   return h;
 }
 function selectServer(name){
@@ -4633,21 +4878,16 @@ function selectServer(name){
   loadServers();
   var viewConsole=canPriv('console');
   if(viewConsole){
-    if(lastWSServer!==name){connectWS(name);lastWSServer=name;lastLineCount=0}
+    if(lastWSServer!==name){connectWS(name);lastWSServer=name;lastConsoleN=0}
   }else{
     if(ws){ws.close();ws=null}
-    lastWSServer='';lastLineCount=0;
+    lastWSServer='';lastConsoleN=0;
   }
-  function render(lines){
+  function render(lines,n){
     var wrap=document.getElementById('consoleWrap');
     var out=document.getElementById('consoleOutput');
     if(out&&out.dataset.server===name){
-      var fresh=lines||[];
-      if(fresh.length>lastLineCount){
-        for(var i=lastLineCount;i<fresh.length;i++)appendLine(out,fresh[i],false);
-        lastLineCount=fresh.length;
-        if(autoScroll)out.scrollTop=out.scrollHeight;
-      }
+      renderDiff(out,lines||[],n||0);
       var existingInput=document.getElementById('cmdInput');
       if(existingInput&&!existingInput.disabled)existingInput.focus();
       return;
@@ -4660,9 +4900,8 @@ function selectServer(name){
       var atBottom=out.scrollHeight-out.scrollTop-out.clientHeight<50;
       autoScroll=atBottom;
     });
-    (lines||[]).forEach(function(line){appendLine(out,line,false)});
+    renderDiff(out,lines||[],n||0,true);
     if(!viewConsole)appendLine(out,'Console access is not granted for this server.',false);
-    lastLineCount=(lines||[]).length;
     out.scrollTop=out.scrollHeight;
     var input=document.getElementById('cmdInput');
     if(input&&!input.disabled)input.focus();
@@ -4670,10 +4909,10 @@ function selectServer(name){
   }
   if(viewConsole){
     fetch('/api/mc/console?name='+encodeURIComponent(name),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
-      render(d.lines||[]);
-    }).catch(function(){render([])});
+      render(d.lines||[],d.n||0);
+    }).catch(function(){render([],0)});
   }else{
-    render([]);
+    render([],0);
   }
 }
 var modsVisible=false;
@@ -4724,20 +4963,92 @@ function appendLine(out,line,isWs){
 }
 function escapeHtml(t){var d=document.createElement('div');d.textContent=t==null?'':String(t);return d.innerHTML}
 function escapeAttr(t){return escapeHtml(t).replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
-function connectWS(name){
-  if(ws){ws.close();ws=null}
-  var proto=location.protocol==='https:'?'wss:':'ws:';
-  ws=new WebSocket(proto+'//'+location.host+'/ws/mc/'+encodeURIComponent(name));
-  ws.onmessage=function(ev){
-    try{
-      var d=JSON.parse(ev.data);
-      if(d.type==='output'){
-        var out=document.getElementById('consoleOutput');
-        if(out)appendLine(out,d.line,true);
-      }
-    }catch(e){}
-  };
-  ws.onclose=function(){setTimeout(function(){if(activeServer===name&&lastWSServer===name&&canPriv('console'))connectWS(name)},3000)};
+/* ---- console reliability: watchdog, history, command palette, rename ---- */
+var wsAlive=false,wsPingTimer=null;
+var cmdHistory=[],cmdHistIndex=-1,cmdDraft='',cmdPalItems=[];
+var CMD_SUGGESTIONS=[
+  {c:'list',d:'List online players'},
+  {c:'say <message>',d:'Broadcast a message to everyone'},
+  {c:'kick <player> <reason>',d:'Kick a player (mod)'},
+  {c:'ban <player> <reason>',d:'Ban a player (mod)'},
+  {c:'pardon <player>',d:'Unban a player (mod)'},
+  {c:'op <player>',d:'Grant operator (mod)'},
+  {c:'deop <player>',d:'Remove operator (mod)'},
+  {c:'gamemode creative <player>',d:'Set a player to creative (mod)'},
+  {c:'gamemode survival <player>',d:'Set a player to survival (mod)'},
+  {c:'tp <player> <target>',d:'Teleport a player (mod)'},
+  {c:'time set day',d:'Set the time to day'},
+  {c:'time set night',d:'Set the time to night'},
+  {c:'weather clear',d:'Clear the weather'},
+  {c:'whitelist add <player>',d:'Whitelist a player'},
+  {c:'whitelist remove <player>',d:'Remove from the whitelist'},
+  {c:'seed',d:'Show the world seed'},
+  {c:'save-all',d:'Force a world save'},
+  {c:'stop',d:'Stop the server'}
+];
+function setWSStatus(state){
+  var el=document.getElementById('wsStatus');if(!el)return;
+  el.className='ws-status '+state;
+  el.innerHTML='<span class="ws-dot"></span>'+(state==='live'?'Live':state==='connecting'?'Connecting\u2026':'Reconnecting\u2026');
+}
+function loadCmdHistory(){
+  try{cmdHistory=JSON.parse(localStorage.getItem('mcCmdHistory:'+activeServer)||'[]')}catch(e){cmdHistory=[]}
+  cmdHistIndex=-1;cmdDraft='';
+}
+function pushCmdHistory(cmd){
+  cmdHistory=cmdHistory.filter(function(c){return c!==cmd});
+  cmdHistory.unshift(cmd);
+  if(cmdHistory.length>50)cmdHistory.length=50;
+  try{localStorage.setItem('mcCmdHistory:'+activeServer,JSON.stringify(cmdHistory))}catch(e){}
+  cmdHistIndex=-1;cmdDraft='';
+}
+function cmdKey(e){
+  if(e.key==='Enter'){sendCmd();return}
+  if(e.key==='ArrowUp'){
+    e.preventDefault();
+    if(cmdHistIndex===-1)cmdDraft=e.target.value;
+    if(cmdHistIndex<cmdHistory.length-1){cmdHistIndex++;e.target.value=cmdHistory[cmdHistIndex]}
+    cmdFilter();return;
+  }
+  if(e.key==='ArrowDown'){
+    e.preventDefault();
+    if(cmdHistIndex>0){cmdHistIndex--;e.target.value=cmdHistory[cmdHistIndex]}
+    else{cmdHistIndex=-1;e.target.value=cmdDraft}
+    cmdFilter();return;
+  }
+  if(e.key==='Escape'){var pal=document.getElementById('cmdPalette');if(pal)pal.style.display='none'}
+}
+function cmdFocus(show){
+  if(show){loadCmdHistory();cmdFilter()}
+  else{setTimeout(function(){var pal=document.getElementById('cmdPalette');if(pal)pal.style.display='none'},130)}
+}
+function cmdFilter(){
+  var inp=document.getElementById('cmdInput'),pal=document.getElementById('cmdPalette');
+  if(!inp||!pal)return;
+  var q=inp.value.trim().toLowerCase();
+  cmdPalItems=CMD_SUGGESTIONS.filter(function(s){
+    return !q||s.c.toLowerCase().indexOf(q)!==-1||s.d.toLowerCase().indexOf(q)!==-1;
+  }).slice(0,8);
+  if(!cmdPalItems.length){pal.style.display='none';return}
+  var html='<div class="pal-head">Quick commands</div>';
+  cmdPalItems.forEach(function(s,i){
+    html+='<div class="pal-item" onmousedown="event.preventDefault();palPick('+i+')"><span class="pal-cmd">'+escapeHtml(s.c)+'</span><span class="pal-desc">'+escapeHtml(s.d)+'</span></div>';
+  });
+  pal.innerHTML=html;
+  if(document.activeElement===inp)pal.style.display='block';
+}
+function palPick(i){
+  var inp=document.getElementById('cmdInput');
+  if(!inp||!cmdPalItems[i])return;
+  inp.value=cmdPalItems[i].c;
+  inp.focus();
+  cmdFilter();
+}
+function appendEcho(cmd){
+  var out=document.getElementById('consoleOutput');if(!out)return;
+  var div=document.createElement('div');div.className='cmd-echo';div.textContent='> '+cmd;
+  out.appendChild(div);
+  if(autoScroll)out.scrollTop=out.scrollHeight;
 }
 function sendCmd(){
   var inp=document.getElementById('cmdInput');
@@ -4745,12 +5056,83 @@ function sendCmd(){
   var cmd=inp.value.trim();
   if(!cmd)return;
   if(!canPriv('command')){toast('Command access not granted.','error');return}
-  if(ws&&ws.readyState===1){
-    ws.send(JSON.stringify({type:'command',command:cmd}));
-  }else{
-    fetch('/api/mc/command',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer,command:cmd})}).then(function(r){return r.json()}).then(function(d){if(d.error)toast(d.error,'error')});
-  }
+  appendEcho(cmd);
+  // Commands always travel over a fresh HTTP request: a silently-dead
+  // websocket can never swallow them, and errors surface as toasts.
+  fetch('/api/mc/command',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer,command:cmd})})
+    .then(function(r){return r.json()})
+    .then(function(d){if(d&&d.error)toast(d.error,'error')});
+  pushCmdHistory(cmd);
   inp.value='';
+  cmdFilter();
+}
+function renderDiff(out,lines,n,forceAll){
+  if(!out)return;
+  if(forceAll){
+    for(var i=0;i<lines.length;i++)appendLine(out,lines[i],false);
+    if(n>lastConsoleN)lastConsoleN=n;
+    return;
+  }
+  if(n>lastConsoleN){
+    var k=lines.length;
+    var start=Math.max(0,k-(n-lastConsoleN));
+    for(var j=start;j<k;j++)appendLine(out,lines[j],false);
+    lastConsoleN=n;
+  }
+}
+function connectWS(name){
+  if(ws){try{ws.close()}catch(e){}ws=null}
+  setWSStatus('connecting');
+  var proto=location.protocol==='https:'?'wss:':'ws:';
+  try{ws=new WebSocket(proto+'//'+location.host+'/ws/mc/'+encodeURIComponent(name))}catch(e){ws=null}
+  if(!ws){setWSStatus('reconnecting');return}
+  ws.onopen=function(){
+    setWSStatus('live');wsAlive=true;
+    if(wsPingTimer)clearInterval(wsPingTimer);
+    wsPingTimer=setInterval(wsWatchdog,10000);
+  };
+  ws.onmessage=function(ev){
+    try{
+      var d=JSON.parse(ev.data);
+      wsAlive=true;
+      if(d.type==='output'){
+        var out=document.getElementById('consoleOutput');
+        if(out&&d.n>lastConsoleN){appendLine(out,d.line,true);lastConsoleN=d.n}
+      }else if(d.type==='history'){
+        renderDiff(document.getElementById('consoleOutput'),d.lines||[],d.n||0);
+      }else if(d.type==='error'){toast(d.message||'Server error.','error')}
+    }catch(e){}
+  };
+  ws.onerror=function(){wsAlive=false};
+  ws.onclose=function(){
+    setWSStatus('reconnecting');
+    wsAlive=false;
+    if(wsPingTimer){clearInterval(wsPingTimer);wsPingTimer=null}
+    setTimeout(function(){if(activeServer===name&&lastWSServer===name&&canPriv('console'))connectWS(name)},3000);
+  };
+}
+function wsWatchdog(){
+  if(!ws||ws.readyState!==1)return;
+  if(!wsAlive){
+    setWSStatus('reconnecting');
+    try{ws.close()}catch(e){}
+    return;
+  }
+  wsAlive=false;
+  try{ws.send(JSON.stringify({type:'ping'}))}catch(e){}
+}
+function renameServer(){
+  if(!activeServer)return;
+  var name=prompt('Rename server "'+activeServer+'" to:',activeServer);
+  if(!name||name===activeServer)return;
+  fetch('/api/mc/rename',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({name:activeServer,new_name:name})})
+    .then(function(r){return r.json()})
+    .then(function(d){
+      if(d.error){alert(d.error);return}
+      if(ws){ws.close();ws=null}
+      activeServer=d.name;lastWSServer='';lastConsoleN=0;
+      loadServers();selectServer(d.name);
+    });
 }
 function changeServerVersion(){
   if(!activeServer)return;
@@ -6705,6 +7087,7 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_get("/api/mc/versions", mc_api_versions)
     app.router.add_post("/api/mc/version", mc_api_change_version)
     app.router.add_post("/api/mc/delete", mc_api_delete_server)
+    app.router.add_post("/api/mc/rename", mc_api_rename)
     app.router.add_post("/api/mc/backup", mc_api_backup)
     app.router.add_get("/api/mc/backups", mc_api_backups)
     app.router.add_get("/api/mc/backup-download", mc_api_backup_download)

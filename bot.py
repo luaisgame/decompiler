@@ -430,6 +430,14 @@ async def main():
 
     asyncio.create_task(setup_tunnel())
 
+    # Recovery: servers that were online before a power/network outage come
+    # back up on their own (if there's enough free RAM).
+    try:
+        from commands.core import schedule_mc_autostart
+        schedule_mc_autostart()
+    except Exception as e:
+        print(f"[MINECRAFT] Auto-start hook failed: {e}")
+
     # The moderation bot runs on its own token in this same event loop.
     try:
         from commands.modbot import schedule_start
