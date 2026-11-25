@@ -42,6 +42,7 @@ FILES = [
     "commands/modbot/welcome.py",
     "commands/modbot/purge.py",
     "commands/modbot/help.py",
+    "commands/mc_suggest_data.py",
     "commands/support.py",
     "commands/dm/__init__.py",
     "commands/dm/db.py",

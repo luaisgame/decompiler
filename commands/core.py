@@ -28,6 +28,7 @@ import boto3
 
 from botocore.config import Config
 from discord.ext import commands
+from . import mc_suggest_data
 from discord import app_commands
 from aiohttp import web
 
@@ -2479,6 +2480,7 @@ async def mc_api_delete_server(request):
     if task is not None and not task.done():
         task.cancel()
     mc_restart_attempts.pop(name, None)
+    mc_commands_cache.pop(name, None)
     proc = mc_processes.get(name)
     if proc and proc.returncode is None:
         proc.kill()
@@ -2524,6 +2526,7 @@ async def mc_api_rename(request):
     mc_console_buffers.pop(name, None)
     mc_line_counters.pop(name, None)
     mc_ws_clients.pop(name, None)
+    mc_commands_cache.pop(name, None)
     try:
         os.rename(server_dir, os.path.join(MC_DIR, new_name))
     except OSError as exc:
@@ -3485,7 +3488,7 @@ def _structured_nbt_item(item):
         "raw": json.dumps(item, default=str),
     }
 
-async def _mc_run_command_capture(server_name, command, timeout=2.0, silent=False):
+async def _mc_run_command_capture(server_name, command, timeout=2.0, silent=False, tail=0.0):
     proc = mc_processes.get(server_name)
     if not proc or proc.returncode is not None or not proc.stdin:
         return ["Server is not running."]
@@ -3501,7 +3504,7 @@ async def _mc_run_command_capture(server_name, command, timeout=2.0, silent=Fals
             await proc.stdin.drain()
             try:
                 await asyncio.wait_for(state["event"].wait(), timeout=max(0.05, timeout))
-                await asyncio.sleep(0.02)
+                await asyncio.sleep(tail if tail else 0.02)
             except asyncio.TimeoutError:
                 pass
             return list(state["lines"])
@@ -3510,6 +3513,61 @@ async def _mc_run_command_capture(server_name, command, timeout=2.0, silent=Fals
         finally:
             if mc_command_capture_states.get(server_name) is state:
                 mc_command_capture_states.pop(server_name, None)
+
+
+# --- dynamic command detection (every mod included) -------------------------
+
+mc_commands_cache = {}
+
+_HELP_LINE_RE = re.compile(
+    r"^(?:\[(?:\d{2}:){2}\d{2}\]\s*)?"
+    r"(?:/|usage:\s*/?)"
+    r"(?P<name>[a-zA-Z0-9._:-]+)"
+    r"(?:\s+(?P<usage>.*))?$"
+)
+
+
+def _mc_parse_help(lines):
+    """Parse captured `help` output into [{"name", "usage"}, ...].
+
+    Vanilla and mod commands both print usage lines like:
+        /advancement (grant|revoke) <targets> only <advancement> <criterion>
+        /gamemode <gamemode> [<targets>]
+    One entry per command; the first usage line wins.
+    """
+    out = {}
+    for line in lines:
+        match = _HELP_LINE_RE.match(line.strip())
+        if not match or not match.group("name"):
+            continue
+        name = match.group("name").lower()
+        usage = (match.group("usage") or "").strip()
+        if name in out:
+            continue
+        out[name] = {"name": name, "usage": usage}
+    return sorted(out.values(), key=lambda c: c["name"])
+
+
+async def mc_api_commands(request):
+    """Every command the running server knows - including every installed mod."""
+    name = request.query.get("name", "")
+    if not _mc_can(request, name, "command"):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    cached = mc_commands_cache.get(name)
+    if cached and cached[0] > time.monotonic():
+        return web.json_response({"commands": cached[1]})
+    lines = await _mc_run_command_capture(name, "help", timeout=4.0, silent=True, tail=2.5)
+    commands = _mc_parse_help(lines)
+    if commands:
+        mc_commands_cache[name] = (time.monotonic() + 600, commands)
+    return web.json_response({"commands": commands})
+
+
+async def mc_api_suggest_data(request):
+    """Static vanilla registry names for argument autocomplete."""
+    if not _is_mc_authorized(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    return web.json_response({"data": mc_suggest_data.ALL})
 
 async def mc_api_player(request):
     server_name = request.query.get("server", "")
@@ -3880,6 +3938,7 @@ async def _mc_start_server(name, loader_type="fabric", autostart=False):
         return False, str(exc)
     mc_processes[name] = proc
     mc_console_buffers.setdefault(name, [])
+    mc_commands_cache.pop(name, None)
     _mc_mark_keepalive(name, True)
     asyncio.create_task(_mc_read_output(name, proc))
     if autostart:
@@ -4873,6 +4932,8 @@ function selectServer(name){
   activeServer=name;
   autoScroll=true;
   modsVisible=false;
+  suggestLoaded=false;detectedCmds=[];buildDyn();mcKnownPlayers=[];
+  cmdTabBase='';cmdTabIndex=-1;cmdTabCands=[];
   closeFiles();
   closePeople();
   loadServers();
@@ -5021,7 +5082,7 @@ function cmdKey(e){
 function cmdFocus(show){
   if(show){
     loadCmdHistory();cmdFilter();
-    loadKnownPlayers();
+    loadKnownPlayers();loadSuggestions();
     if(!mcPlayersTimer)mcPlayersTimer=setInterval(loadKnownPlayers,60000);
   }else{
     if(mcPlayersTimer){clearInterval(mcPlayersTimer);mcPlayersTimer=null}
@@ -5032,7 +5093,7 @@ function cmdFilter(){
   var inp=document.getElementById('cmdInput'),pal=document.getElementById('cmdPalette');
   if(!inp||!pal)return;
   var q=inp.value.trim().toLowerCase();
-  cmdPalItems=CMD_SUGGESTIONS.filter(function(s){
+  cmdPalItems=allSuggestions().filter(function(s){
     return !q||s.c.toLowerCase().indexOf(q)!==-1||s.d.toLowerCase().indexOf(q)!==-1;
   }).slice(0,8);
   if(!cmdPalItems.length){pal.style.display='none';return}
@@ -5099,15 +5160,30 @@ function cmdComplete(inp){
   var fromHistory=false;
   if(!rest){
     /* completing the command name */
-    CMD_SUGGESTIONS.forEach(function(s){var w=s.c.split(' ')[0];if(cands.indexOf(w)===-1)cands.push(w)});
+    allSuggestions().forEach(function(s){var w=s.c.split(' ')[0].replace(/^\//,'');if(w&&cands.indexOf(w)===-1)cands.push(w)});
     cmdHistory.forEach(function(h){var w=h.trim().split(/\s+/)[0];if(w&&cands.indexOf(w)===-1)cands.push(w)});
   }else{
-    var s=cmdTokensFor(rest.split(' ')[0]);
+    var s=cmdEntryFor(rest.split(' ')[0]);
     var argIndex=rest.split(' ').length-1;
     if(s&&s.t&&s.t[argIndex]){
       var tok=s.t[argIndex];
-      if(tok.indexOf('<player>')!==-1)cands=cands.concat(mcKnownPlayers);
-      else cands=cands.concat(tok);
+      if(typeof tok==='object'&&tok.kind){
+        if(tok.kind==='fixed'){
+          cands=cands.concat(tok.vals);
+        }else if(tok.kind==='src'){
+          var list=tok.key==='players'?mcKnownPlayers:(SUGGEST[tok.key]||[]);
+          if(NAMESPACED[tok.key]&&cur.indexOf(':')!==-1){
+            var preNS=cur.split(':')[0].toLowerCase();
+            if('minecraft'.indexOf(preNS)===0){
+              list=list.map(function(c){return c.indexOf(':')===-1?'minecraft:'+c:c});
+            }
+          }
+          cands=cands.concat(list);
+        }
+      }else if(Array.isArray(tok)){
+        if(tok.indexOf('<player>')!==-1)cands=cands.concat(mcKnownPlayers);
+        else cands=cands.concat(tok);
+      }
     }
     if(!cands.length){
       /* fall back to whole-input history matches (filtered by the full input) */
@@ -5151,6 +5227,85 @@ function uniqueCmd(list){
   var seen={},out=[];
   list.forEach(function(c){var k=c.toLowerCase();if(!seen[k]){seen[k]=1;out.push(c)}});
   return out;
+}
+/* ---- full suggestions: registry data + every mod command, detected live ---- */
+var SUGGEST={items:[],blocks:[],entities:[],effects:[],enchants:[],biomes:[],sounds:[],
+  gamerules:[],dimensions:[],colors:[],gamemodes:[],times:[],weathers:[],difficulties:[],
+  booleans:['true','false']};
+var NAMESPACED={items:1,blocks:1,entities:1,effects:1,enchants:1,biomes:1,dimensions:1};
+var detectedCmds=[],dynCmdMap={},dynList=[],suggestLoaded=false,suggestLoading=false;
+function tokenSource(key){
+  var k=key.toLowerCase();
+  if(k==='targets'||k==='target'||k==='player'||k==='players'||k==='victim'||k==='victims'||k==='source'||k==='selector'||k==='offlineplayer')return 'players';
+  if(k==='item'||k==='items'||k==='itemstack'||k==='itemid')return 'items';
+  if(k==='block'||k==='blocks')return 'blocks';
+  if(k==='entity'||k==='entities'||k==='entitytype'||k==='entitytypeid'||k==='mob')return 'entities';
+  if(k==='effect'||k==='effects'||k==='mobeffect')return 'effects';
+  if(k==='enchantment'||k==='enchantments'||k==='enchant'||k==='enchantmentid')return 'enchants';
+  if(k==='biome'||k==='biomes'||k==='biomeid')return 'biomes';
+  if(k==='gamerule')return 'gamerules';
+  if(k==='dimension'||k==='dimensions'||k==='dimensionid')return 'dimensions';
+  if(k==='sound'||k==='sounds'||k==='soundevent')return 'sounds';
+  if(k==='color'||k==='colors'||k==='teamcolor')return 'colors';
+  if(k==='gamemode'||k==='gamemodes')return 'gamemodes';
+  if(k==='time'||k==='timespec'||k==='daytime')return 'times';
+  if(k==='weather'||k==='weathertype')return 'weathers';
+  if(k==='difficulty')return 'difficulties';
+  if(k==='boolean'||k==='bool')return 'booleans';
+  return null;
+}
+function usageTokens(usage){
+  var toks=[];
+  if(!usage)return toks;
+  var parts=usage.split(/\s+/);
+  for(var i=0;i<parts.length;i++){
+    var p=parts[i];
+    if(p.charAt(0)==='['||p.charAt(0)==='(')p=p.slice(1);
+    var last=p.charAt(p.length-1);
+    if(last===']'||last===')')p=p.slice(0,-1);
+    if(!p)continue;
+    var m=p.match(/<([a-zA-Z0-9_]+)/);
+    if(m){
+      var src=tokenSource(m[1]);
+      if(src)toks.push({kind:'src',key:src});
+      else toks.push({kind:'any'});
+      continue;
+    }
+    if(p.indexOf('|')!==-1){toks.push({kind:'fixed',vals:p.split('|')});continue}
+    /* bare word (subcommand / literal like 'set', 'wand', 'flush') */
+    toks.push({kind:'fixed',vals:[p]});
+  }
+  return toks;
+}
+function buildDyn(){
+  dynCmdMap={};dynList=[];
+  detectedCmds.forEach(function(c){
+    dynCmdMap[c.name]={c:'/'+c.name+(c.usage?' '+c.usage:''),d:'Server command (detected)',t:usageTokens(c.usage)};
+    dynList.push(dynCmdMap[c.name]);
+  });
+}
+function allSuggestions(){
+  return dynList.length?dynList.concat(CMD_SUGGESTIONS):CMD_SUGGESTIONS;
+}
+function cmdEntryFor(name){
+  return cmdTokensFor(name)||dynCmdMap[name.toLowerCase()]||null;
+}
+function loadSuggestions(){
+  if(suggestLoaded||suggestLoading||!activeServer)return;
+  suggestLoading=true;
+  var pending=2,finish=function(){pending--;if(pending<=0){suggestLoaded=true;suggestLoading=false}};
+  fetch('/api/mc/suggest-data',{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
+    if(d&&d.data){
+      SUGGEST.items=d.data.items||[];SUGGEST.blocks=d.data.blocks||[];SUGGEST.entities=d.data.entities||[];
+      SUGGEST.effects=d.data.effects||[];SUGGEST.enchants=d.data.enchants||[];SUGGEST.biomes=d.data.biomes||[];
+      SUGGEST.sounds=d.data.sounds||[];SUGGEST.gamerules=d.data.gamerules||[];SUGGEST.dimensions=d.data.dimensions||[];
+      SUGGEST.colors=d.data.colors||[];SUGGEST.gamemodes=d.data.gamemodes||[];SUGGEST.times=d.data.times||[];
+      SUGGEST.weathers=d.data.weathers||[];SUGGEST.difficulties=d.data.difficulties||[];
+    }
+  }).catch(function(){}).then(finish);
+  fetch('/api/mc/commands?name='+encodeURIComponent(activeServer),{credentials:'include'}).then(function(r){return r.json()}).then(function(d){
+    if(d&&d.commands){detectedCmds=d.commands;buildDyn()}
+  }).catch(function(){}).then(finish);
 }
 function appendEcho(cmd){
   var out=document.getElementById('consoleOutput');if(!out)return;
@@ -7214,6 +7369,8 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app.router.add_post("/api/mc/stop", mc_api_stop)
     app.router.add_post("/api/mc/command", mc_api_command)
     app.router.add_get("/api/mc/console", mc_api_console)
+    app.router.add_get("/api/mc/commands", mc_api_commands)
+    app.router.add_get("/api/mc/suggest-data", mc_api_suggest_data)
     app.router.add_get("/api/mc/mods", mc_api_mods)
     app.router.add_get("/api/mc/icon", mc_api_icon)
     app.router.add_post("/api/mc/icon", mc_api_upload_icon)
