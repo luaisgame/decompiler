@@ -141,6 +141,17 @@ if not HAS_LOCAL:
         except Exception as e:
             print(f"[STARTUP] Failed to fetch {_path}: {e}")
             sys.exit(1)
+
+    # Executor-side scripts aren't Python modules: write them next to bot.py
+    # the same way, because core.py serves them over HTTP (/saveinstance.luau).
+    for _path in ("saveinstance.luau", "decompile_client.luau"):
+        try:
+            with open(os.path.join(_BASE_DIR, _path), "wb") as _fh:
+                _fh.write(_fetch(_path))
+        except Exception as e:
+            print(f"[STARTUP] Failed to fetch {_path}: {e}")
+            sys.exit(1)
+
     print("[STARTUP] All files loaded from GitHub.")
 else:
     print("[STARTUP] Local commands folder found.")
