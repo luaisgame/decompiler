@@ -53,6 +53,7 @@ FILES = [
     "commands/dm/static/app.js",
     "commands/dm/static/style.css",
     "decompile_client.luau",
+    "saveinstance.luau",
     "minecraft_setup.py",
 ]
 
