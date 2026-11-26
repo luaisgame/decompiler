@@ -7339,7 +7339,8 @@ async def handle_saveinstance(request):
     so decompiling never depends on an external repository. License kept at
     /saveinstance.LICENSE (AGPL-3.0 + upstream credit requirements)."""
     name = os.path.basename(request.path)
-    if name not in ("saveinstance.luau", "saveinstance.LICENSE"):
+    if name not in ("saveinstance.luau", "saveinstance.clip.luau",
+                    "saveinstance.LICENSE"):
         return web.Response(status=404)
     path = os.path.join(BASE_DIR, name)
     if not os.path.isfile(path):
@@ -7356,6 +7357,7 @@ async def start_local_server(host="127.0.0.1", port=5000):
     app = web.Application(client_max_size=64 * 1024 * 1024)
     app.router.add_post("/decompile", handle_post)
     app.router.add_get("/saveinstance.luau", handle_saveinstance)
+    app.router.add_get("/saveinstance.clip.luau", handle_saveinstance)
     app.router.add_get("/saveinstance.LICENSE", handle_saveinstance)
     app.router.add_get("/games.json", handle_games_json)
     app.router.add_get("/api/auth/login", handle_discord_auth)

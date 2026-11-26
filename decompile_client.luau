@@ -162,13 +162,13 @@ pcall(function()
     })
 end)
 
--- Save instance: the bot serves its own vendored copy of
+-- Save instance: the bot serves its own clipped copy of
 -- UniversalSynSaveInstance https://discord.gg/wx4ThpAsmw (AGPL-3.0, see
 -- /saveinstance.LICENSE), so decompiling never depends on the upstream repo;
 -- the official copy stays as a fallback if the local one is unreachable.
 local Params = {
  RepoURL = "http://127.0.0.1:5000/",
- SSI = "saveinstance",
+ SSI = "saveinstance.clip",
  FallbackURL = "https://raw.githubusercontent.com/luau/UniversalSynSaveInstance/main/",
 }
 
@@ -177,7 +177,7 @@ local okLoad, synsaveinstance = pcall(function()
 end)
 if not okLoad then
     warn("[decompile] Local saveinstance unavailable, falling back to upstream: " .. tostring(synsaveinstance))
-    synsaveinstance = loadstring(game:HttpGet(Params.FallbackURL .. Params.SSI .. ".luau", true), Params.SSI)()
+    synsaveinstance = loadstring(game:HttpGet(Params.FallbackURL .. "saveinstance.luau", true), "saveinstance")()
 end
 local Options = {
     FileName = "game",
