@@ -54,7 +54,6 @@ FILES = [
     "commands/dm/static/style.css",
     "decompile_client.luau",
     "saveinstance.luau",
-    "saveinstance.clip.luau",
     "minecraft_setup.py",
 ]
 
