@@ -2296,6 +2296,8 @@ def _mc_get_servers():
                     loader = f.read().strip()
             elif _mc_is_forge(path):
                 loader = "forge"
+            elif _mc_is_paper(path):
+                loader = "paper"
             version = "auto"
             version_file = os.path.join(path, ".mc_version")
             if os.path.exists(version_file):
@@ -2390,7 +2392,7 @@ def _mc_find_skin_url(server_dir, player_name):
 def _mc_change_server_version(server_dir, loader_type, version):
     from minecraft_setup import setup_server
     backup_dir = os.path.join(MC_DIR, f".{os.path.basename(server_dir)}-version-backup-{uuid.uuid4().hex}")
-    preserved = ["world", "mods", "config", "server.properties", "eula.txt", "server-icon.png"]
+    preserved = ["world", "mods", "config", "plugins", "server.properties", "eula.txt", "server-icon.png"]
     os.makedirs(backup_dir, exist_ok=True)
     ok = False
     try:
@@ -2608,7 +2610,7 @@ async def mc_api_backup_download(request):
 def _mc_find_jar(server_dir):
     for f in os.listdir(server_dir):
         if f.endswith(".jar") and "installer" not in f.lower():
-            if "forge" in f.lower() or "fabric" in f.lower() or "server" in f.lower():
+            if "forge" in f.lower() or "fabric" in f.lower() or "paper" in f.lower() or "server" in f.lower():
                 return os.path.join(server_dir, f)
     for f in os.listdir(server_dir):
         if f.endswith(".jar") and "installer" not in f.lower():
@@ -2622,6 +2624,13 @@ def _mc_is_forge(server_dir):
     if os.path.isdir(libs):
         return True
     return False
+
+def _mc_is_paper(server_dir):
+    for f in os.listdir(server_dir):
+        if f.endswith(".jar") and "paper" in f.lower() and "installer" not in f.lower():
+            return True
+    return False
+
 
 def _mc_detect_ver(server_dir):
     version_file = os.path.join(server_dir, ".mc_version")
@@ -3951,6 +3960,8 @@ async def mc_api_create(request):
     data = await request.json()
     name = data.get("name", "").strip()
     loader = data.get("loader", "fabric")
+    if loader not in ("fabric", "forge", "paper"):
+        return web.json_response({"error": "Invalid loader (fabric, forge, paper)"}, status=400)
     version = data.get("version", "").strip()
     if not name or not all(c.isalnum() or c in "-_" for c in name):
         return web.json_response({"error": "Invalid server name (alphanumeric, - _) only"}, status=400)
@@ -4813,7 +4824,7 @@ body{background:var(--mc-bg);color:var(--mc-txt);font-family:var(--mc-font);lett
     <div class="server-list" id="serverList"></div>
     <div class="sidebar-bottom" id="createServer" style="display:none">
       <input type="text" id="newServerName" placeholder="New server name..." onkeydown="if(event.key==='Enter')createServer()">
-      <select id="loaderSelect"><option value="fabric">Fabric</option><option value="forge">Forge</option></select>
+      <select id="loaderSelect"><option value="fabric">Fabric</option><option value="forge">Forge</option><option value="paper">Paper</option></select>
       <select id="versionSelect"><option value="">Latest version</option></select>
       <button onclick="createServer()">+ Create Server</button>
     </div>

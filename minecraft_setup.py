@@ -161,6 +161,42 @@ def _get_latest_forge(requested_mc_ver=None):
         return None, None
 
 
+def _get_latest_paper(requested_mc_ver=None):
+    try:
+        project_url = "https://fill.papermc.io/v3/projects/paper"
+        with urllib.request.urlopen(project_url, timeout=15) as resp:
+            project = json.loads(resp.read())
+        groups = project.get("versions", {})
+        all_versions = [v for group in groups.values() for v in group]
+        if requested_mc_ver:
+            mc_ver = requested_mc_ver if requested_mc_ver in all_versions else None
+        else:
+            stable = [v for v in all_versions if "-" not in v]
+            try:
+                stable = sorted(stable, key=lambda v: tuple(int(p) for p in v.split(".") if p.isdigit()))
+            except Exception:
+                pass
+            mc_ver = stable[-1] if stable else None
+        if not mc_ver:
+            print(f"[MINECRAFT] Paper does not support MC {requested_mc_ver}.")
+            return None, None, None
+        builds_url = f"https://fill.papermc.io/v3/projects/paper/versions/{mc_ver}/builds"
+        with urllib.request.urlopen(builds_url, timeout=15) as resp:
+            builds = json.loads(resp.read())
+        if not isinstance(builds, list) or not builds:
+            print(f"[MINECRAFT] No Paper builds found for MC {mc_ver}.")
+            return None, None, None
+        latest = builds[0]
+        download_url = (latest.get("downloads", {}) or {}).get("server:default", {}).get("url")
+        if not download_url:
+            print(f"[MINECRAFT] Paper build {latest.get('id')} for MC {mc_ver} has no download URL.")
+            return None, None, None
+        return mc_ver, latest.get("id"), download_url
+    except Exception as e:
+        print(f"[MINECRAFT] Failed to get Paper versions: {e}")
+        return None, None, None
+
+
 def _download_file(url, dest):
     try:
         urllib.request.urlretrieve(url, dest)
@@ -318,6 +354,33 @@ def _install_forge_server(server_dir, requested_mc_ver=None):
     return True, mc_ver
 
 
+def _install_paper_server(server_dir, requested_mc_ver=None):
+    print(f"[MINECRAFT] Installing Paper server in {server_dir}...")
+    mc_ver, build, download_url = _get_latest_paper(requested_mc_ver)
+    if not mc_ver:
+        print("[MINECRAFT] Could not determine a Paper version.")
+        return False, None
+    print(f"[MINECRAFT] MC {mc_ver}, Paper build {build}")
+
+    server_jar = os.path.join(server_dir, "server.jar")
+    if not _download_file(download_url, server_jar):
+        print("[MINECRAFT] Could not download Paper server JAR.")
+        return False, None
+
+    eula_path = os.path.join(server_dir, "eula.txt")
+    if not os.path.exists(eula_path):
+        with open(eula_path, "w") as f:
+            f.write("eula=true\n")
+
+    props_path = os.path.join(server_dir, "server.properties")
+    if not os.path.exists(props_path):
+        with open(props_path, "w") as f:
+            f.write("online-mode=true\nserver-port=25565\n")
+
+    print("[MINECRAFT] Paper server installed.")
+    return True, mc_ver
+
+
 def _install_viaversion(server_dir, mc_ver):
     mods_dir = os.path.join(server_dir, "mods")
     os.makedirs(mods_dir, exist_ok=True)
@@ -366,6 +429,8 @@ def setup_server(server_dir, loader_type="fabric", mc_version=None):
 
     if loader_type == "forge":
         ok, mc_ver = _install_forge_server(server_dir, mc_version)
+    elif loader_type == "paper":
+        ok, mc_ver = _install_paper_server(server_dir, mc_version)
     else:
         ok, mc_ver = _install_fabric_server(server_dir, mc_version)
     if not ok:
@@ -559,6 +624,11 @@ def run_minecraft_setup():
 
     for name in entries:
         server_dir = os.path.join(MC_DIR, name)
-        setup_server(server_dir)
+        loader_type = "fabric"
+        loader_file = os.path.join(server_dir, ".loader")
+        if os.path.exists(loader_file):
+            with open(loader_file, "r") as f:
+                loader_type = f.read().strip() or loader_type
+        setup_server(server_dir, loader_type)
 
     print("[MINECRAFT] Setup complete.")
